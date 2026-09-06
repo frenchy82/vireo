@@ -62,6 +62,21 @@ msgstr "Marquer comme non lu"
 msgid "Flag"
 msgstr "Signaler"
 
+msgid "Small"
+msgstr "Petit"
+
+msgid "Medium"
+msgstr "Moyen"
+
+msgid "Large"
+msgstr "Grand"
+
+msgid "Original Size"
+msgstr "Taille originale"
+
+msgid "Recompress to This Size on Send"
+msgstr "Recompresser à cette taille lors de l'envoi"
+
 msgid "Find in message (Ctrl+F)"
 msgstr "Rechercher dans le message (Ctrl+F)"
 
@@ -166,7 +181,7 @@ msgid "Undoing move…"
 msgstr "Annulation du déplacement…"
 
 msgid "No message with the ID {id} was found"
-msgstr ""
+msgstr "Aucun message portant l'identifiant {id} n'a été trouvé."
 
 msgid "No Drafts folder available for this account"
 msgstr "Aucun dossier Brouillons disponible pour ce compte"
@@ -1999,7 +2014,7 @@ msgstr "2 lignes"
 
 #, fuzzy
 msgid "3 lines"
-msgstr "2 lignes"
+msgstr "3 lignes"
 
 msgid "Shown in the dock, app grid and switcher, and by the tray icon."
 msgstr ""
