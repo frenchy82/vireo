@@ -1,15 +1,10 @@
 # Changelog
 
-<<<<<<< HEAD
-## 1.23.1-beta.1 — 2026-09-07
+## 1.23.2-beta.1 — 2026-09-07
 
-The beta channel catches up with stable 1.23.0: the same code, no
-beta-only changes. The beta build now ships the .Devel twin of the new
-default icon (GNOME's hazard stripe) as its own icon, with a scalable
-SVG installed alongside the PNGs.
+The beta channel catches up with stable 1.23.1: the same code, no
+beta-only changes.
 
-## 1.23.0 — 2026-09-07
-=======
 ## 1.23.1 — 2026-09-07
 
 Every move and delete on iCloud failed since 1.22.0; the fix, and the
@@ -38,8 +33,14 @@ server conversation in the log so the next such report explains itself.
   icon; `--purge` also removes the settings, cache and data directories
   (keyring passwords stay). Same `PREFIX` convention as the installer.
 
+## 1.23.1-beta.1 — 2026-09-07
 
->>>>>>> main
+The beta channel catches up with stable 1.23.0: the same code, no
+beta-only changes. The beta build now ships the .Devel twin of the new
+default icon (GNOME's hazard stripe) as its own icon, with a scalable
+SVG installed alongside the PNGs.
+
+## 1.23.0 — 2026-09-07
 
 Tags, swipe actions on message rows, a redrawn icon set with a new
 default, a log export for bug reports, four fixes, and the French

@@ -2,11 +2,10 @@
 
 Vireo is a clean, fast, GNOME-native email client built with Rust and libadwaita for Wayland desktops. Privacy-first: no telemetry, remote content blocked by default, and credentials kept in the system keyring.
 
-<<<<<<< HEAD
-## What's new in 1.23.1-beta.1
+## What's new in 1.23.2-beta.1
 
-The beta channel catches up with stable 1.23.0: everything in the next section. The beta's own icon is now the development-build version of the new default, with GNOME's hazard stripe.
-=======
+The beta channel catches up with stable 1.23.1: everything in the next section.
+
 ## What's new in 1.23.1
 
 **iCloud deletes and moves work again.** Since 1.22.0, deleting, archiving or moving a message on an iCloud account failed with "Parse Error": iCloud does not announce the MOVE command, the fallback path sent the Trash folder's name "Deleted Messages" without quotes, and the server refused it. The name is quoted now. If you use iCloud, this is the update to take.
@@ -14,7 +13,10 @@ The beta channel catches up with stable 1.23.0: everything in the next section. 
 **The server conversation in the log.** The log now records every command Vireo sends to a mail server and the server's answer, for IMAP, Microsoft 365, POP3 and outgoing mail, without message contents or passwords. When something fails, "Export log" in Settings shows exactly what was asked and what came back.
 
 **An uninstall script.** For source installs, `./uninstall.sh` removes what `install.sh` put in place; `--purge` also clears settings and the mail cache. Contributed by [Isaac](https://github.com/thecalamityjoe87) (#142).
->>>>>>> main
+
+## What's new in 1.23.1-beta.1
+
+The beta channel catches up with stable 1.23.0: everything in the next section. The beta's own icon is now the development-build version of the new default, with GNOME's hazard stripe.
 
 ## What's new in 1.23.0
 
