@@ -127,6 +127,9 @@ pub struct AccountsWindow {
     /// Filter rules (#47), managed on this tab.
     filter_rules: Vec<crate::config::FilterRule>,
     filters_list: Option<gtk::ListBox>,
+    /// Tags (#71), managed on this tab too — the rules' "Tag with" names them.
+    tags: Vec<crate::config::Tag>,
+    tags_list: Option<gtk::ListBox>,
     /// Paths behind the currently-open editor's folder combos (index 0 in the
     /// combo is "Automatic"; entry N here is combo index N + 1).
     folder_paths: Vec<String>,
@@ -239,6 +242,12 @@ pub enum AccountsInput {
     /// Toggle whether a rule's folder is listed under All Inboxes.
     SetFilterUnified(usize, bool),
     FilterAdded(crate::config::FilterRule),
+    /// Tags (#71): the dialog, and what it hands back.
+    AddTag,
+    EditTag(usize),
+    RemoveTag(usize),
+    TagAdded(crate::config::Tag),
+    TagEdited(usize, crate::config::Tag),
 }
 
 #[derive(Debug)]
@@ -264,6 +273,7 @@ pub enum AccountsOutput {
     AddBlacklist(String),
     RemoveBlacklist(String),
     SetFilters(Vec<crate::config::FilterRule>),
+    SetTags(Vec<crate::config::Tag>),
 }
 
 /// Whether a GOA account's mail runs over the Microsoft Graph API: the
@@ -311,6 +321,7 @@ pub struct AccountsInit {
     pub allowed_senders: Vec<String>,
     pub blacklist: Vec<String>,
     pub filters: Vec<crate::config::FilterRule>,
+    pub tags: Vec<crate::config::Tag>,
 }
 
 #[relm4::component(pub)]
@@ -380,13 +391,36 @@ impl Component for AccountsWindow {
                                 },
                             },
 
+                            // Tags (#71): a name and colour per keyword.
+                            add = &adw::PreferencesGroup {
+                                set_title: &i18n("Tags"),
+                                set_description: Some(
+                                    i18n("Label messages with one or more coloured tags. \
+                                     Tags are stored on the mail server as IMAP keywords, \
+                                     so Thunderbird and other clients show the same tags.").as_str()
+                                ),
+                                #[wrap(Some)]
+                                set_header_suffix = &gtk::Button {
+                                    set_label: &i18n("Add Tag…"),
+                                    set_valign: gtk::Align::Center,
+                                    add_css_class: "flat",
+                                    connect_clicked => AccountsInput::AddTag,
+                                },
+
+                                #[name = "tags_list"]
+                                gtk::ListBox {
+                                    add_css_class: "boxed-list",
+                                    set_selection_mode: gtk::SelectionMode::None,
+                                },
+                            },
+
                             // Mail hygiene (moved from Settings): filters,
                             // the remote-content allow list, the blocklist.
                             add = &adw::PreferencesGroup {
                                 set_title: &i18n("Filters"),
                                 set_description: Some(
-                                    i18n("File incoming mail into folders automatically, by \
-                                     sender, subject or recipients. Applied to each \
+                                    i18n("File incoming mail into folders or tag it automatically, \
+                                     by sender, subject or recipients. Applied to each \
                                      account's Inbox as Vireo syncs it.").as_str()
                                 ),
                                 #[wrap(Some)]
@@ -902,6 +936,8 @@ impl Component for AccountsWindow {
             blacklist_addrs: Vec::new(),
             filter_rules: init.filters,
             filters_list: None,
+            tags: init.tags,
+            tags_list: None,
         };
         {
             let mut guard = model.senders.guard();
@@ -927,6 +963,8 @@ impl Component for AccountsWindow {
         let widgets = view_output!();
         model.filters_list = Some(widgets.filters_list.clone());
         model.rebuild_filter_rows(&sender);
+        model.tags_list = Some(widgets.tags_list.clone());
+        model.rebuild_tag_rows(&sender);
         widgets.sig_holder.append(&model.sig_editor.widget);
         model.rebuild_account_list(&widgets.accounts_list, &sender);
         model.rebuild_goa_list(&widgets.goa_list, &sender);
@@ -1722,6 +1760,37 @@ impl Component for AccountsWindow {
                 self.rebuild_filter_rows(&sender);
                 let _ = sender.output(AccountsOutput::SetFilters(self.filter_rules.clone()));
             }
+            AccountsInput::AddTag => self.open_tag_dialog(&sender, None),
+            AccountsInput::EditTag(i) => {
+                if let Some(tag) = self.tags.get(i).cloned() {
+                    self.open_tag_dialog(&sender, Some((i, tag)));
+                }
+            }
+            AccountsInput::RemoveTag(i) => {
+                if i < self.tags.len() {
+                    self.tags.remove(i);
+                    self.rebuild_tag_rows(&sender);
+                    // The rules name tags by keyword; a rule whose tag is gone
+                    // shows the bare keyword until it is edited.
+                    self.rebuild_filter_rows(&sender);
+                    let _ = sender.output(AccountsOutput::SetTags(self.tags.clone()));
+                }
+            }
+            AccountsInput::TagAdded(tag) => {
+                self.tags.push(tag);
+                self.rebuild_tag_rows(&sender);
+                let _ = sender.output(AccountsOutput::SetTags(self.tags.clone()));
+            }
+            AccountsInput::TagEdited(i, tag) => {
+                if let Some(slot) = self.tags.get_mut(i) {
+                    if *slot != tag {
+                        *slot = tag;
+                        self.rebuild_tag_rows(&sender);
+                        self.rebuild_filter_rows(&sender);
+                        let _ = sender.output(AccountsOutput::SetTags(self.tags.clone()));
+                    }
+                }
+            }
             AccountsInput::SetFilterCounted(i, on) => {
                 if let Some(r) = self.filter_rules.get_mut(i) {
                     if r.count_unread != on {
@@ -1997,10 +2066,15 @@ impl AccountsWindow {
     /// account, whose folders aren't known yet): "Automatic" plus the account's
     /// live folder list, with any saved assignment selected.
     fn populate_folder_combos(&mut self, widgets: &AccountsWindowWidgets, acc: Option<&AccountConfig>) {
-        let choices = acc
+        // The Inbox is never offered as a role (#136): giving it one took
+        // its own role away, and the account lost its inbox.
+        let choices: Vec<(String, String)> = acc
             .and_then(|a| self.folders_by_email.get(&a.email))
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(path, _)| !path.eq_ignore_ascii_case("INBOX"))
+            .collect();
         let mut labels: Vec<&str> = vec!["Automatic"];
         labels.extend(choices.iter().map(|(_, display)| display.as_str()));
         self.folder_paths = choices.iter().map(|(path, _)| path.clone()).collect();
@@ -2705,13 +2779,27 @@ impl AccountsWindow {
                 Self::match_label(r.matcher),
                 r.value,
             ));
-            let dest = self
-                .folders_by_email
-                .get(&r.account_email)
-                .and_then(|fs| fs.iter().find(|(p, _)| *p == r.dest_path))
-                .map(|(_, name)| name.clone())
-                .unwrap_or_else(|| r.dest_path.clone());
-            row.set_subtitle(&format!("{} \u{2192} {}", r.account_email, dest));
+            // "account → folder", "account, tagged Work", or both (#71).
+            let mut subtitle = r.account_email.clone();
+            if !r.dest_path.is_empty() {
+                let dest = self
+                    .folders_by_email
+                    .get(&r.account_email)
+                    .and_then(|fs| fs.iter().find(|(p, _)| *p == r.dest_path))
+                    .map(|(_, name)| name.clone())
+                    .unwrap_or_else(|| r.dest_path.clone());
+                subtitle.push_str(&format!(" \u{2192} {dest}"));
+            }
+            if !r.tag.is_empty() {
+                let name = self
+                    .tags
+                    .iter()
+                    .find(|t| t.keyword.eq_ignore_ascii_case(&r.tag))
+                    .map(|t| t.name.clone())
+                    .unwrap_or_else(|| r.tag.clone());
+                subtitle.push_str(&i18n_f(", tagged {tag}", &[("tag", &name)]));
+            }
+            row.set_subtitle(&subtitle);
             // The rule's two switches stacked in a narrow two-column grid —
             // labels right-aligned against their switches — so the row's
             // title keeps its width: "Count unread" (whether the folder's
@@ -2722,6 +2810,9 @@ impl AccountsWindow {
             grid.set_column_spacing(8);
             grid.set_row_spacing(4);
             grid.set_valign(gtk::Align::Center);
+            // Both switches are about the destination folder: a rule that
+            // only tags has none.
+            grid.set_visible(!r.dest_path.is_empty());
             let mut place = |line: i32, text: &str, active: bool, tip: &str| -> gtk::Switch {
                 let label = gtk::Label::new(Some(text));
                 label.set_halign(gtk::Align::End);
@@ -2769,6 +2860,186 @@ impl AccountsWindow {
             row.add_suffix(&rm);
             list.append(&row);
         }
+    }
+
+    /// The Tags list (#71): a row per tag — its colour as a disc, its name,
+    /// its keyword — activating to edit, with a remove button.
+    fn rebuild_tag_rows(&self, sender: &ComponentSender<Self>) {
+        let Some(list) = &self.tags_list else { return };
+        while let Some(row) = list.first_child() {
+            list.remove(&row);
+        }
+        list.set_visible(!self.tags.is_empty());
+        for (i, t) in self.tags.iter().enumerate() {
+            let row = adw::ActionRow::new();
+            row.set_activatable(true);
+            let s = sender.clone();
+            row.connect_activated(move |_| s.input(AccountsInput::EditTag(i)));
+            row.set_title(&gtk::glib::markup_escape_text(&t.name));
+            row.set_subtitle(&gtk::glib::markup_escape_text(&t.keyword));
+            row.add_prefix(&crate::ui::context_menu::swatch_widget(&t.color, true));
+            let edit = gtk::Image::from_icon_name("co.hyprlab.Vireo-document-edit-symbolic");
+            edit.set_margin_start(6);
+            row.add_suffix(&edit);
+            let rm = gtk::Button::from_icon_name("co.hyprlab.Vireo-user-trash-symbolic");
+            rm.add_css_class("flat");
+            rm.set_valign(gtk::Align::Center);
+            rm.set_tooltip_text(Some(i18n("Remove tag").as_str()));
+            let s = sender.clone();
+            rm.connect_clicked(move |_| s.input(AccountsInput::RemoveTag(i)));
+            row.add_suffix(&rm);
+            list.append(&row);
+        }
+    }
+
+    /// The tag dialog (#71): name, colour, keyword. The keyword follows the
+    /// name until the user edits it; editing an existing tag keeps its
+    /// keyword unless changed, since the messages carry the keyword, not
+    /// the name.
+    fn open_tag_dialog(
+        &self,
+        sender: &ComponentSender<Self>,
+        edit: Option<(usize, crate::config::Tag)>,
+    ) {
+        use crate::config::{Tag, TAG_COLORS};
+        let parent = relm4::main_application().active_window();
+        let (title, verb) = if edit.is_some() {
+            (i18n("Edit Tag"), i18n("Save"))
+        } else {
+            (i18n("Add Tag"), i18n("Add Tag"))
+        };
+        let dialog = adw::MessageDialog::new(parent.as_ref(), Some(&title), None);
+        dialog.add_response("cancel", &i18n("Cancel"));
+        dialog.add_response("add", &verb);
+        dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("add"));
+
+        let form = gtk::ListBox::new();
+        form.add_css_class("boxed-list");
+        form.set_selection_mode(gtk::SelectionMode::None);
+
+        let name_row = adw::EntryRow::new();
+        name_row.set_title(&i18n("Name"));
+
+        let keyword_row = adw::EntryRow::new();
+        keyword_row.set_title(&i18n("Keyword"));
+        keyword_row.set_tooltip_text(Some(
+            i18n("How the tag is stored on the server: letters, digits and most punctuation, \
+                  no spaces. Thunderbird's built-in tags are $label1 to $label5.")
+                .as_str(),
+        ));
+
+        // The keyword follows the name until it is typed into by hand. The
+        // follow is done under a guard: set_text empties the field before
+        // refilling it, and each step fires `changed`, so without the guard
+        // the empty step read as hand-editing after the second letter.
+        let keyword_touched = std::rc::Rc::new(std::cell::Cell::new(edit.is_some()));
+        let syncing = std::rc::Rc::new(std::cell::Cell::new(false));
+        {
+            let keyword_row = keyword_row.clone();
+            let touched = keyword_touched.clone();
+            let syncing = syncing.clone();
+            name_row.connect_changed(move |row| {
+                if !touched.get() {
+                    syncing.set(true);
+                    keyword_row.set_text(&Tag::keyword_for(&row.text()));
+                    syncing.set(false);
+                }
+            });
+        }
+        {
+            let touched = keyword_touched.clone();
+            let syncing = syncing.clone();
+            keyword_row.connect_changed(move |_| {
+                if !syncing.get() {
+                    touched.set(true);
+                }
+            });
+        }
+
+        // The colour: one disc per palette entry on a line of its own under
+        // a caption (beside a title, eight discs left the title wrapping one
+        // letter per line in the dialog's width). Toggle buttons in one
+        // group behave as radios; the pressed one is the choice.
+        let color_row = gtk::ListBoxRow::new();
+        color_row.set_activatable(false);
+        color_row.set_selectable(false);
+        let color_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        color_box.set_margin_top(10);
+        color_box.set_margin_bottom(10);
+        color_box.set_margin_start(12);
+        color_box.set_margin_end(12);
+        let color_label = gtk::Label::new(Some(i18n("Colour").as_str()));
+        color_label.set_halign(gtk::Align::Start);
+        color_label.add_css_class("caption");
+        color_label.add_css_class("dim-label");
+        color_box.append(&color_label);
+        let swatches = gtk::FlowBox::new();
+        swatches.set_selection_mode(gtk::SelectionMode::None);
+        swatches.set_homogeneous(true);
+        swatches.set_min_children_per_line(4);
+        swatches.set_max_children_per_line(8);
+        swatches.set_column_spacing(4);
+        swatches.set_row_spacing(4);
+        swatches.set_halign(gtk::Align::Start);
+        let chosen = std::rc::Rc::new(std::cell::RefCell::new(
+            edit.as_ref().map(|(_, t)| t.color.clone()).unwrap_or_else(|| TAG_COLORS[0].to_string()),
+        ));
+        let mut first: Option<gtk::ToggleButton> = None;
+        for color in TAG_COLORS {
+            let toggle = gtk::ToggleButton::new();
+            toggle.add_css_class("flat");
+            toggle.add_css_class("circular");
+            toggle.set_child(Some(&crate::ui::context_menu::swatch_widget(color, true)));
+            toggle.set_tooltip_text(Some(color));
+            if let Some(f) = &first {
+                toggle.set_group(Some(f));
+            } else {
+                first = Some(toggle.clone());
+            }
+            toggle.set_active(chosen.borrow().eq_ignore_ascii_case(color));
+            let chosen = chosen.clone();
+            let color = color.to_string();
+            toggle.connect_toggled(move |t| {
+                if t.is_active() {
+                    *chosen.borrow_mut() = color.clone();
+                }
+            });
+            swatches.insert(&toggle, -1);
+        }
+        color_box.append(&swatches);
+        color_row.set_child(Some(&color_box));
+
+        let edit_index = edit.as_ref().map(|(i, _)| *i);
+        if let Some((_, tag)) = &edit {
+            name_row.set_text(&tag.name);
+            keyword_row.set_text(&tag.keyword);
+        }
+
+        form.append(&name_row);
+        form.append(&color_row);
+        form.append(&keyword_row);
+        dialog.set_extra_child(Some(&form));
+
+        let s = sender.clone();
+        dialog.connect_response(Some("add"), move |_, _| {
+            let name = name_row.text().trim().to_string();
+            if name.is_empty() {
+                return;
+            }
+            // A keyword the server would refuse falls back to the derived one.
+            let typed = keyword_row.text().trim().to_string();
+            let mut keyword = if Tag::valid_keyword(&typed) { typed } else { Tag::keyword_for(&name) };
+            if keyword.is_empty() {
+                keyword = "Tag".to_string();
+            }
+            let tag = Tag { name, keyword, color: chosen.borrow().clone() };
+            s.input(match edit_index {
+                Some(i) => AccountsInput::TagEdited(i, tag),
+                None => AccountsInput::TagAdded(tag),
+            });
+        });
+        dialog.present();
     }
 
     /// The filter dialog: account, field, match, value, destination, and
@@ -2828,6 +3099,7 @@ impl AccountsWindow {
 
         let dest_row = adw::ComboRow::new();
         dest_row.set_title(&i18n("Move to"));
+        dest_row.set_subtitle(&i18n("Where matching mail is filed; or leave it in the Inbox and only tag it"));
         // The destination list follows the chosen account.
         let folders = std::rc::Rc::new(self.folders_by_email.clone());
         let emails_rc = std::rc::Rc::new(emails.clone());
@@ -2841,15 +3113,31 @@ impl AccountsWindow {
                 let empty = Vec::new();
                 let list =
                     emails_rc.get(idx).and_then(|e| folders.get(e)).unwrap_or(&empty);
-                let names: Vec<&str> = list.iter().map(|(_, n)| n.as_str()).collect();
+                // Entry 0 files nowhere (a tag-only rule, #71): its path is "".
+                let stay = i18n("Leave in Inbox");
+                let mut names: Vec<&str> = vec![stay.as_str()];
+                names.extend(list.iter().map(|(_, n)| n.as_str()));
                 dest_row.set_model(Some(&gtk::StringList::new(&names)));
-                *dest_paths.borrow_mut() = list.iter().map(|(p, _)| p.clone()).collect();
+                let mut paths = vec![String::new()];
+                paths.extend(list.iter().map(|(p, _)| p.clone()));
+                *dest_paths.borrow_mut() = paths;
             }
         };
         fill_dest(0);
         {
             let fill_dest = fill_dest.clone();
             account_row.connect_selected_notify(move |row| fill_dest(row.selected() as usize));
+        }
+
+        // Tag with (#71): none, or one of the tags.
+        let tag_row = adw::ComboRow::new();
+        tag_row.set_title(&i18n("Tag with"));
+        let tags = self.tags.clone();
+        {
+            let none = i18n("None");
+            let mut names: Vec<&str> = vec![none.as_str()];
+            names.extend(tags.iter().map(|t| t.name.as_str()));
+            tag_row.set_model(Some(&gtk::StringList::new(&names)));
         }
 
         // Filed mail is still new mail: counted by default, so the unread
@@ -2896,6 +3184,9 @@ impl AccountsWindow {
             if let Some(idx) = dest_paths.borrow().iter().position(|p| *p == rule.dest_path) {
                 dest_row.set_selected(idx as u32);
             }
+            if let Some(idx) = tags.iter().position(|t| t.keyword.eq_ignore_ascii_case(&rule.tag)) {
+                tag_row.set_selected(idx as u32 + 1);
+            }
             count_row.set_active(rule.count_unread);
             unified_row.set_active(rule.show_in_unified);
         }
@@ -2905,6 +3196,7 @@ impl AccountsWindow {
         form.append(&match_row);
         form.append(&value_row);
         form.append(&dest_row);
+        form.append(&tag_row);
         form.append(&count_row);
         form.append(&unified_row);
         dialog.set_extra_child(Some(&form));
@@ -2919,7 +3211,12 @@ impl AccountsWindow {
             ) else {
                 return;
             };
-            if value.is_empty() {
+            let tag = match tag_row.selected() {
+                0 => String::new(),
+                i => tags.get(i as usize - 1).map(|t| t.keyword.clone()).unwrap_or_default(),
+            };
+            // A rule needs something to match and something to do.
+            if value.is_empty() || (dest.is_empty() && tag.is_empty()) {
                 return;
             }
             let rule = FilterRule {
@@ -2938,6 +3235,7 @@ impl AccountsWindow {
                 },
                 value,
                 dest_path: dest.clone(),
+                tag,
                 count_unread: count_row.is_active(),
                 show_in_unified: unified_row.is_active(),
             };

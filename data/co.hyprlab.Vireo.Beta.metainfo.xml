@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.23.1-beta.1" date="2026-09-07" type="development">
+
+      <description><p>The beta channel catches up with stable 1.23.0: tags, swipe actions, the redrawn icon set, the log export, and four fixes.</p></description>
+
+    </release>
     <release version="1.22.1-beta.1" date="2026-09-06" type="development">
 
       <description><p>The beta channel catches up with stable 1.22.0: Ctrl+C copies from the reader, and the latest French corrections.</p></description>

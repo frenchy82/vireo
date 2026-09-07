@@ -737,6 +737,13 @@ struct PrivacyFile {
     /// needing the ⋯ click.
     #[serde(default)]
     list_palette_hover: bool,
+    /// Whether message rows take a sideways swipe at all (#92, PR #135).
+    #[serde(default = "default_swipe_enabled")]
+    swipe_enabled: bool,
+    /// Swap the message list's swipe-gesture sides: off (default) swipes
+    /// left to delete and right to archive, on reverses them.
+    #[serde(default)]
+    swipe_reversed: bool,
     /// Whether "New message" opens inline over the reading pane (like a
     /// reply) rather than in its own window.
     #[serde(default = "default_compose_inline")]
@@ -804,6 +811,13 @@ struct PrivacyFile {
     /// section of its own. Off hides that section whatever the rules say.
     #[serde(default = "default_unified_filtered")]
     unified_filtered: bool,
+    /// Where the Filtered Folders section sits (#71 follow-up): inside All
+    /// Inboxes, or in the scrolling sidebar above or below the accounts.
+    #[serde(default)]
+    filtered_placement: SectionPlacement,
+    /// Where the Tags section sits, the same three choices.
+    #[serde(default)]
+    tags_placement: SectionPlacement,
     /// Whether the sidebar's disclosure chevrons (All Inboxes, account
     /// headers) LEAD their rows; off puts them back at the row's end.
     #[serde(default = "default_chevrons_left")]
@@ -935,6 +949,8 @@ impl Default for PrivacyFile {
             show_unified: default_show_unified(),
             unified_chip: default_unified_chip(),
             unified_filtered: default_unified_filtered(),
+            filtered_placement: SectionPlacement::default(),
+            tags_placement: SectionPlacement::default(),
             chevrons_left: default_chevrons_left(),
             console_mode: false,
             read_mark: ReadMark::default(),
@@ -964,6 +980,8 @@ impl Default for PrivacyFile {
             card_actions_auto: default_card_actions_auto(),
             list_palette: default_list_palette(),
             list_palette_hover: false,
+            swipe_enabled: default_swipe_enabled(),
+            swipe_reversed: false,
             compose_inline: default_compose_inline(),
             paste_plain: default_paste_plain(),
             spellcheck: default_spellcheck(),
@@ -1081,6 +1099,28 @@ pub fn load_unified_filtered() -> bool {
     load_privacy().unified_filtered
 }
 
+pub fn load_filtered_placement() -> SectionPlacement {
+    load_privacy().filtered_placement
+}
+
+pub fn load_tags_placement() -> SectionPlacement {
+    load_privacy().tags_placement
+}
+
+/// Where a sidebar section (Filtered Folders, Tags) is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SectionPlacement {
+    /// Inside the All Inboxes block, folding away with it. With All
+    /// Inboxes hidden (a single account) this reads as `AboveAccounts`.
+    #[default]
+    AllInboxes,
+    /// In the scrolling sidebar, above the first account.
+    AboveAccounts,
+    /// In the scrolling sidebar, after the last account.
+    BelowAccounts,
+}
+
 pub fn load_chevrons_left() -> bool {
     load_privacy().chevrons_left
 }
@@ -1117,8 +1157,15 @@ pub struct FilterRule {
     pub field: FilterField,
     pub matcher: FilterMatch,
     pub value: String,
-    /// Destination folder path on the account.
+    /// Destination folder path on the account. Empty leaves the mail where it
+    /// is (a rule that only tags, #71).
+    #[serde(default)]
     pub dest_path: String,
+    /// The keyword of a [`Tag`] to put on matching mail (#71); empty tags
+    /// nothing. Tagging and filing combine: the tag goes on first, and the
+    /// move carries it along.
+    #[serde(default)]
+    pub tag: String,
     /// Whether the destination folder's unread mail counts toward the unread
     /// total (the All Inboxes chip, the tray icon and its menu, the
     /// Background Apps status), as inbox mail does (#116). Trash and Junk
@@ -1208,6 +1255,102 @@ pub fn save_filters(rules: &[FilterRule]) {
     }
 }
 
+/// A tag (#71): a name and a colour for one IMAP keyword. Keywords are the
+/// standard's own per-message user flags, kept on the server beside `\Seen`
+/// and `\Flagged`, so a tag set here is the same tag Thunderbird, Apple Mail
+/// or a webmail shows — and theirs show here once a tag names their keyword
+/// (Thunderbird's built-in five are `$label1`…`$label5`). Microsoft 365
+/// stores them as categories; POP3 and servers that refuse custom keywords
+/// keep them in Vireo's own cache instead.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Tag {
+    /// What the user sees.
+    pub name: String,
+    /// The keyword the tag is stored as: an IMAP atom (no spaces, quotes,
+    /// parentheses, brackets, backslashes or non-ASCII), case-insensitive.
+    pub keyword: String,
+    /// `#rrggbb`.
+    pub color: String,
+}
+
+/// The tag palette, GNOME's colour set at its middle strength.
+pub const TAG_COLORS: &[&str] = &[
+    "#1c71d8", "#2ec27e", "#f5c211", "#e66100", "#c01c28", "#813d9c", "#865e3c", "#77767b",
+];
+
+impl Tag {
+    /// The characters an IMAP keyword (an atom) may hold.
+    pub fn is_keyword_char(c: char) -> bool {
+        c.is_ascii_graphic() && !matches!(c, '(' | ')' | '{' | '}' | '"' | '\\' | '%' | '*' | ']' | '[')
+    }
+
+    /// Whether `s` can be sent to a server as a keyword.
+    pub fn valid_keyword(s: &str) -> bool {
+        !s.is_empty() && s.chars().all(Self::is_keyword_char)
+    }
+
+    /// The keyword a tag named `name` gets unless the user picks one: the
+    /// name with spaces turned to underscores and anything an atom cannot
+    /// carry dropped ("To Do" → `To_Do`, "Réunion" → `Runion`).
+    pub fn keyword_for(name: &str) -> String {
+        name.trim()
+            .chars()
+            .map(|c| if c == ' ' { '_' } else { c })
+            .filter(|c| Self::is_keyword_char(*c))
+            .collect()
+    }
+
+    /// The CSS class carrying this tag's colour (see the app's tag stylesheet):
+    /// the keyword reduced to what a class name may hold.
+    pub fn css_class(&self) -> String {
+        tag_css_class(&self.keyword)
+    }
+}
+
+/// The CSS class for a keyword's colour: `tag-` plus the keyword lowercased,
+/// with every character a class name can't carry turned into its code so two
+/// keywords never share a class.
+pub fn tag_css_class(keyword: &str) -> String {
+    let mut out = String::from("tag-");
+    for c in keyword.to_ascii_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else {
+            out.push_str(&format!("_{:x}", c as u32));
+        }
+    }
+    out
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct TagsFile {
+    #[serde(default)]
+    tags: Vec<Tag>,
+}
+
+fn tags_path() -> Option<PathBuf> {
+    Some(config_base()?.join("vireo").join("tags.toml"))
+}
+
+pub fn load_tags() -> Vec<Tag> {
+    let Some(path) = tags_path() else { return Vec::new() };
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    toml::from_str::<TagsFile>(&text).map(|f| f.tags).unwrap_or_default()
+}
+
+pub fn save_tags(tags: &[Tag]) {
+    let Some(path) = tags_path() else { return };
+    let file = TagsFile { tags: tags.to_vec() };
+    match toml::to_string_pretty(&file) {
+        Ok(toml) => {
+            if let Err(e) = write_private(&path, &toml) {
+                tracing::warn!("could not save tags: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("could not serialize tags: {e}"),
+    }
+}
+
 /// A portable settings bundle (#50): every configuration file Vireo keeps —
 /// preferences, accounts (colours, emoji, labels, aliases, folder roles and
 /// per-account push included), filters, sidebar layout, and window/pane
@@ -1221,6 +1364,8 @@ struct SettingsBundle {
     accounts: Vec<AccountConfig>,
     #[serde(default)]
     filters: Vec<FilterRule>,
+    #[serde(default)]
+    tags: Vec<Tag>,
     #[serde(default)]
     sidebar: Option<SidebarFile>,
     #[serde(default)]
@@ -1253,6 +1398,7 @@ pub fn export_bundle() -> Result<String, String> {
         privacy: load_privacy(),
         accounts: load().unwrap_or_default(),
         filters: load_filters(),
+        tags: load_tags(),
         sidebar: read_file_struct(sidebar_path()),
         window: read_file_struct(window_path()),
         state: read_file_struct(state_path()),
@@ -1273,6 +1419,7 @@ pub fn import_bundle(text: &str) -> Result<usize, String> {
     write_private(&path, &toml).map_err(|e| e.to_string())?;
     save(&bundle.accounts).map_err(|e| e.to_string())?;
     save_filters(&bundle.filters);
+    save_tags(&bundle.tags);
     write_file_struct(sidebar_path(), &bundle.sidebar)?;
     write_file_struct(window_path(), &bundle.window)?;
     write_file_struct(state_path(), &bundle.state)?;
@@ -1339,6 +1486,20 @@ pub fn load_list_palette() -> bool {
 /// Whether the list's Actions Palette opens on row hover (no ⋯ click).
 pub fn load_list_palette_hover() -> bool {
     load_privacy().list_palette_hover
+}
+
+fn default_swipe_enabled() -> bool {
+    true
+}
+
+/// Whether message rows take a sideways swipe (archive / delete).
+pub fn load_swipe_enabled() -> bool {
+    load_privacy().swipe_enabled
+}
+
+/// Whether the message list's swipe-gesture sides are swapped.
+pub fn load_swipe_reversed() -> bool {
+    load_privacy().swipe_reversed
 }
 
 /// Whether "New message" composes inline over the reading pane.
@@ -1441,6 +1602,8 @@ pub fn save_privacy(
     card_actions_auto: bool,
     list_palette: bool,
     list_palette_hover: bool,
+    swipe_enabled: bool,
+    swipe_reversed: bool,
     compose_inline: bool,
     paste_plain: bool,
     spellcheck: bool,
@@ -1458,6 +1621,8 @@ pub fn save_privacy(
     show_unified: bool,
     unified_chip: bool,
     unified_filtered: bool,
+    filtered_placement: SectionPlacement,
+    tags_placement: SectionPlacement,
     chevrons_left: bool,
     console_mode: bool,
     read_mark: ReadMark,
@@ -1497,6 +1662,8 @@ pub fn save_privacy(
         card_actions_auto,
         list_palette,
         list_palette_hover,
+        swipe_enabled,
+        swipe_reversed,
         compose_inline,
         paste_plain,
         spellcheck,
@@ -1514,6 +1681,8 @@ pub fn save_privacy(
         show_unified,
         unified_chip,
         unified_filtered,
+        filtered_placement,
+        tags_placement,
         chevrons_left,
         console_mode,
         read_mark,
@@ -1711,6 +1880,12 @@ struct StateFile {
     /// restart right after the wizard, for the app icon, must not loop.
     #[serde(default)]
     wizard_completed: bool,
+    /// The icon generation whose default has been asserted over the stored
+    /// choice (see `app_icon::ICON_GENERATION`): a release that brings a new
+    /// authoritative icon bumps the constant, and the first start on it puts
+    /// that icon on every install once, whatever was chosen before.
+    #[serde(default)]
+    app_icon_generation: u32,
     /// The chosen app icon (an id from `app_icon::catalog`). Absent until
     /// the first start of a build that offers the choice settles it — see
     /// `app_icon::init_on_startup`.
@@ -1781,6 +1956,16 @@ pub fn mark_wizard_completed() {
 /// The chosen app icon id, if one has been settled.
 pub fn load_app_icon() -> Option<String> {
     load_state().app_icon.filter(|s| !s.is_empty())
+}
+
+pub fn load_app_icon_generation() -> u32 {
+    load_state().app_icon_generation
+}
+
+pub fn save_app_icon_generation(generation: u32) {
+    let mut s = load_state();
+    s.app_icon_generation = generation;
+    save_state(&s);
 }
 
 pub fn save_app_icon(id: &str) {
@@ -2083,9 +2268,22 @@ mod filter_tests {
             matcher,
             value: value.into(),
             dest_path: "Archive".into(),
+            tag: String::new(),
             count_unread: true,
             show_in_unified: false,
         }
+    }
+
+    #[test]
+    fn tag_keywords_derive_from_names() {
+        assert_eq!(Tag::keyword_for("To Do"), "To_Do");
+        assert_eq!(Tag::keyword_for("  Work "), "Work");
+        assert_eq!(Tag::keyword_for("Réunion (lundi)"), "Runion_lundi");
+        assert!(Tag::valid_keyword("$label1"));
+        assert!(!Tag::valid_keyword("has space"));
+        assert!(!Tag::valid_keyword(""));
+        assert_eq!(tag_css_class("$label1"), "tag-_24label1");
+        assert_eq!(tag_css_class("Work"), "tag-work");
     }
 
     #[test]
@@ -2149,6 +2347,7 @@ mod filter_tests {
             privacy: PrivacyFile::default(),
             accounts: vec![acc],
             filters: Vec::new(),
+            tags: Vec::new(),
             sidebar: None,
             window: None,
             state: None,

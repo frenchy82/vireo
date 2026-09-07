@@ -41,6 +41,10 @@ pub struct PrefInit {
     pub list_palette: bool,
     /// The list's Actions Palette opens on row hover (no ⋯ click).
     pub list_palette_hover: bool,
+    /// Message rows take a sideways swipe to archive / delete (#92).
+    pub swipe_enabled: bool,
+    /// The message list's swipe-gesture sides are swapped (#swipe).
+    pub swipe_reversed: bool,
     /// "New message" composes inline over the reading pane (vs a window).
     pub compose_inline: bool,
     pub paste_plain: bool,
@@ -55,6 +59,8 @@ pub struct PrefInit {
     pub show_unified: bool,
     pub unified_chip: bool,
     pub unified_filtered: bool,
+    pub filtered_placement: crate::config::SectionPlacement,
+    pub tags_placement: crate::config::SectionPlacement,
     pub chevrons_left: bool,
     pub console_mode: bool,
     pub read_mark: crate::config::ReadMark,
@@ -168,6 +174,8 @@ pub struct Preferences {
     /// below it can grey out when nothing is being posted at all.
     notifications: bool,
     show_unified: bool,
+    /// Whether swipe actions are on (the reverse switch follows it).
+    swipe_enabled: bool,
     /// Mirrors the threading switch, so the "threaded message list" row below
     /// it can grey out when conversations aren't grouped at all.
     threading: bool,
@@ -203,6 +211,8 @@ pub enum PrefInput {
     ChangeCardActionsMode(u32),
     ToggleListPalette(bool),
     ToggleListPaletteHover(bool),
+    ToggleSwipeEnabled(bool),
+    ToggleSwipeReversed(bool),
     ToggleComposeInline(bool),
     TogglePastePlain(bool),
     ToggleSpellcheck(bool),
@@ -217,12 +227,15 @@ pub enum PrefInput {
     ToggleUnifiedChip(bool),
     ToggleUnifiedFiltered(bool),
     ChangeChevronSide(u32),
+    ChangeFilteredPlacement(u32),
+    ChangeTagsPlacement(u32),
     ToggleSidebarHoverExpand(bool),
     ChangePreviewLines(u32),
     ToggleSingleKey(bool),
     ToggleConsoleMode(bool),
     ChangeReadMark(u32),
     ExportSettings,
+    ExportLog,
     ImportSettings,
     ToggleRunInBackground(bool),
     ToggleAutostart(bool),
@@ -260,6 +273,8 @@ pub enum PrefOutput {
     SetCardActionsMode { hover_toggle: bool, hover_auto: bool },
     SetListPalette(bool),
     SetListPaletteHover(bool),
+    SetSwipeEnabled(bool),
+    SetSwipeReversed(bool),
     SetComposeInline(bool),
     SetPastePlain(bool),
     SetSpellcheck(bool),
@@ -274,9 +289,12 @@ pub enum PrefOutput {
     SetUnifiedChip(bool),
     SetUnifiedFiltered(bool),
     SetChevronsLeft(bool),
+    SetFilteredPlacement(crate::config::SectionPlacement),
+    SetTagsPlacement(crate::config::SectionPlacement),
     SetConsoleMode(bool),
     SetReadMark(crate::config::ReadMark),
     ExportSettings,
+    ExportLog,
     ImportSettings,
     SetSidebarHoverExpand(bool),
     SetAppTheme(AppTheme),
@@ -415,15 +433,32 @@ impl Component for Preferences {
 
                         #[name = "unified_filtered_row"]
                         adw::SwitchRow {
-                            #[watch]
-                            set_sensitive: model.show_unified,
-                            set_title: &i18n("Filtered folders under All Inboxes"),
+                            set_title: &i18n("Filtered Folders section"),
                             set_subtitle: &i18n("List the folders your filter rules file into in a \
-                                           collapsible section inside All Inboxes. Each rule \
-                                           chooses whether its folder appears there; this \
-                                           switch hides the section altogether."),
+                                           collapsible section. Each rule chooses whether its \
+                                           folder appears there; this switch hides the section \
+                                           altogether."),
                             connect_active_notify[sender] => move |row| {
                                 sender.input(PrefInput::ToggleUnifiedFiltered(row.is_active()));
+                            },
+                        },
+
+                        #[name = "filtered_placement_row"]
+                        adw::ComboRow {
+                            set_title: &i18n("Filtered Folders placement"),
+                            set_subtitle: &i18n("Inside All Inboxes, folding away with it, or in the \
+                                           scrolling sidebar above or below the accounts."),
+                            connect_selected_notify[sender] => move |row| {
+                                sender.input(PrefInput::ChangeFilteredPlacement(row.selected()));
+                            },
+                        },
+
+                        #[name = "tags_placement_row"]
+                        adw::ComboRow {
+                            set_title: &i18n("Tags placement"),
+                            set_subtitle: &i18n("Where the Tags section sits, with the same choices."),
+                            connect_selected_notify[sender] => move |row| {
+                                sender.input(PrefInput::ChangeTagsPlacement(row.selected()));
                             },
                         },
 
@@ -515,6 +550,29 @@ impl Component for Preferences {
                                            by itself while the pointer rests on a row."),
                             connect_active_notify[sender] => move |row| {
                                 sender.input(PrefInput::ToggleListPaletteHover(row.is_active()));
+                            },
+                        },
+
+                        #[name = "swipe_enabled_row"]
+                        adw::SwitchRow {
+                            set_title: &i18n("Swipe actions"),
+                            set_subtitle: &i18n("Drag a message sideways with the mouse, or swipe it \
+                                           with two fingers on a trackpad, to archive or delete it."),
+                            connect_active_notify[sender] => move |row| {
+                                sender.input(PrefInput::ToggleSwipeEnabled(row.is_active()));
+                            },
+                        },
+
+                        #[name = "swipe_reversed_row"]
+                        adw::SwitchRow {
+                            #[watch]
+                            set_sensitive: model.swipe_enabled,
+                            set_title: &i18n("Reverse swipe directions"),
+                            set_subtitle: &i18n("Swipe (mouse-drag or trackpad) a message left \
+                                           to delete it and right to archive it. Turning this \
+                                           on swaps the two: left archives, right deletes."),
+                            connect_active_notify[sender] => move |row| {
+                                sender.input(PrefInput::ToggleSwipeReversed(row.is_active()));
                             },
                         },
 
@@ -817,6 +875,18 @@ impl Component for Preferences {
                                 sender.input(PrefInput::ToggleConsoleMode(row.is_active()));
                             },
                         },
+
+                        adw::ActionRow {
+                            set_title: &i18n("Export log"),
+                            set_subtitle: &i18n("Save everything the console has recorded since Vireo \
+                                           started, to attach to a bug report. Email addresses \
+                                           are shortened to their domain."),
+                            set_activatable: true,
+                            connect_activated => PrefInput::ExportLog,
+                            add_suffix = &gtk::Image {
+                                set_icon_name: Some("co.hyprlab.Vireo-go-next-symbolic"),
+                            },
+                        },
                     },
 
                     add = &adw::PreferencesGroup {
@@ -944,6 +1014,7 @@ impl Component for Preferences {
         let mut model = Preferences {
             notifications: init.notifications,
             show_unified: init.show_unified,
+            swipe_enabled: init.swipe_enabled,
             threading: init.threading,
             thread_expansion: init.thread_expansion,
             list_palette: init.list_palette,
@@ -1017,6 +1088,17 @@ impl Component for Preferences {
         widgets.show_unified_row.set_active(init.show_unified);
         widgets.unified_chip_row.set_active(init.unified_chip);
         widgets.unified_filtered_row.set_active(init.unified_filtered);
+        for (row, placement) in [
+            (&widgets.filtered_placement_row, init.filtered_placement),
+            (&widgets.tags_placement_row, init.tags_placement),
+        ] {
+            row.set_model(Some(&gtk::StringList::new(&[
+                i18n("Inside All Inboxes").as_str(),
+                i18n("Above the accounts").as_str(),
+                i18n("Below the accounts").as_str(),
+            ])));
+            row.set_selected(placement_index(placement));
+        }
         widgets.chevron_side_row.set_model(Some(&gtk::StringList::new(&[i18n("Left").as_str(), i18n("Right").as_str()])));
         widgets.chevron_side_row.set_selected(if init.chevrons_left { 0 } else { 1 });
         widgets.sidebar_hover_expand_row.set_active(init.sidebar_hover_expand);
@@ -1128,6 +1210,8 @@ impl Component for Preferences {
         });
         widgets.list_palette_row.set_active(init.list_palette);
         widgets.list_palette_hover_row.set_active(init.list_palette_hover);
+        widgets.swipe_enabled_row.set_active(init.swipe_enabled);
+        widgets.swipe_reversed_row.set_active(init.swipe_reversed);
         widgets.compose_inline_row.set_active(init.compose_inline);
         widgets.paste_plain_row.set_active(init.paste_plain);
         widgets.spellcheck_row.set_active(init.spellcheck);
@@ -1336,6 +1420,13 @@ impl Component for Preferences {
             PrefInput::ToggleListPaletteHover(on) => {
                 let _ = sender.output(PrefOutput::SetListPaletteHover(on));
             }
+            PrefInput::ToggleSwipeEnabled(on) => {
+                self.swipe_enabled = on;
+                let _ = sender.output(PrefOutput::SetSwipeEnabled(on));
+            }
+            PrefInput::ToggleSwipeReversed(on) => {
+                let _ = sender.output(PrefOutput::SetSwipeReversed(on));
+            }
             PrefInput::ToggleComposeInline(on) => {
                 let _ = sender.output(PrefOutput::SetComposeInline(on));
             }
@@ -1378,6 +1469,12 @@ impl Component for Preferences {
             PrefInput::ToggleUnifiedFiltered(on) => {
                 let _ = sender.output(PrefOutput::SetUnifiedFiltered(on));
             }
+            PrefInput::ChangeFilteredPlacement(idx) => {
+                let _ = sender.output(PrefOutput::SetFilteredPlacement(placement_from_index(idx)));
+            }
+            PrefInput::ChangeTagsPlacement(idx) => {
+                let _ = sender.output(PrefOutput::SetTagsPlacement(placement_from_index(idx)));
+            }
             PrefInput::ChangeChevronSide(idx) => {
                 let _ = sender.output(PrefOutput::SetChevronsLeft(idx == 0));
             }
@@ -1400,6 +1497,9 @@ impl Component for Preferences {
                     _ => crate::config::ReadMark::Shown,
                 };
                 let _ = sender.output(PrefOutput::SetReadMark(policy));
+            }
+            PrefInput::ExportLog => {
+                let _ = sender.output(PrefOutput::ExportLog);
             }
             PrefInput::ExportSettings => {
                 let _ = sender.output(PrefOutput::ExportSettings);
@@ -1522,5 +1622,24 @@ fn collect_named(root: &gtk::Widget, name: &str, out: &mut Vec<gtk::Widget>) {
     while let Some(c) = child {
         collect_named(&c, name, out);
         child = c.next_sibling();
+    }
+}
+
+/// The placement combos' rows, in the order [`SectionPlacement`] lists them.
+fn placement_index(p: crate::config::SectionPlacement) -> u32 {
+    use crate::config::SectionPlacement::*;
+    match p {
+        AllInboxes => 0,
+        AboveAccounts => 1,
+        BelowAccounts => 2,
+    }
+}
+
+fn placement_from_index(idx: u32) -> crate::config::SectionPlacement {
+    use crate::config::SectionPlacement::*;
+    match idx {
+        1 => AboveAccounts,
+        2 => BelowAccounts,
+        _ => AllInboxes,
     }
 }

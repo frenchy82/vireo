@@ -2,6 +2,24 @@
 
 Vireo is a clean, fast, GNOME-native email client built with Rust and libadwaita for Wayland desktops. Privacy-first: no telemetry, remote content blocked by default, and credentials kept in the system keyring.
 
+## What's new in 1.23.1-beta.1
+
+The beta channel catches up with stable 1.23.0: everything in the next section. The beta's own icon is now the development-build version of the new default, with GNOME's hazard stripe.
+
+## What's new in 1.23.0
+
+**Tags.** Label messages with one or more coloured tags, alongside their folder. Define them in Settings under Accounts, then put them on a message from its right-click menu, the Actions Palette or the reader toolbar. Each tag has its own row in the sidebar that lists everything carrying it, across all your accounts, and rules can tag incoming mail (with or without moving it). Tags are stored on the server as IMAP keywords, the same mechanism Thunderbird and Apple Mail use, so a tag set here is the tag you see there and back. Microsoft 365 stores them as categories; POP3 accounts keep them in Vireo. Requested by [@yioannides](https://github.com/yioannides) (#71), with the design shaped by the discussion there.
+
+**Swipe a message to archive or delete it.** Drag a row sideways with the mouse, or swipe it with two fingers on a trackpad: left deletes, right archives, and a coloured strip under the row names the action as you go. Swap the two in Settings if you prefer, or turn swiping off there. Dragging a message to a folder now shows a small envelope under the pointer, and the account rows under All Inboxes and the Filtered Folders rows accept drops as well. Contributed by [Isaac](https://github.com/thecalamityjoe87) (#135), answering [@taprobane99](https://github.com/taprobane99)'s request (#92).
+
+**A new icon, and a redrawn gallery.** Vireo's icon is now a blue envelope with the bird on it. The gallery in Settings is redrawn to GNOME's icon guidelines: more Vireo envelopes in yellow, white, beige and faded blue, plain envelopes from blue to starfield, the Vireo bird, and the squircle that was the default since 1.21 staying on as "Logotype". The beta channel wears the development-build version of the icon, with GNOME's hazard stripe. This release puts the new icon on every install once, whatever was chosen before; pick another in Settings any time and that choice stands.
+
+**Fixes.** An account whose Sent folder was pointed at its Inbox disappeared from All Inboxes ([@EmmanuelP](https://github.com/EmmanuelP), #136); the Inbox can no longer be given another role. Forwarding from the main window showed no To field ([@7system7](https://github.com/7system7), #139). Pressing Enter twice inside a quoted block now steps out of the quote, so you can reply below an excerpt (EmmanuelP, #137). Trash and Junk rows offer "Move to Inbox" in their menus, for a message deleted by mistake ([Isaac](https://github.com/thecalamityjoe87), #138).
+
+**Export the log.** For a bug report, Settings has "Export log", and the console in the status bar has an export button. The file names the build and desktop and holds everything the console recorded since the app started, with email addresses shortened to their domain so it can be attached to an issue as it is.
+
+**French, completed.** [@frenchy82](https://github.com/frenchy82) translated the composer's picture-resizing menu and the last loose strings (#134).
+
 ## What's new in 1.22.1-beta.1
 
 The beta channel catches up with stable 1.22.0: everything in the next section, including the Ctrl+C copy in the reader and the latest French corrections. No beta-only changes.

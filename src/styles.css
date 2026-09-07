@@ -401,14 +401,35 @@ button.star-active {
 .unified-folders-toggle image {
   opacity: 0.75;
 }
-/* Tighter onto its first folder row (Jason, 2026-09-04: 7px less). */
+/* Tighter onto its first folder row (Jason, 2026-09-04: 7px less). The
+   row's 7px top padding became a margin on the button (2026-09-07): the
+   hover pill covers padding but not margin, so with 7px above the text
+   and 0 below it sat visibly high. Now the pill is centred on the text
+   and the text sits exactly where it did. */
+.unified-folders-toggle {
+  /* 2 + the row's 5 keeps the text where the old 7 put it. */
+  margin-top: 2px;
+  /* The button's 24px content floor would centre the now-shorter row
+     inside it and push the text down: the row's own height rules. */
+  min-height: 0;
+}
 .unified-folders-toggle .folder-row {
-  padding-bottom: 0;
+  /* 5px of pill above and below the text (Jason, 2026-09-07). */
+  padding-top: 5px;
+  padding-bottom: 5px;
   /* Its folded-up chip onto the folder rows' chip column: the heading's
      button padding otherwise leaves it 2px short. */
   padding-right: 6px;
 }
 
+
+/* The Tags heading sits 16px closer to the Filtered Folders rows above it
+   than the stock 2px margin puts it (Jason, 2026-09-07). The two pills
+   overlap by 8px, which shows only when that last row is selected and the
+   heading hovered at the same time. */
+.unified-folders-toggle.tags-toggle {
+  margin-top: -14px;
+}
 
 /* Unread count: a perfect circle for a single digit that grows horizontally
    into a pill for larger numbers, but never taller. */
@@ -596,6 +617,29 @@ button.star-active {
 /* Thread heads: the conversation's message count and its expand/collapse
    caret, one grey borderless pill (the old count chip's styling, now
    clickable). */
+/* Tag chips (#71): a solid pill in the tag's colour, the colour class
+   (.tag-<keyword>) coming from the app's tag stylesheet. Same geometry as
+   the conversation chip so the two sit level on a row. */
+.tag-chip {
+  border-radius: 9999px;
+  min-height: 0;
+  padding: 1px 7px;
+  font-size: 0.72em;
+  font-weight: 700;
+}
+
+.message-listbox > row:selected .message-row .tag-chip {
+  /* Keep the tag's own colour on a selected row; the selection paints
+     everything else white. */
+  opacity: 0.95;
+}
+
+/* A tag row's glyph in the sidebar, in the tag's colour (.tag-tint keeps
+   the background off). */
+.tag-tint {
+  background-color: transparent;
+}
+
 .thread-chip {
   background: alpha(currentColor, 0.1);
   border: none;
@@ -757,6 +801,37 @@ button.star-active {
 
 .palette-toggle image {
   -gtk-icon-size: 14px;
+}
+
+/* Swipe-to-act strip (#swipe): sits fixed under the row, revealed as the
+   message content slides off it — dimmed until the drag passes the commit
+   threshold, then full colour ("armed") to say a release will fire it. */
+.swipe-indicator {
+  opacity: 0.55;
+}
+
+.swipe-indicator.armed {
+  opacity: 1;
+}
+
+.swipe-indicator.swipe-delete {
+  background: @destructive_bg_color;
+  color: @destructive_fg_color;
+}
+
+.swipe-indicator.swipe-archive {
+  /* The traditional archive green — libadwaita's "success" tokens, not
+     accent, so it stays green regardless of the user's accent colour. */
+  background: @success_bg_color;
+  color: @success_fg_color;
+}
+
+.swipe-indicator image {
+  -gtk-icon-size: 18px;
+}
+
+.swipe-indicator label {
+  font-weight: bold;
 }
 
 .unread-dot {
@@ -1434,12 +1509,20 @@ window.welcome-window,
   opacity: 1;
   font-weight: 700;
 }
-/* The strip's edges melt into the card where more icons lie beyond. */
+/* The strip's edges melt into the card where more icons lie beyond. Two
+   layers, because the dark card colour is a translucent white over the
+   window ground: a gradient of it alone reads as a pale haze there. The
+   card gradient over a window-ground gradient composites to the row's own
+   colour at the edge, in both schemes. */
 .icon-strip-fade.left {
-  background: linear-gradient(to right, @card_bg_color, alpha(@card_bg_color, 0));
+  background:
+    linear-gradient(to right, @card_bg_color, alpha(@card_bg_color, 0)),
+    linear-gradient(to right, @window_bg_color, alpha(@window_bg_color, 0));
 }
 .icon-strip-fade.right {
-  background: linear-gradient(to left, @card_bg_color, alpha(@card_bg_color, 0));
+  background:
+    linear-gradient(to left, @card_bg_color, alpha(@card_bg_color, 0)),
+    linear-gradient(to left, @window_bg_color, alpha(@window_bg_color, 0));
 }
 /* On the wizard's yellow the selection ring wears the wordmark blue. */
 .welcome-window .icon-gallery flowboxchild:hover {
@@ -1508,3 +1591,9 @@ textview.console-view text selection {
   border-bottom: 1px solid alpha(currentColor, 0.1);
 }
 
+
+/* A row being dragged to a folder (`.dragging`, set for the drag's
+   duration) fades to half strength while the envelope travels. */
+.message-listbox > row.dragging .message-row {
+  opacity: 0.5;
+}

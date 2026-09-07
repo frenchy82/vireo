@@ -2,6 +2,7 @@
 //! with a search field and live filtering.
 
 use adw::prelude::*;
+use gtk::glib;
 use relm4::factory::FactoryVecDeque;
 use relm4::prelude::*;
 
@@ -24,6 +25,8 @@ pub enum RowAction {
     Spam,
     Archive,
     Delete,
+    /// Put a message from Trash or Junk back in its account's Inbox (#138).
+    MoveToInbox,
     ViewSource,
     AddContact,
 }
@@ -45,6 +48,9 @@ pub struct RowInit {
     pub palette_collapse_secs: std::rc::Rc<std::cell::Cell<u64>>,
     /// Shared "open the palette on row hover" flag (read live on each hover).
     pub palette_hover: std::rc::Rc<std::cell::Cell<bool>>,
+    /// The tags (#71), shared with every row: the chips a row shows are the
+    /// message's keywords that name one of these.
+    pub tags: std::rc::Rc<std::cell::RefCell<Vec<crate::config::Tag>>>,
     /// Whether the row carries the Actions Palette line at all (preference);
     /// off returns its reserved space to the row.
     pub show_palette: bool,
@@ -87,7 +93,22 @@ pub struct RowInit {
     /// it slides open instead of simply appearing; everything else starts
     /// (and stays) `true`.
     pub revealed: bool,
+    /// Swap which side a swipe gesture archives/deletes on (preference,
+    /// shared and read live so a change in Settings applies without a
+    /// rebuild — false: left deletes, right archives; true: reversed).
+    pub swipe_reversed: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Whether the swipe gesture is on at all (preference, shared and read
+    /// live: the tracker is enabled or not on each render).
+    pub swipe_enabled: std::rc::Rc<std::cell::Cell<bool>>,
 }
+
+/// A full swipe (#swipe): also `AdwSwipeable`'s reported `distance`, the px
+/// one full drag (progress ±1.0) spans.
+const SWIPE_MAX: f64 = 120.0;
+/// Distance past which the indicator reads as "armed" (full colour) — purely
+/// a visual cue; `AdwSwipeTracker` makes the real commit decision on
+/// release, factoring in velocity too.
+const SWIPE_ARM: f64 = 72.0;
 
 /// The shown rows' (account, folder, uid, id) keys, in list order — rebuilt with
 /// the list and read live when a drag starts.
@@ -184,6 +205,11 @@ pub struct MessageRow {
     palette_collapse_secs: std::rc::Rc<std::cell::Cell<u64>>,
     /// Shared "open the palette on row hover" flag (read live per hover).
     palette_hover: std::rc::Rc<std::cell::Cell<bool>>,
+    /// The tags, shared with the list (#71).
+    tags: std::rc::Rc<std::cell::RefCell<Vec<crate::config::Tag>>>,
+    /// The keywords the chips were last built for, so post_view (which runs
+    /// on every update) rebuilds them only when they changed.
+    tags_rendered: std::cell::RefCell<Vec<String>>,
     /// Whether this row shows the Actions Palette line at all (preference).
     show_palette: bool,
     /// Conversation size (only meaningful on a thread head).
@@ -211,12 +237,35 @@ pub struct MessageRow {
     /// newly-expanded reply is sliding open, or a collapsing one is sliding
     /// shut before it's removed from the list.
     revealed: bool,
+    /// Shared "swap swipe sides" preference, read live on each drag (#swipe).
+    swipe_reversed: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Shared "swipe at all" preference (#92).
+    swipe_enabled: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Current swipe distance in px (negative = dragged left) — the source
+    /// of truth while a gesture is live; reset to 0 the instant a release is
+    /// resolved (post_view animates the strip back out of view).
+    swipe_progress: f64,
+    /// Which side last had a nonzero `swipe_progress` (-1 left, 1 right, 0
+    /// never dragged) — kept once `swipe_progress` returns to 0 so the
+    /// revealed side and action don't flip mid-shrink after a release.
+    swipe_side: i8,
+    /// A mouse-button or trackpad gesture is actively dragging this row.
+    swipe_dragging: bool,
+    /// The row's `AdwSwipeTracker`, built once against its `SwipeSurface` in
+    /// post_view — also doubles as the wiring guard, since the tracker has
+    /// to stay alive for as long as the row does or it stops firing.
+    swipe_tracker: std::cell::RefCell<Option<adw::SwipeTracker>>,
+    /// In-flight snap-back-to-rest animation, if any.
+    swipe_anim: std::cell::RefCell<Option<adw::TimedAnimation>>,
 }
 
 #[derive(Debug)]
 pub enum MessageRowInput {
     SetRead(bool),
     SetStarred(bool),
+    SetKeywords(Vec<String>),
+    /// The palette's tag button: pop the tag menu on it.
+    OpenTagMenu(gtk::Button),
     SetHasAttachment(bool),
     /// The pointer entered/left the row — fade the chevron in/out.
     SetRowHover(bool),
@@ -243,11 +292,25 @@ pub enum MessageRowInput {
     /// (the head row survives a toggle) so the chevron actually rotates
     /// instead of mounting pre-set to its final angle.
     SetThreadExpanded(bool),
+    /// A mouse-drag or trackpad swipe moved (#swipe): the distance dragged so
+    /// far in px, negative = left.
+    SwipeUpdate(f64),
+    /// The swipe gesture was released. Whether it fires an action is decided
+    /// on `swipe_progress` alone (see the handler) rather than trusting
+    /// `AdwSwipeTracker`'s own velocity-aware snap-point choice — a quick
+    /// flick short of the commit distance reads as a false positive when
+    /// the intent was clearly to back out, not to commit fast.
+    SwipeEnd,
+    /// The swipe preference changed: post_view enables or disables the
+    /// row's tracker accordingly.
+    SwipeEnabledChanged,
 }
 
 #[derive(Debug)]
 pub enum MessageRowOutput {
     Action { action: RowAction, message: Box<Message> },
+    /// A tag toggled from the palette's tag menu (#71).
+    SetTag { message: Box<Message>, keyword: String, add: bool },
     ToggleThread((u32, String)),
     /// This row's palette just opened — the list closes every other one.
     PaletteOpened(usize),
@@ -299,6 +362,264 @@ fn drag_selection(src: &gtk::DragSource, keys: &DragKeys) -> Vec<(u32, u32, u32,
         .collect()
 }
 
+impl MessageRow {
+    /// Rebuild the row's tag chips (#71): one pill per keyword that names a
+    /// tag, in tag order, wearing the tag's colour class.
+    fn render_tags(&self, tags_box: &gtk::Box) {
+        while let Some(child) = tags_box.first_child() {
+            tags_box.remove(&child);
+        }
+        for t in self.tags.borrow().iter().filter(|t| self.msg.has_keyword(&t.keyword)) {
+            let chip = gtk::Label::new(Some(&t.name));
+            chip.add_css_class("tag-chip");
+            chip.add_css_class(&t.css_class());
+            chip.set_valign(gtk::Align::Center);
+            chip.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            chip.set_max_width_chars(14);
+            tags_box.append(&chip);
+        }
+        *self.tags_rendered.borrow_mut() = self.msg.keywords.clone();
+    }
+}
+
+/// The tag section of a message menu (#71): one entry per tag, its swatch
+/// filled where the message carries it; choosing an entry toggles that tag
+/// through `toggle(keyword, add)`.
+pub fn tag_menu_entries(
+    tags: &[crate::config::Tag],
+    msg: &Message,
+    toggle: impl Fn(String, bool) + Clone + 'static,
+) -> Vec<MenuEntry> {
+    tags.iter()
+        .map(|t| {
+            let on = msg.has_keyword(&t.keyword);
+            let keyword = t.keyword.clone();
+            let toggle = toggle.clone();
+            MenuEntry::new(t.name.clone(), move || toggle(keyword.clone(), !on))
+                .swatch(t.color.clone(), on)
+        })
+        .collect()
+}
+
+// A two-layer container implementing `AdwSwipeable`, so a real
+// `AdwSwipeTracker` — the gesture engine behind `AdwFlap` and `AdwCarousel` —
+// can drive the row's swipe-to-act gesture (#swipe): `background` is the
+// fixed action strip, always allocated full-size and never moving;
+// `foreground` is the row's real content, translated across it via a
+// `GskTransform` on its allocation as the swipe drags it, Gmail-style.
+glib::wrapper! {
+    pub struct SwipeSurface(ObjectSubclass<swipe_surface_imp::SwipeSurface>)
+        @extends gtk::Widget,
+        @implements adw::Swipeable;
+}
+
+impl Default for SwipeSurface {
+    fn default() -> Self {
+        glib::Object::new()
+    }
+}
+
+impl SwipeSurface {
+    /// The fixed action strip underneath — set first, so it ends up behind
+    /// `foreground` in paint order.
+    fn set_background(&self, child: &impl IsA<gtk::Widget>) {
+        child.set_parent(self);
+    }
+
+    /// The row's real content, on top — translated by [`Self::set_progress_px`]
+    /// to reveal `background` underneath it.
+    fn set_foreground(&self, child: &impl IsA<gtk::Widget>) {
+        child.set_parent(self);
+    }
+
+    /// The live swipe distance, in `AdwSwipeTracker`'s own px convention
+    /// (`AdwSwipeable::progress` reports it back verbatim). Queues a fresh
+    /// allocation so the translation actually moves — setting this alone
+    /// touches no property GTK would otherwise notice.
+    fn set_progress_px(&self, px: f64) {
+        use gtk::subclass::prelude::ObjectSubclassIsExt;
+        self.imp().progress_px.set(px);
+        self.queue_allocate();
+    }
+
+    /// Read back by `post_view` as the "from" value when animating a
+    /// released drag smoothly back to rest.
+    fn progress_px(&self) -> f64 {
+        use gtk::subclass::prelude::ObjectSubclassIsExt;
+        self.imp().progress_px.get()
+    }
+}
+
+mod swipe_surface_imp {
+    use std::cell::Cell;
+
+    use adw::subclass::prelude::*;
+    use gtk::glib;
+    use gtk::prelude::*;
+
+    #[derive(Default)]
+    pub struct SwipeSurface {
+        pub progress_px: Cell<f64>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for SwipeSurface {
+        const NAME: &'static str = "VireoSwipeSurface";
+        type Type = super::SwipeSurface;
+        type ParentType = gtk::Widget;
+        type Interfaces = (adw::Swipeable,);
+    }
+
+    impl ObjectImpl for SwipeSurface {
+        fn dispose(&self) {
+            while let Some(child) = self.obj().first_child() {
+                child.unparent();
+            }
+        }
+    }
+
+    impl SwipeSurface {
+        /// The action strip: always the first (bottom-most) child.
+        fn background(&self) -> Option<gtk::Widget> {
+            self.obj().first_child()
+        }
+
+        /// The row's real content: always the second (top-most) child.
+        fn foreground(&self) -> Option<gtk::Widget> {
+            self.background().and_then(|bg| bg.next_sibling())
+        }
+
+        /// `progress_px` flipped into the row model's "dragged left is
+        /// negative" convention — shared by `size_allocate` and `snapshot`
+        /// so they can't disagree about which side is revealed.
+        fn visual_offset(&self) -> f32 {
+            -self.progress_px.get() as f32
+        }
+    }
+
+    impl WidgetImpl for SwipeSurface {
+        // The background strip never dictates the row's size — only the
+        // real content does; the strip is simply stretched to match it.
+        fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
+            self.foreground()
+                .map(|c| c.measure(orientation, for_size))
+                .unwrap_or((0, 0, -1, -1))
+        }
+
+        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+            if let Some(bg) = self.background() {
+                bg.allocate(width, height, baseline, None);
+            }
+            if let Some(fg) = self.foreground() {
+                let offset = self.visual_offset();
+                let transform = (offset != 0.0).then(|| {
+                    gtk::gsk::Transform::new()
+                        .translate(&gtk::graphene::Point::new(offset, 0.0))
+                });
+                fg.allocate(width, height, baseline, transform);
+            }
+        }
+
+        // Only ever paints the exact gap the content has slid away from,
+        // clipped from `offset` directly — a row has no background of its
+        // own until hovered or selected, so an opaque foreground can't be
+        // relied on to hide the strip the rest of the time. Also supplies
+        // the clip the default snapshot lacks for `foreground`, so a drag
+        // can't paint over the row above or below.
+        fn snapshot(&self, snapshot: &gtk::Snapshot) {
+            let obj = self.obj();
+            let (w, h) = (obj.width() as f32, obj.height() as f32);
+            snapshot.push_clip(&gtk::graphene::Rect::new(0.0, 0.0, w, h));
+
+            let offset = self.visual_offset();
+            if let (Some(bg), true) = (self.background(), offset != 0.0) {
+                // offset < 0: content slid left, uncovering a gap on the
+                // RIGHT. offset > 0: slid right, gap on the LEFT.
+                let gap = if offset < 0.0 {
+                    gtk::graphene::Rect::new(w + offset, 0.0, -offset, h)
+                } else {
+                    gtk::graphene::Rect::new(0.0, 0.0, offset, h)
+                };
+                snapshot.push_clip(&gap);
+                obj.snapshot_child(&bg, snapshot);
+                snapshot.pop();
+            }
+            if let Some(fg) = self.foreground() {
+                obj.snapshot_child(&fg, snapshot);
+            }
+            snapshot.pop();
+        }
+    }
+
+    impl SwipeableImpl for SwipeSurface {
+        // One full swipe (progress ±1.0) spans `SWIPE_MAX` px.
+        fn distance(&self) -> f64 {
+            super::SWIPE_MAX
+        }
+
+        fn progress(&self) -> f64 {
+            self.progress_px.get() / super::SWIPE_MAX
+        }
+
+        fn cancel_progress(&self) -> f64 {
+            0.0
+        }
+
+        // Three stops: fully committed left, at rest, fully committed
+        // right. `AdwSwipeTracker` picks whichever is nearest on release,
+        // factoring in velocity — a fast flick short of the full distance
+        // still commits, exactly like a real swipe-to-dismiss should.
+        fn snap_points(&self) -> Vec<f64> {
+            vec![-1.0, 0.0, 1.0]
+        }
+
+        fn swipe_area(
+            &self,
+            _navigation_direction: adw::NavigationDirection,
+            _is_drag: bool,
+        ) -> gtk::gdk::Rectangle {
+            let w = self.obj();
+            gtk::gdk::Rectangle::new(0, 0, w.width(), w.height())
+        }
+    }
+}
+
+/// Build the `AdwSwipeTracker` driving `surface`'s swipe-to-act gesture
+/// (#swipe): mouse-drag and trackpad both arrive as the same signals.
+/// Called once per row from `post_view`; the tracker must be kept alive by
+/// the caller for as long as the row lives.
+fn wire_swipe_tracker(surface: &SwipeSurface, sender: &FactorySender<MessageRow>) -> adw::SwipeTracker {
+    use gtk::prelude::OrientableExt;
+
+    let tracker = adw::SwipeTracker::new(surface);
+    tracker.set_orientation(gtk::Orientation::Horizontal);
+    tracker.set_allow_mouse_drag(true);
+
+    // `AdwSwipeTracker`'s progress/snap-point convention runs opposite to
+    // the row model's "dragged left is negative" one for a horizontal
+    // tracker, hence the negation below — kept only where each value is
+    // actually consumed, since `AdwSwipeable::progress` still has to answer
+    // the tracker back in its own native convention (`swipe_surface_imp`).
+    {
+        let surface = surface.clone();
+        let sender = sender.clone();
+        tracker.connect_update_swipe(move |_, progress| {
+            let raw_px = progress * SWIPE_MAX;
+            surface.set_progress_px(raw_px);
+            sender.input(MessageRowInput::SwipeUpdate(-raw_px));
+        });
+    }
+    {
+        let sender = sender.clone();
+        // The release's own resolved snap point (`to`) isn't used — see
+        // `MessageRowInput::SwipeEnd`.
+        tracker.connect_end_swipe(move |_, _velocity, _to| {
+            sender.input(MessageRowInput::SwipeEnd);
+        });
+    }
+    tracker
+}
+
 #[relm4::factory(pub)]
 impl FactoryComponent for MessageRow {
     type Init = RowInit;
@@ -327,6 +648,36 @@ impl FactoryComponent for MessageRow {
             // pointer (#23).
             add_controller = gtk::DragSource {
                 set_actions: gtk::gdk::DragAction::MOVE,
+                // The row itself travels under the pointer, held where it was
+                // grabbed — without an icon GTK draws the payload string.
+                connect_drag_begin => move |src, drag| {
+                    let scale = src.widget().map(|w| w.scale_factor()).unwrap_or(1);
+                    if let Some(row) = src.widget() {
+                        // `.dragging` fades the row while it is away.
+                        row.add_css_class("dragging");
+                    }
+                    // A white envelope, cursor-sized, centred under the
+                    // pointer — without an icon GTK draws the payload text.
+                    // Set on the drag's own icon window as a widget, so it
+                    // is drawn at logical size from a display-scale texture.
+                    if let Some(envelope) = crate::app_icon::drag_envelope(scale) {
+                        let icon = gtk::DragIcon::for_drag(drag);
+                        icon.set_child(Some(&envelope));
+                        let half = crate::app_icon::DRAG_ICON_SIZE / 2;
+                        drag.set_hotspot(half, half);
+                    }
+                },
+                connect_drag_end => move |src, _, _| {
+                    if let Some(row) = src.widget() {
+                        row.remove_css_class("dragging");
+                    }
+                },
+                connect_drag_cancel => move |src, _, _| {
+                    if let Some(row) = src.widget() {
+                        row.remove_css_class("dragging");
+                    }
+                    false
+                },
                 connect_prepare[aid = self.msg.account_id, fid = self.msg.folder_id, uid = self.msg.uid, id = self.msg.id, keys = self.drag_keys.clone()] => move |src, _, _| {
                     let mut items = drag_selection(src, &keys);
                     // Dragging a row outside the selection (or before the list has
@@ -352,8 +703,43 @@ impl FactoryComponent for MessageRow {
             #[watch]
             set_reveal_child: self.revealed,
 
+            // Wrapped in a `SwipeSurface` (#swipe): `background` is the fixed
+            // action strip, only ever revealed as `foreground` — the row's
+            // real content Overlay, unchanged otherwise — physically slides
+            // away from it under a mouse-drag or trackpad swipe.
             #[wrap(Some)]
-            set_child = &gtk::Overlay {
+            #[name = "swipe_surface"]
+            set_child = &SwipeSurface {
+
+            #[name = "swipe_background"]
+            set_background = &gtk::Box {
+                set_overflow: gtk::Overflow::Hidden,
+                #[watch]
+                set_css_classes: &self.swipe_indicator_classes(),
+
+                gtk::Box {
+                    set_halign: gtk::Align::Fill,
+                    set_valign: gtk::Align::Center,
+                    set_hexpand: true,
+                    set_spacing: 6,
+                    set_margin_start: 16,
+                    set_margin_end: 16,
+                    #[watch]
+                    set_halign: self.swipe_halign(),
+
+                    gtk::Image {
+                        #[watch]
+                        set_icon_name: Some(self.swipe_icon()),
+                    },
+                    gtk::Label {
+                        #[watch]
+                        set_label: &self.swipe_label(),
+                    },
+                },
+            },
+
+            #[name = "row_overlay"]
+            set_foreground = &gtk::Overlay {
             // The node dot where this member meets the group's dotted rail
             // (thread children only): overlaid at the row's left edge and
             // pulled onto the rail itself by .thread-node's negative margin.
@@ -520,6 +906,15 @@ impl FactoryComponent for MessageRow {
                                 connect_clicked[sender] => move |_| sender.input(MessageRowInput::Action(RowAction::ToggleStar)),
                             },
                             gtk::Button {
+                                set_icon_name: "co.hyprlab.Vireo-tag-symbolic",
+                                set_tooltip_text: Some(i18n("Tags").as_str()),
+                                add_css_class: "flat",
+                                // Only once there is a tag to give.
+                                #[watch]
+                                set_visible: !self.tags.borrow().is_empty(),
+                                connect_clicked[sender] => move |b| sender.input(MessageRowInput::OpenTagMenu(b.clone())),
+                            },
+                            gtk::Button {
                                 set_icon_name: "co.hyprlab.Vireo-mail-archive-symbolic",
                                 set_tooltip_text: Some(i18n("Archive").as_str()),
                                 add_css_class: "flat",
@@ -554,7 +949,6 @@ impl FactoryComponent for MessageRow {
 
                 },
             },
-
 
             #[wrap(Some)]
             set_child = &gtk::Box {
@@ -678,12 +1072,25 @@ impl FactoryComponent for MessageRow {
                     },
                 },
 
-                gtk::Label {
-                    set_label: &self.msg.subject,
-                    set_halign: gtk::Align::Start,
-                    set_ellipsize: gtk::pango::EllipsizeMode::End,
-                    #[watch]
-                    set_css_classes: &self.subject_classes(),
+                gtk::Box {
+                    set_spacing: 6,
+                    gtk::Label {
+                        set_label: &self.msg.subject,
+                        set_halign: gtk::Align::Start,
+                        set_hexpand: true,
+                        set_ellipsize: gtk::pango::EllipsizeMode::End,
+                        #[watch]
+                        set_css_classes: &self.subject_classes(),
+                    },
+                    // Tag chips (#71) at the subject's end, where a long
+                    // subject gives way before the sender's name would.
+                    // Built from the message's keywords in init_widgets and
+                    // rebuilt by post_view when they change.
+                    #[local_ref]
+                    tags_box -> gtk::Box {
+                        set_spacing: 4,
+                        set_valign: gtk::Align::Center,
+                    },
                 },
 
                 // The message's own text, at full width: nothing shares this line,
@@ -715,11 +1122,15 @@ impl FactoryComponent for MessageRow {
             },
             },
             },
+            },
         }
         }
     }
 
     fn post_view() {
+        if *self.tags_rendered.borrow() != self.msg.keywords {
+            self.render_tags(&widgets.tags_box);
+        }
         // Slide the palette open/shut by animating the spacer that gives the
         // clip Overlay its width — driven here (not a GtkRevealer) because
         // revealer transitions don't repaint inside an Overlay's overlay
@@ -767,6 +1178,56 @@ impl FactoryComponent for MessageRow {
                 a.play();
             }
         }
+
+        // One-time gesture wiring (#swipe): no hook to attach an imperative
+        // controller once from the declarative view, so it happens here on
+        // the row's first render. The tracker doubles as the wiring guard —
+        // kept alive in the model, since it stops firing once dropped.
+        if self.swipe_tracker.borrow().is_none() {
+            let tracker = wire_swipe_tracker(&widgets.swipe_surface, &sender);
+            self.swipe_tracker.replace(Some(tracker));
+        }
+        if let Some(t) = self.swipe_tracker.borrow().as_ref() {
+            t.set_enabled(self.swipe_enabled.get());
+        }
+
+        // A live drag already tracks 1:1 — `wire_swipe_tracker`'s
+        // `update-swipe` handler sets the surface's progress directly, every
+        // event. Once released, this animates the rest of the way smoothly
+        // instead of letting `swipe_progress` resetting snap it.
+        if self.swipe_dragging {
+            if let Some(a) = self.swipe_anim.borrow_mut().take() {
+                a.pause();
+            }
+        } else {
+            // Negated back to `AdwSwipeTracker`'s own convention, matching
+            // `size_allocate`'s translation.
+            let target = -self.swipe_progress;
+            let current = widgets.swipe_surface.progress_px();
+            if (current - target).abs() > 0.5 {
+                let surface = widgets.swipe_surface.clone();
+                let setter = {
+                    let surface = surface.clone();
+                    adw::CallbackAnimationTarget::new(move |v| surface.set_progress_px(v))
+                };
+                // Bound to the row overlay (always mapped), not the
+                // surface — adw skips animations on unmapped widgets.
+                let anim = adw::TimedAnimation::new(
+                    &widgets.row_overlay,
+                    current,
+                    target,
+                    180,
+                    setter,
+                );
+                anim.set_easing(adw::Easing::EaseOutCubic);
+                if let Some(old) = self.swipe_anim.replace(Some(anim)) {
+                    old.pause();
+                }
+                if let Some(a) = self.swipe_anim.borrow().as_ref() {
+                    a.play();
+                }
+            }
+        }
     }
 
     fn init_model(init: Self::Init, index: &DynamicIndex, sender: FactorySender<Self>) -> Self {
@@ -779,6 +1240,7 @@ impl FactoryComponent for MessageRow {
             ring_class,
             palette_collapse_secs,
             palette_hover,
+            tags,
             show_palette,
             thread_count,
             is_thread_child,
@@ -794,6 +1256,8 @@ impl FactoryComponent for MessageRow {
             drag_keys,
             show_recipient,
             revealed,
+            swipe_reversed,
+            swipe_enabled,
         } = init;
         let mut model = Self {
             msg,
@@ -809,6 +1273,8 @@ impl FactoryComponent for MessageRow {
             collapse_timer: None,
             palette_collapse_secs,
             palette_hover,
+            tags,
+            tags_rendered: std::cell::RefCell::new(Vec::new()),
             show_palette,
             thread_count,
             is_thread_child,
@@ -826,6 +1292,13 @@ impl FactoryComponent for MessageRow {
             index: index.clone(),
             palette_target: std::cell::Cell::new(0),
             palette_anim: std::cell::RefCell::new(None),
+            swipe_reversed,
+            swipe_enabled,
+            swipe_progress: 0.0,
+            swipe_side: 0,
+            swipe_dragging: false,
+            swipe_tracker: std::cell::RefCell::new(None),
+            swipe_anim: std::cell::RefCell::new(None),
         };
 
         // No point fetching anything for a circle that isn't drawn — and a
@@ -845,9 +1318,38 @@ impl FactoryComponent for MessageRow {
         model
     }
 
+    fn init_widgets(
+        &mut self,
+        _index: &DynamicIndex,
+        root: Self::Root,
+        _returned_widget: &gtk::ListBoxRow,
+        sender: FactorySender<Self>,
+    ) -> Self::Widgets {
+        // The chips are children added by hand (their number varies), so the
+        // box is built here and handed to the view; post_view keeps it fresh.
+        let tags_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        self.render_tags(&tags_box);
+        let widgets = view_output!();
+        widgets
+    }
+
     fn update(&mut self, msg: Self::Input, sender: FactorySender<Self>) {
         match msg {
             MessageRowInput::SetRead(read) => self.msg.unread = !read,
+            MessageRowInput::SetKeywords(keywords) => self.msg.keywords = keywords,
+            MessageRowInput::OpenTagMenu(btn) => {
+                let tags = self.tags.borrow().clone();
+                let msg = self.msg.clone();
+                let target = msg.clone();
+                let entries = tag_menu_entries(&tags, &msg, move |keyword, add| {
+                    let _ = sender.output(MessageRowOutput::SetTag {
+                        message: Box::new(target.clone()),
+                        keyword,
+                        add,
+                    });
+                });
+                show_context_menu(&btn, (btn.width() / 2) as f64, btn.height() as f64, vec![entries]);
+            }
             MessageRowInput::SetStarred(starred) => self.msg.starred = starred,
             MessageRowInput::SetHasAttachment(has) => self.msg.has_attachment = has,
             MessageRowInput::SetRowHover(over) => {
@@ -912,6 +1414,21 @@ impl FactoryComponent for MessageRow {
             MessageRowInput::SetThreadStarred(starred) => self.thread_starred = starred,
             MessageRowInput::SetRevealed(revealed) => self.revealed = revealed,
             MessageRowInput::SetThreadExpanded(expanded) => self.thread_expanded = expanded,
+            MessageRowInput::SwipeUpdate(offset) => {
+                self.swipe_dragging = true;
+                self.swipe_progress = offset.clamp(-SWIPE_MAX, SWIPE_MAX);
+                if self.swipe_progress != 0.0 {
+                    self.swipe_side = if self.swipe_progress < 0.0 { -1 } else { 1 };
+                }
+            }
+            MessageRowInput::SwipeEnabledChanged => {}
+            MessageRowInput::SwipeEnd => {
+                self.swipe_dragging = false;
+                if self.swipe_progress.abs() >= SWIPE_ARM {
+                    sender.input(MessageRowInput::Action(self.swipe_action()));
+                }
+                self.swipe_progress = 0.0;
+            }
         }
     }
 
@@ -1020,6 +1537,74 @@ impl MessageRow {
             Some(c) => vec![c.as_str()],
             None => Vec::new(),
         }
+    }
+
+    /// What a swipe to the left currently does (preference: Delete unless
+    /// the sides are swapped).
+    fn swipe_left_action(&self) -> RowAction {
+        if self.swipe_reversed.get() {
+            RowAction::Archive
+        } else {
+            RowAction::Delete
+        }
+    }
+
+    /// What a swipe to the right currently does.
+    fn swipe_right_action(&self) -> RowAction {
+        if self.swipe_reversed.get() {
+            RowAction::Delete
+        } else {
+            RowAction::Archive
+        }
+    }
+
+    /// The action the indicator panel is currently showing — the last side
+    /// it grew from, so it stays put while a release's snap-back shrinks it.
+    fn swipe_action(&self) -> RowAction {
+        if self.swipe_side < 0 {
+            self.swipe_left_action()
+        } else {
+            self.swipe_right_action()
+        }
+    }
+
+    /// The panel hugs the edge the swipe is dragging toward: right (End) for
+    /// a left drag, left (Start) for a right drag — Gmail's own reveal side.
+    fn swipe_halign(&self) -> gtk::Align {
+        if self.swipe_side < 0 {
+            gtk::Align::End
+        } else {
+            gtk::Align::Start
+        }
+    }
+
+    fn swipe_icon(&self) -> &'static str {
+        match self.swipe_action() {
+            RowAction::Delete => "co.hyprlab.Vireo-user-trash-symbolic",
+            _ => "co.hyprlab.Vireo-mail-archive-symbolic",
+        }
+    }
+
+    fn swipe_label(&self) -> String {
+        match self.swipe_action() {
+            RowAction::Delete => i18n("Delete"),
+            _ => i18n("Archive"),
+        }
+    }
+
+    /// The indicator panel's classes: coloured for whichever action is
+    /// active, and "armed" once the drag has cleared the commit distance —
+    /// full colour says a release now fires it, matching Gmail's own cue.
+    fn swipe_indicator_classes(&self) -> Vec<&'static str> {
+        let mut v = vec!["swipe-indicator"];
+        v.push(match self.swipe_action() {
+            RowAction::Delete => "swipe-delete",
+            _ => "swipe-archive",
+        });
+        if self.swipe_progress.abs() >= SWIPE_ARM {
+            v.push("armed");
+        }
+        v
     }
 
     /// The row's name line: the sender — or, in a Sent folder, who the message
@@ -1353,6 +1938,12 @@ pub struct MessageList {
     palette_collapse_secs: std::rc::Rc<std::cell::Cell<u64>>,
     /// Shared with every row: open the palette on row hover.
     palette_hover: std::rc::Rc<std::cell::Cell<bool>>,
+    /// The tags (#71), shared with every row for its chips and tag menu.
+    tags: std::rc::Rc<std::cell::RefCell<Vec<crate::config::Tag>>>,
+    /// Shared with every row: swap the swipe-gesture sides (#swipe).
+    swipe_reversed: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Shared with every row: whether swiping is on at all (#92).
+    swipe_enabled: std::rc::Rc<std::cell::Cell<bool>>,
     /// The message currently being viewed, kept selected across list rebuilds.
     /// Keyed by (account_id, id) since UIDs collide across accounts in the
     /// unified "All Inboxes" view.
@@ -1391,6 +1982,8 @@ pub struct MessageList {
     default_expanded: bool,
     /// The open folder is Sent: rows name recipients instead of senders (#27).
     show_recipient: bool,
+    /// The list shows Trash or Junk, where menus offer "Move to Inbox" (#138).
+    restorable: bool,
     /// Rendered thread membership: message key → conversation key, rebuilt with
     /// the rows. Lets a read-state change on a hidden reply refresh its head.
     msg_thread: std::collections::HashMap<(u32, u32), (u32, String)>,
@@ -1477,6 +2070,8 @@ pub enum BulkAction {
     Archive,
     Spam,
     Delete,
+    /// Back to the Inbox, for a selection in Trash or Junk (#138).
+    MoveToInbox,
 }
 
 #[derive(Debug)]
@@ -1579,6 +2174,12 @@ pub enum MessageListInput {
     /// A hover-palette action for a specific message (forwarded to the app).
     RowAction { action: RowAction, message: Box<Message> },
     SetStarred { id: u32, starred: bool },
+    /// A message's keywords changed (a tag put on or taken off, #71).
+    SetKeywords { id: u32, keywords: Vec<String> },
+    /// The tag definitions changed: rows rebuild their chips.
+    SetTags(Vec<crate::config::Tag>),
+    /// A row's tag menu toggled a tag — passed up to the app.
+    SetTagFor { message: Box<Message>, keyword: String, add: bool },
     /// Update a message's attachment indicator (e.g. clearing a false paperclip).
     SetHasAttachment { id: u32, has: bool },
     Remove(u32),
@@ -1591,6 +2192,12 @@ pub enum MessageListInput {
     SetPaletteCollapse(u64),
     /// Open the Actions Palette on row hover, without the ⋯ click.
     SetPaletteHover(bool),
+    /// Swap the swipe-gesture sides (#swipe).
+    SetSwipeReversed(bool),
+    /// Turn the swipe gesture on or off (#92).
+    SetSwipeEnabled(bool),
+    /// The list shows Trash or Junk: menus offer "Move to Inbox" (#138).
+    SetRestorable(bool),
     /// Folder switch: reset infinite-scroll paging back to the first page and
     /// scroll to the top (a plain `SetMessages` now preserves paging for refreshes).
     ResetPaging,
@@ -1627,6 +2234,8 @@ pub enum MessageListOutput {
     Activated { message: Message, thread: Vec<Message> },
     /// A context-menu action chosen for a specific message.
     Action { action: RowAction, message: Box<Message> },
+    /// A tag toggled on a specific message (#71).
+    SetTag { message: Box<Message>, keyword: String, add: bool },
     /// A bulk action chosen for every currently-selected message.
     Bulk { action: BulkAction, messages: Vec<Message> },
     /// Delete requested on a lone selected row that heads a whole conversation:
@@ -1892,6 +2501,9 @@ impl SimpleComponent for MessageList {
                 MessageRowOutput::Action { action, message } => {
                     MessageListInput::RowAction { action, message }
                 }
+                MessageRowOutput::SetTag { message, keyword, add } => {
+                    MessageListInput::SetTagFor { message, keyword, add }
+                }
                 MessageRowOutput::ToggleThread(key) => MessageListInput::ToggleThread(key),
                 MessageRowOutput::PaletteOpened(idx) => MessageListInput::PaletteOpened(idx),
             });
@@ -1927,9 +2539,16 @@ impl SimpleComponent for MessageList {
             colorize: false,
             account_colors: std::collections::HashMap::new(),
             color_provider,
+            tags: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             palette_collapse_secs: std::rc::Rc::new(std::cell::Cell::new(5)),
             palette_hover: std::rc::Rc::new(std::cell::Cell::new(
                 crate::config::load_list_palette_hover(),
+            )),
+            swipe_reversed: std::rc::Rc::new(std::cell::Cell::new(
+                crate::config::load_swipe_reversed(),
+            )),
+            swipe_enabled: std::rc::Rc::new(std::cell::Cell::new(
+                crate::config::load_swipe_enabled(),
             )),
             thread_links: Vec::new(),
             drag_keys: DragKeys::default(),
@@ -1941,6 +2560,7 @@ impl SimpleComponent for MessageList {
             reader_keys: Vec::new(),
             expanded_threads: std::collections::HashSet::new(),
             show_recipient: false,
+            restorable: false,
             default_expanded: false,
             msg_thread: std::collections::HashMap::new(),
             thread_members: std::collections::HashMap::new(),
@@ -2182,6 +2802,7 @@ impl SimpleComponent for MessageList {
                     self.rebuild();
                 }
             }
+            MessageListInput::SetRestorable(on) => self.restorable = on,
             MessageListInput::ContactPhotosChanged => {
                 // Pointless when the circles aren't drawn; rows check the
                 // fresh index as they are rebuilt.
@@ -2591,6 +3212,26 @@ impl SimpleComponent for MessageList {
                 }
                 self.refresh_thread_star(id);
             }
+            MessageListInput::SetKeywords { id, keywords } => {
+                if let Some(m) = self.all.iter_mut().find(|m| m.id == id) {
+                    m.keywords = keywords.clone();
+                }
+                if let Some(idx) = self.shown.iter().position(|m| m.id == id) {
+                    self.shown[idx].keywords = keywords.clone();
+                    self.rows.send(idx, MessageRowInput::SetKeywords(keywords));
+                }
+            }
+            MessageListInput::SetTags(tags) => {
+                if *self.tags.borrow() != tags {
+                    *self.tags.borrow_mut() = tags;
+                    // Chips and the palette's tag button follow the
+                    // definitions; the rows are rebuilt to pick them up.
+                    self.rebuild_preserving_scroll();
+                }
+            }
+            MessageListInput::SetTagFor { message, keyword, add } => {
+                let _ = sender.output(MessageListOutput::SetTag { message, keyword, add });
+            }
             MessageListInput::SetHasAttachment { id, has } => {
                 if let Some(m) = self.all.iter_mut().find(|m| m.id == id) {
                     m.has_attachment = has;
@@ -2758,6 +3399,14 @@ impl SimpleComponent for MessageList {
             }
             MessageListInput::SetPaletteCollapse(secs) => self.palette_collapse_secs.set(secs),
             MessageListInput::SetPaletteHover(on) => self.palette_hover.set(on),
+            MessageListInput::SetSwipeReversed(on) => self.swipe_reversed.set(on),
+            MessageListInput::SetSwipeEnabled(on) => {
+                self.swipe_enabled.set(on);
+                // Every mounted row re-renders and flips its tracker.
+                for i in 0..self.rows.len() {
+                    self.rows.send(i, MessageRowInput::SwipeEnabledChanged);
+                }
+            }
             MessageListInput::SetSelected(id) => {
                 match id {
                     // Account-less id resolved against the shown list (the app
@@ -2949,6 +3598,21 @@ impl MessageList {
             ));
         }
 
+        // Tags (#71): one toggle per tag, a filled swatch where the message
+        // carries it. Absent until a tag exists.
+        let tag_section = {
+            let tags = self.tags.borrow().clone();
+            let s = sender.clone();
+            let m = msg.clone();
+            tag_menu_entries(&tags, msg, move |keyword, add| {
+                let _ = s.output(MessageListOutput::SetTag {
+                    message: Box::new(m.clone()),
+                    keyword,
+                    add,
+                });
+            })
+        };
+
         let sections = vec![
             vec![
                 item(RowAction::Reply, &i18n("Reply"), "co.hyprlab.Vireo-mail-reply-sender-symbolic"),
@@ -2956,11 +3620,18 @@ impl MessageList {
                 item(RowAction::Forward, &i18n("Forward"), "co.hyprlab.Vireo-mail-forward-symbolic"),
             ],
             flag_section,
-            vec![
-                item(RowAction::Spam, &i18n("Mark as Spam"), "co.hyprlab.Vireo-mail-mark-junk-symbolic"),
-                item(RowAction::Archive, &i18n("Archive"), "co.hyprlab.Vireo-mail-archive-symbolic"),
-                item(RowAction::Delete, &i18n("Delete"), "co.hyprlab.Vireo-user-trash-symbolic"),
-            ],
+            tag_section,
+            {
+                let mut section = Vec::new();
+                // In Trash or Junk the way back is the first thing offered.
+                if self.restorable {
+                    section.push(item(RowAction::MoveToInbox, &i18n("Move to Inbox"), "co.hyprlab.Vireo-mail-inbox-symbolic"));
+                }
+                section.push(item(RowAction::Spam, &i18n("Mark as Spam"), "co.hyprlab.Vireo-mail-mark-junk-symbolic"));
+                section.push(item(RowAction::Archive, &i18n("Archive"), "co.hyprlab.Vireo-mail-archive-symbolic"));
+                section.push(item(RowAction::Delete, &i18n("Delete"), "co.hyprlab.Vireo-user-trash-symbolic"));
+                section
+            },
             vec![item(
                 RowAction::AddContact,
                 &i18n("Add Sender to Contacts"),
@@ -2985,11 +3656,16 @@ impl MessageList {
                 item(BulkAction::MarkUnread, &i18n("Mark as Unread"), "co.hyprlab.Vireo-mail-unread-symbolic"),
                 item(BulkAction::Flag, &i18n("Flag"), "co.hyprlab.Vireo-starred-symbolic"),
             ],
-            vec![
-                item(BulkAction::Spam, &i18n("Mark as Spam"), "co.hyprlab.Vireo-mail-mark-junk-symbolic"),
-                item(BulkAction::Archive, &i18n("Archive"), "co.hyprlab.Vireo-mail-archive-symbolic"),
-                item(BulkAction::Delete, &i18n("Delete"), "co.hyprlab.Vireo-user-trash-symbolic"),
-            ],
+            {
+                let mut section = Vec::new();
+                if self.restorable {
+                    section.push(item(BulkAction::MoveToInbox, &i18n("Move to Inbox"), "co.hyprlab.Vireo-mail-inbox-symbolic"));
+                }
+                section.push(item(BulkAction::Spam, &i18n("Mark as Spam"), "co.hyprlab.Vireo-mail-mark-junk-symbolic"));
+                section.push(item(BulkAction::Archive, &i18n("Archive"), "co.hyprlab.Vireo-mail-archive-symbolic"));
+                section.push(item(BulkAction::Delete, &i18n("Delete"), "co.hyprlab.Vireo-user-trash-symbolic"));
+                section
+            },
         ];
 
         show_context_menu_with_header(
@@ -3209,6 +3885,7 @@ impl MessageList {
                         ring_class,
                         palette_collapse_secs: self.palette_collapse_secs.clone(),
                         palette_hover: self.palette_hover.clone(),
+                        tags: self.tags.clone(),
                         show_palette: self.list_palette,
                         thread_count: 0,
                         is_thread_child: true,
@@ -3224,6 +3901,8 @@ impl MessageList {
                         drag_keys: self.drag_keys.clone(),
                         show_recipient: self.show_recipient,
                         revealed: false,
+                        swipe_reversed: self.swipe_reversed.clone(),
+                        swipe_enabled: self.swipe_enabled.clone(),
                     },
                 );
             }
@@ -3484,6 +4163,7 @@ impl MessageList {
                     ring_class,
                     palette_collapse_secs: self.palette_collapse_secs.clone(),
                     palette_hover: self.palette_hover.clone(),
+                    tags: self.tags.clone(),
                     show_palette: self.list_palette,
                     thread_count: meta.count,
                     is_thread_child: meta.is_child,
@@ -3501,6 +4181,8 @@ impl MessageList {
                     // A full rebuild never needs a row to mount closed —
                     // that's only for `expand_thread`'s surgical insert.
                     revealed: true,
+                    swipe_reversed: self.swipe_reversed.clone(),
+                    swipe_enabled: self.swipe_enabled.clone(),
                 });
             }
         }
@@ -3691,6 +4373,7 @@ mod tests {
             timestamp: 1000,
             unread: false,
             starred: false,
+            keywords: Vec::new(),
             has_attachment: false,
             message_id: message_id.into(),
             references: references.into(),

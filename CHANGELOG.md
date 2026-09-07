@@ -1,5 +1,104 @@
 # Changelog
 
+## 1.23.1-beta.1 — 2026-09-07
+
+The beta channel catches up with stable 1.23.0: the same code, no
+beta-only changes. The beta build now ships the .Devel twin of the new
+default icon (GNOME's hazard stripe) as its own icon, with a scalable
+SVG installed alongside the PNGs.
+
+## 1.23.0 — 2026-09-07
+
+Tags, swipe actions on message rows, a redrawn icon set with a new
+default, a log export for bug reports, four fixes, and the French
+translation completed.
+
+- **Tags** (#71, requested by @yioannides, with the folders-versus-tags
+  discussion from @p-mitana and @deusnovus). Coloured labels a message can
+  carry several of, defined in Settings → Accounts → Tags (name, colour,
+  keyword). A tag is stored on the server as an IMAP keyword, the
+  standard's own per-message user flag beside `\Seen` and `\Flagged`, so
+  the same tag shows in Thunderbird, Apple Mail or a webmail, and theirs
+  show in Vireo once a tag names their keyword (Thunderbird's built-in
+  five are `$label1` to `$label5`; the tag dialog explains). Microsoft 365
+  accounts store them as categories. POP3 accounts, and IMAP servers whose
+  PERMANENTFLAGS refuse custom keywords, keep the tag in Vireo's own index
+  against the Message-ID instead, with a one-time notice.
+- **Where tags show.** A pill at the end of the subject on every list row;
+  chips beside the sender on conversation cards and under the subject of a
+  full-bleed message; a collapsible Tags section in the sidebar, above the
+  accounts, that lists every tag and opens a cross-account view of the
+  mail carrying it (Trash and Junk excluded, Gmail's per-label copies
+  collapsed to one row).
+- **Where tags are set.** The message's right-click menu, the Actions
+  Palette's new tag button, the reader toolbar's tag button and the
+  reader's overflow menu: one entry per tag, its swatch filled where the
+  message already carries it. Untagging a message inside its own tag view
+  drops the row.
+- **Rules can tag.** The filter dialog gains "Tag with" beside "Move to",
+  and "Move to" gains "Leave in Inbox", so a rule can tag, file, or both
+  (the tag goes on before the move and travels with it). Tag-only rules
+  hide the two folder switches on their row.
+- **Swipe actions** (PR #135 by @thecalamityjoe87, for #92 by
+  @taprobane99): drag a message row sideways with the mouse or a
+  two-finger trackpad swipe. Left deletes, right archives; the row slides
+  off a coloured strip naming the action, dimmed until the drag passes the
+  commit distance. Settings → Message List gains "Swipe actions" (on by
+  default) and "Reverse swipe directions". Built on `AdwSwipeTracker` over
+  a small `AdwSwipeable` container (`SwipeSurface`) that keeps the row's
+  content on top of a fixed action strip.
+- **Dragging a message to a folder** now carries a cursor-sized white
+  envelope (the icon gallery's) instead of the raw payload text, and the
+  row fades to half strength until it lands (#92 aside). The
+  per-account rows under All Inboxes and the Filtered Folders rows take
+  drops too: a message dropped on one moves to that folder, provided it
+  belongs to the same account.
+- **A redrawn icon set, and a new default.** The app's icon is now a
+  blue envelope with the bird on it; the 1.21 squircle-with-a-V becomes
+  the "Logotype" gallery entry. The gallery is redrawn to GNOME's icon
+  guidelines: four more Vireo envelopes (yellow, white, beige, faded
+  blue), six plain envelopes (blue, yellow, white, beige, starfield,
+  faded blue) and the two birds, ahead of the colours. The
+  beta build ships the default's `.Devel` twin with GNOME's hazard stripe
+  (the old ribboned beta icon is gone). The new default is asserted once:
+  the first start on this release resets the stored choice to it on every
+  install (`app_icon::ICON_GENERATION`, recorded in `state.toml` so a
+  choice made afterwards stands). Ids from the 1.22 gallery still resolve
+  for imported settings: envelope → yellow envelope, cream → beige, the
+  blue birds → the new birds. `tools/gen-app-icons.py` renders `<id>.Devel.svg`
+  sources to `alt/<id>.Devel.png` and takes the bird envelope, plain and
+  `.Devel`, as the hicolor icons of the two builds (the beta now has a
+  scalable SVG too).
+- **An account whose Sent folder was set to the Inbox vanished from All
+  Inboxes** (#136, @EmmanuelP): the role took the Inbox's kind with it, so
+  the account had no inbox to list, notify for or filter. A role never
+  takes the Inbox now (the assignment is ignored), and the account
+  editor's Special Folders combos no longer offer it.
+- **Forward in the main window had no To field** (#139, @7system7): the
+  inline reply pane hides its address rows to stay compact, and a forward
+  got the same treatment although it arrives unaddressed. A pane whose To
+  is empty keeps its rows.
+- **Leaving a quote in the editor** (#137, @EmmanuelP): Enter twice inside
+  a quoted block now steps out below it, the way a list ends, so a reply
+  can be written under an excerpt.
+- **Getting a deleted message back** (#138, @thecalamityjoe87): Trash and
+  Junk rows offer "Move to Inbox" in their right-click menu, the
+  multi-selection menu and the reader's overflow menu, alongside the
+  existing Undo toast and dragging the row onto a folder.
+- **Export log** (for #132 and any report that needs one): Settings →
+  System has "Export log", and the status bar's console carries an export
+  button while it is open. The file starts with the build, the desktop,
+  GTK and libadwaita versions, then everything the console recorded since
+  the app started (the console's buffer grows from 2,000 to 20,000 lines
+  so a session fits), with email addresses shortened to their domain.
+- **French** (PR #134, @frenchy82): the composer's picture-resizing menu
+  and the last loose strings; 713 of 717 messages translated.
+- Under the hood: a `keywords` column on the message index (added in
+  place; rows fill in as folders re-sync), a `local_tags` table for the
+  Vireo-only tags, `tags.toml` beside `filters.toml` (both in the settings
+  bundle), a `.tag-<keyword>` colour stylesheet the chips and sidebar
+  share, and a `tag-symbolic` icon.
+
 ## 1.22.1-beta.1 — 2026-09-06
 
 The beta channel catches up with stable 1.22.0: the same code, no
