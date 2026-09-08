@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.24.2-beta.1" date="2026-09-08" type="development">
+      <description>
+        <p>Catch-up with stable 1.24.1: multi-line message previews show every line again; swiping a row to archive or delete slides it flush over a full-width strip.</p>
+      </description>
+    </release>
     <release version="1.24.1-beta.1" date="2026-09-08" type="development">
       <description><p>Catch-up with stable 1.24.0: the reader font and colour override, auto-empty Junk and Trash, the two-pane settings window, and OpenPGP end to end.</p></description>
     </release>
