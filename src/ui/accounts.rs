@@ -127,6 +127,10 @@ pub struct AccountsWindow {
     /// Filter rules (#47), managed on this tab.
     filter_rules: Vec<crate::config::FilterRule>,
     filters_list: Option<gtk::ListBox>,
+    /// The filters page's search text, read by the list's filter function.
+    filters_query: std::rc::Rc<std::cell::RefCell<String>>,
+    /// The senders page's search text, shared by both lists.
+    senders_query: std::rc::Rc<std::cell::RefCell<String>>,
     /// Tags (#71), managed on this tab too — the rules' "Tag with" names them.
     tags: Vec<crate::config::Tag>,
     tags_list: Option<gtk::ListBox>,
@@ -172,6 +176,15 @@ struct AliasDialog {
 
 #[derive(Debug)]
 pub enum AccountsInput {
+    /// The settings sidebar chose one of this component's pages (#141):
+    /// "accounts", "tags", "filters" or "senders".
+    ShowPage(String),
+    /// The filters page's search text changed.
+    SearchFilters(String),
+    /// The senders page's search text changed (both lists).
+    SearchSenders(String),
+    /// Leave the account editor without saving (the settings window moved on).
+    CloseEditor,
     /// The app's live folder lists per account email (for Special Folders).
     SetFolderChoices(std::collections::HashMap<String, Vec<(String, String)>>),
     AddAccount,
@@ -313,6 +326,24 @@ pub enum AccountsCmd {
     AliasTested(Result<(), String>),
 }
 
+/// Whether a list row survives the page's search text (#141): matched
+/// against the row's title and, for an action row, its subtitle.
+fn row_matches(row: &gtk::ListBoxRow, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let title = row
+        .downcast_ref::<adw::PreferencesRow>()
+        .map(|r| r.title().to_lowercase())
+        .unwrap_or_default();
+    let subtitle = row
+        .downcast_ref::<adw::ActionRow>()
+        .and_then(|r| r.subtitle())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+    title.contains(query) || subtitle.contains(query)
+}
+
 /// Everything the Accounts panel needs at launch: the accounts themselves
 /// plus the mail-hygiene lists that live on this tab (filters, allow list,
 /// blocklist).
@@ -348,172 +379,207 @@ impl Component for AccountsWindow {
                         // shared header (with the view switcher) sits above.
 
                         #[wrap(Some)]
-                        set_content = &adw::PreferencesPage {
-                            add = &adw::PreferencesGroup {
-                                set_title: &i18n("Mail Accounts"),
-                                set_description: Some(
-                                    i18n("Drag to set the order they appear in the sidebar.").as_str()
-                                ),
+                        #[name = "list_stack"]
+                        set_content = &gtk::Stack {
+                            set_transition_type: gtk::StackTransitionType::Crossfade,
 
-                                #[name = "accounts_list"]
-                                gtk::ListBox {
-                                    add_css_class: "boxed-list",
-                                    set_selection_mode: gtk::SelectionMode::None,
-                                    connect_row_activated[sender] => move |_, row| {
-                                        sender.input(AccountsInput::EditAccount(row.index() as usize));
-                                    },
-                                },
-                            },
+                            add_named[Some("accounts")] = &adw::PreferencesPage {
+                                add = &adw::PreferencesGroup {
+                                    set_title: &i18n("Mail Accounts"),
+                                    set_description: Some(
+                                        i18n("Drag to set the order they appear in the sidebar.").as_str()
+                                    ),
 
-                            #[name = "goa_group"]
-                            add = &adw::PreferencesGroup {
-                                set_title: &i18n("GNOME Online Accounts"),
-                                set_description: Some(
-                                    i18n("Mail accounts from GNOME Settings. Toggle one on to \
-                                     use it in Vireo.").as_str()
-                                ),
-                                set_visible: false,
-
-                                #[name = "goa_list"]
-                                gtk::ListBox {
-                                    add_css_class: "boxed-list",
-                                    set_selection_mode: gtk::SelectionMode::None,
-                                },
-                            },
-
-                            add = &adw::PreferencesGroup {
-                                gtk::Button {
-                                    set_label: &i18n("Add Account"),
-                                    add_css_class: "suggested-action",
-                                    add_css_class: "pill",
-                                    set_halign: gtk::Align::Center,
-                                    connect_clicked => AccountsInput::AddAccount,
-                                },
-                            },
-
-                            // Tags (#71): a name and colour per keyword.
-                            add = &adw::PreferencesGroup {
-                                set_title: &i18n("Tags"),
-                                set_description: Some(
-                                    i18n("Label messages with one or more coloured tags. \
-                                     Tags are stored on the mail server as IMAP keywords, \
-                                     so Thunderbird and other clients show the same tags.").as_str()
-                                ),
-                                #[wrap(Some)]
-                                set_header_suffix = &gtk::Button {
-                                    set_label: &i18n("Add Tag…"),
-                                    set_valign: gtk::Align::Center,
-                                    add_css_class: "flat",
-                                    connect_clicked => AccountsInput::AddTag,
-                                },
-
-                                #[name = "tags_list"]
-                                gtk::ListBox {
-                                    add_css_class: "boxed-list",
-                                    set_selection_mode: gtk::SelectionMode::None,
-                                },
-                            },
-
-                            // Mail hygiene (moved from Settings): filters,
-                            // the remote-content allow list, the blocklist.
-                            add = &adw::PreferencesGroup {
-                                set_title: &i18n("Filters"),
-                                set_description: Some(
-                                    i18n("File incoming mail into folders or tag it automatically, \
-                                     by sender, subject or recipients. Applied to each \
-                                     account's Inbox as Vireo syncs it.").as_str()
-                                ),
-                                #[wrap(Some)]
-                                set_header_suffix = &gtk::Button {
-                                    set_label: &i18n("Add Filter…"),
-                                    set_valign: gtk::Align::Center,
-                                    add_css_class: "flat",
-                                    connect_clicked => AccountsInput::AddFilter,
-                                },
-
-                                #[name = "filters_list"]
-                                gtk::ListBox {
-                                    add_css_class: "boxed-list",
-                                    set_selection_mode: gtk::SelectionMode::None,
-                                },
-                            },
-
-                            add = &adw::PreferencesGroup {
-                                set_title: &i18n("Allowed Senders"),
-                                set_description: Some(
-                                    i18n("Messages from these senders load remote content \
-                                     automatically.").as_str()
-                                ),
-
-                                #[name = "add_sender_row"]
-                                adw::EntryRow {
-                                    set_title: &i18n("Email address"),
-                                    set_input_purpose: gtk::InputPurpose::Email,
-                                    set_show_apply_button: false,
-                                    connect_entry_activated[sender] => move |row| {
-                                        sender.input(AccountsInput::AddSenderText(row.text().to_string()));
-                                        row.set_text("");
-                                    },
-
-                                    add_suffix = &gtk::Button {
-                                        set_icon_name: "co.hyprlab.Vireo-list-add-symbolic",
-                                        set_tooltip_text: Some(i18n("Allow this sender").as_str()),
-                                        set_valign: gtk::Align::Center,
-                                        add_css_class: "flat",
-                                        connect_clicked[sender, add_sender_row] => move |_| {
-                                            sender.input(AccountsInput::AddSenderText(
-                                                add_sender_row.text().to_string(),
-                                            ));
-                                            add_sender_row.set_text("");
+                                    #[name = "accounts_list"]
+                                    gtk::ListBox {
+                                        add_css_class: "boxed-list",
+                                        set_selection_mode: gtk::SelectionMode::None,
+                                        connect_row_activated[sender] => move |_, row| {
+                                            sender.input(AccountsInput::EditAccount(row.index() as usize));
                                         },
                                     },
                                 },
 
-                                #[local_ref]
-                                senders_box -> gtk::ListBox {
-                                    add_css_class: "boxed-list",
-                                    add_css_class: "sender-list",
-                                    set_selection_mode: gtk::SelectionMode::None,
+                                #[name = "goa_group"]
+                                add = &adw::PreferencesGroup {
+                                    set_title: &i18n("GNOME Online Accounts"),
+                                    set_description: Some(
+                                        i18n("Mail accounts from GNOME Settings. Toggle one on to \
+                                         use it in Vireo.").as_str()
+                                    ),
+                                    set_visible: false,
+
+                                    #[name = "goa_list"]
+                                    gtk::ListBox {
+                                        add_css_class: "boxed-list",
+                                        set_selection_mode: gtk::SelectionMode::None,
+                                    },
+                                },
+
+                                add = &adw::PreferencesGroup {
+                                    gtk::Button {
+                                        set_label: &i18n("Add Account"),
+                                        add_css_class: "suggested-action",
+                                        add_css_class: "pill",
+                                        set_halign: gtk::Align::Center,
+                                        connect_clicked => AccountsInput::AddAccount,
+                                    },
                                 },
                             },
 
-                            add = &adw::PreferencesGroup {
-                                set_title: &i18n("Blacklist"),
-                                set_description: Some(
-                                    i18n("Incoming mail from these senders is deleted \
-                                     automatically (moved to Trash). Enter an email \
-                                     address, or a whole domain like \"example.com\" \
-                                     to block every sender there.").as_str()
-                                ),
-
-                                #[name = "add_blacklist_row"]
-                                adw::EntryRow {
-                                    set_title: &i18n("Address or domain"),
-                                    set_show_apply_button: false,
-                                    connect_entry_activated[sender] => move |row| {
-                                        sender.input(AccountsInput::AddBlacklistText(row.text().to_string()));
-                                        row.set_text("");
-                                    },
-
-                                    add_suffix = &gtk::Button {
-                                        set_icon_name: "co.hyprlab.Vireo-list-add-symbolic",
-                                        set_tooltip_text: Some(i18n("Block this sender").as_str()),
+                            add_named[Some("tags")] = &adw::PreferencesPage {
+                                // Tags (#71): a name and colour per keyword.
+                                add = &adw::PreferencesGroup {
+                                    set_title: &i18n("Tags"),
+                                    set_description: Some(
+                                        i18n("Label messages with one or more coloured tags. \
+                                         Tags are stored on the mail server as IMAP keywords, \
+                                         so Thunderbird and other clients show the same tags.").as_str()
+                                    ),
+                                    #[wrap(Some)]
+                                    set_header_suffix = &gtk::Button {
+                                        set_label: &i18n("Add Tag…"),
                                         set_valign: gtk::Align::Center,
                                         add_css_class: "flat",
-                                        connect_clicked[sender, add_blacklist_row] => move |_| {
-                                            sender.input(AccountsInput::AddBlacklistText(
-                                                add_blacklist_row.text().to_string(),
-                                            ));
-                                            add_blacklist_row.set_text("");
+                                        connect_clicked => AccountsInput::AddTag,
+                                    },
+
+                                    #[name = "tags_list"]
+                                    gtk::ListBox {
+                                        add_css_class: "boxed-list",
+                                        set_selection_mode: gtk::SelectionMode::None,
+                                    },
+                                },
+                            },
+
+                            add_named[Some("filters")] = &adw::PreferencesPage {
+                                // A search box over the long lists (#141): rows
+                                // that do not match the text are hidden.
+                                add = &adw::PreferencesGroup {
+                                    #[name = "filters_search"]
+                                    gtk::SearchEntry {
+                                        set_placeholder_text: Some(i18n("Search filters").as_str()),
+                                        connect_search_changed[sender] => move |entry| {
+                                            sender.input(AccountsInput::SearchFilters(entry.text().to_string()));
                                         },
                                     },
                                 },
 
-                                #[local_ref]
-                                blacklist_box -> gtk::ListBox {
-                                    add_css_class: "boxed-list",
-                                    add_css_class: "sender-list",
-                                    set_selection_mode: gtk::SelectionMode::None,
+                                // Mail hygiene (moved from Settings): filters,
+                                // the remote-content allow list, the blocklist.
+                                add = &adw::PreferencesGroup {
+                                    set_title: &i18n("Filters"),
+                                    set_description: Some(
+                                        i18n("File incoming mail into folders or tag it automatically, \
+                                         by sender, subject or recipients. Applied to each \
+                                         account's Inbox as Vireo syncs it.").as_str()
+                                    ),
+                                    #[wrap(Some)]
+                                    set_header_suffix = &gtk::Button {
+                                        set_label: &i18n("Add Filter…"),
+                                        set_valign: gtk::Align::Center,
+                                        add_css_class: "flat",
+                                        connect_clicked => AccountsInput::AddFilter,
+                                    },
+
+                                    #[name = "filters_list"]
+                                    gtk::ListBox {
+                                        add_css_class: "boxed-list",
+                                        set_selection_mode: gtk::SelectionMode::None,
+                                    },
+                                },
+                            },
+
+                            add_named[Some("senders")] = &adw::PreferencesPage {
+                                // A search box over the long lists (#141): rows
+                                // that do not match the text are hidden.
+                                add = &adw::PreferencesGroup {
+                                    #[name = "senders_search"]
+                                    gtk::SearchEntry {
+                                        set_placeholder_text: Some(i18n("Search senders").as_str()),
+                                        connect_search_changed[sender] => move |entry| {
+                                            sender.input(AccountsInput::SearchSenders(entry.text().to_string()));
+                                        },
+                                    },
+                                },
+
+                                add = &adw::PreferencesGroup {
+                                    set_title: &i18n("Allowed Senders"),
+                                    set_description: Some(
+                                        i18n("Messages from these senders load remote content \
+                                         automatically.").as_str()
+                                    ),
+
+                                    #[name = "add_sender_row"]
+                                    adw::EntryRow {
+                                        set_title: &i18n("Email address"),
+                                        set_input_purpose: gtk::InputPurpose::Email,
+                                        set_show_apply_button: false,
+                                        connect_entry_activated[sender] => move |row| {
+                                            sender.input(AccountsInput::AddSenderText(row.text().to_string()));
+                                            row.set_text("");
+                                        },
+
+                                        add_suffix = &gtk::Button {
+                                            set_icon_name: "co.hyprlab.Vireo-list-add-symbolic",
+                                            set_tooltip_text: Some(i18n("Allow this sender").as_str()),
+                                            set_valign: gtk::Align::Center,
+                                            add_css_class: "flat",
+                                            connect_clicked[sender, add_sender_row] => move |_| {
+                                                sender.input(AccountsInput::AddSenderText(
+                                                    add_sender_row.text().to_string(),
+                                                ));
+                                                add_sender_row.set_text("");
+                                            },
+                                        },
+                                    },
+
+                                    #[local_ref]
+                                    senders_box -> gtk::ListBox {
+                                        add_css_class: "boxed-list",
+                                        add_css_class: "sender-list",
+                                        set_selection_mode: gtk::SelectionMode::None,
+                                    },
+                                },
+
+                                add = &adw::PreferencesGroup {
+                                    set_title: &i18n("Blacklist"),
+                                    set_description: Some(
+                                        i18n("Incoming mail from these senders is deleted \
+                                         automatically (moved to Trash). Enter an email \
+                                         address, or a whole domain like \"example.com\" \
+                                         to block every sender there.").as_str()
+                                    ),
+
+                                    #[name = "add_blacklist_row"]
+                                    adw::EntryRow {
+                                        set_title: &i18n("Address or domain"),
+                                        set_show_apply_button: false,
+                                        connect_entry_activated[sender] => move |row| {
+                                            sender.input(AccountsInput::AddBlacklistText(row.text().to_string()));
+                                            row.set_text("");
+                                        },
+
+                                        add_suffix = &gtk::Button {
+                                            set_icon_name: "co.hyprlab.Vireo-list-add-symbolic",
+                                            set_tooltip_text: Some(i18n("Block this sender").as_str()),
+                                            set_valign: gtk::Align::Center,
+                                            add_css_class: "flat",
+                                            connect_clicked[sender, add_blacklist_row] => move |_| {
+                                                sender.input(AccountsInput::AddBlacklistText(
+                                                    add_blacklist_row.text().to_string(),
+                                                ));
+                                                add_blacklist_row.set_text("");
+                                            },
+                                        },
+                                    },
+
+                                    #[local_ref]
+                                    blacklist_box -> gtk::ListBox {
+                                        add_css_class: "boxed-list",
+                                        add_css_class: "sender-list",
+                                        set_selection_mode: gtk::SelectionMode::None,
+                                    },
                                 },
                             },
                         },
@@ -528,7 +594,10 @@ impl Component for AccountsWindow {
                     #[wrap(Some)]
                     set_child = &adw::ToolbarView {
                         add_top_bar = &adw::HeaderBar {
-                            set_show_end_title_buttons: false,
+                            // The window's close button lives here while the
+                            // editor is up (the shared header hides), so it
+                            // is never out of reach.
+                            set_show_end_title_buttons: true,
                             pack_end = &gtk::Button {
                                 set_label: &i18n("Save"),
                                 add_css_class: "suggested-action",
@@ -852,6 +921,22 @@ impl Component for AccountsWindow {
                                 adw::ComboRow { set_title: &i18n("Archive") },
                             },
 
+                            // OpenPGP (#133): which of the user's keys this
+                            // account signs and decrypts with.
+                            add = &adw::PreferencesGroup {
+                                set_title: &i18n("OpenPGP"),
+                                set_description: Some(
+                                    i18n("The key that signs mail sent from this account and opens \
+                                     what is encrypted to it. Keys are managed under OpenPGP in \
+                                     the sidebar.").as_str()
+                                ),
+                                #[name = "pgp_key_row"]
+                                adw::ComboRow {
+                                    set_title: &i18n("Key"),
+                                    set_subtitle: &i18n("Automatic uses the key whose address matches."),
+                                },
+                            },
+
                             add = &adw::PreferencesGroup {
                                 set_title: &i18n("Signature"),
                                 set_description: Some(
@@ -951,6 +1036,8 @@ impl Component for AccountsWindow {
             blacklist_addrs: Vec::new(),
             filter_rules: init.filters,
             filters_list: None,
+            filters_query: Default::default(),
+            senders_query: Default::default(),
             tags: init.tags,
             tags_list: None,
         };
@@ -977,6 +1064,14 @@ impl Component for AccountsWindow {
         blacklist_box.set_visible(!model.blacklist_addrs.is_empty());
         let widgets = view_output!();
         model.filters_list = Some(widgets.filters_list.clone());
+        {
+            let q = model.filters_query.clone();
+            widgets.filters_list.set_filter_func(move |row| row_matches(row, &q.borrow()));
+            let q = model.senders_query.clone();
+            senders_box.set_filter_func(move |row| row_matches(row, &q.borrow()));
+            let q = model.senders_query.clone();
+            blacklist_box.set_filter_func(move |row| row_matches(row, &q.borrow()));
+        }
         model.rebuild_filter_rows(&sender);
         model.tags_list = Some(widgets.tags_list.clone());
         model.rebuild_tag_rows(&sender);
@@ -1050,6 +1145,23 @@ impl Component for AccountsWindow {
         root: &Self::Root,
     ) {
         match message {
+            AccountsInput::ShowPage(id) => {
+                widgets.list_stack.set_visible_child_name(&id);
+            }
+            AccountsInput::CloseEditor => {
+                if widgets.nav.visible_page().and_then(|p| p.tag()).is_some_and(|t| t == "editor") {
+                    widgets.nav.pop();
+                }
+            }
+            AccountsInput::SearchFilters(text) => {
+                *self.filters_query.borrow_mut() = text.to_lowercase();
+                widgets.filters_list.invalidate_filter();
+            }
+            AccountsInput::SearchSenders(text) => {
+                *self.senders_query.borrow_mut() = text.to_lowercase();
+                self.senders.widget().invalidate_filter();
+                self.blacklist.widget().invalidate_filter();
+            }
             AccountsInput::AddAccount => {
                 self.editing = None;
                 self.emoji = None;
@@ -2532,7 +2644,43 @@ fn read_account(widgets: &AccountsWindowWidgets, emoji: Option<String>) -> Accou
             .get(widgets.empty_trash_row.selected() as usize)
             .copied()
             .unwrap_or(0),
+        // Row 0 is Automatic; the rest follow PGP_KEY_CHOICES.
+        pgp_key: PGP_KEY_CHOICES.with(|c| {
+            let sel = widgets.pgp_key_row.selected() as usize;
+            sel.checked_sub(1).and_then(|i| c.borrow().get(i).map(|k| k.fingerprint.clone()))
+        }),
     }
+}
+
+thread_local! {
+    /// The user's own keys as the editor's OpenPGP combo lists them (#133),
+    /// filled when the editor opens and read when it saves. The combo shows
+    /// labels; this keeps the fingerprints behind them.
+    static PGP_KEY_CHOICES: std::cell::RefCell<Vec<crate::pgp::KeyInfo>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Fill the OpenPGP key combo with the user's own keys and select the
+/// account's, or Automatic.
+fn fill_pgp_key_row(widgets: &AccountsWindowWidgets, chosen: Option<&str>) {
+    let keys: Vec<crate::pgp::KeyInfo> = if crate::pgp::available() {
+        crate::pgp::list_keys(&crate::pgp::Gpg::system(), true)
+            .into_iter()
+            .filter(|k| k.usable() && k.can_sign)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut labels = vec![i18n("Automatic")];
+    labels.extend(keys.iter().map(|k| format!("{} ({})", k.primary_uid(), crate::pgp::key_display(&k.key_id))));
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    widgets.pgp_key_row.set_model(Some(&gtk::StringList::new(&refs)));
+    widgets.pgp_key_row.set_list_factory(Some(&non_ellipsizing_factory()));
+    let selected = chosen
+        .and_then(|f| keys.iter().position(|k| k.fingerprint.eq_ignore_ascii_case(f)))
+        .map(|i| i as u32 + 1)
+        .unwrap_or(0);
+    widgets.pgp_key_row.set_selected(selected);
+    PGP_KEY_CHOICES.with(|c| *c.borrow_mut() = keys);
 }
 
 /// Auto-empty choices (#140), in combo order: never, then the ages.
@@ -2600,6 +2748,7 @@ fn fill_editor(widgets: &AccountsWindowWidgets, acc: &AccountConfig) {
     });
     widgets.empty_junk_row.set_selected(auto_empty_index(acc.empty_junk_days));
     widgets.empty_trash_row.set_selected(auto_empty_index(acc.empty_trash_days));
+    fill_pgp_key_row(widgets, acc.pgp_key.as_deref());
     // Show the effective label (custom, or the email address).
     widgets
         .label_row
@@ -2679,6 +2828,7 @@ fn clear_editor(widgets: &AccountsWindowWidgets) {
     widgets.push_row.set_selected(0);
     widgets.empty_junk_row.set_selected(0);
     widgets.empty_trash_row.set_selected(0);
+    fill_pgp_key_row(widgets, None);
     widgets.smtp_user_row.set_text("");
     widgets.smtp_pass_row.set_text("");
     widgets.label_row.set_text("");

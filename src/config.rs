@@ -204,6 +204,11 @@ pub struct AccountConfig {
     /// The same for the Trash folder.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub empty_trash_days: u32,
+    /// The OpenPGP key (fingerprint) that signs mail from this account and
+    /// opens what is encrypted to it (#133); `None` = the key whose address
+    /// matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pgp_key: Option<String>,
 }
 
 fn is_zero(v: &u32) -> bool {
@@ -1928,10 +1933,9 @@ struct StateFile {
     /// Contacts view: the contact-list pane's width in px.
     #[serde(default = "default_contacts_pane_width")]
     contacts_pane_width: i32,
-    /// Auxiliary window heights, remembering the user's vertical resizes.
-    /// (`prefs_height` covers the combined Accounts & Preferences window.)
-    #[serde(default = "default_aux_height")]
-    prefs_height: i32,
+    /// The About window's height, remembering the user's vertical resize.
+    /// (The settings window's is fixed since its two-pane layout, #141; an
+    /// old `prefs_height` key in the file is ignored.)
     #[serde(default = "default_about_height")]
     about_height: i32,
     /// Split-reply panel height in px (the dragged divider). 0 = never
@@ -1954,10 +1958,6 @@ struct StateFile {
     /// `app_icon::init_on_startup`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     app_icon: Option<String>,
-}
-
-fn default_aux_height() -> i32 {
-    720
 }
 
 fn default_about_height() -> i32 {
@@ -2153,18 +2153,8 @@ pub fn save_gallery_sort(sort: u32) {
     save_state(&s);
 }
 
-/// Auxiliary window heights (Preferences / Accounts / About): they open tall
-/// by default and remember the user's own vertical resize across restarts.
-pub fn load_prefs_height() -> i32 {
-    load_state().prefs_height.clamp(400, 4000)
-}
-
-pub fn save_prefs_height(height: i32) {
-    let mut s = load_state();
-    s.prefs_height = height.clamp(400, 4000);
-    save_state(&s);
-}
-
+/// The About window's height: tall by default, remembering the user's own
+/// vertical resize across restarts.
 /// The split-reply panel's dragged height; 0 when it has never been dragged
 /// (the caller computes an opening default from the pane).
 pub fn load_split_reply_height() -> i32 {
@@ -2405,6 +2395,7 @@ mod filter_tests {
             folder_roles: Default::default(),
             empty_junk_days: 0,
             empty_trash_days: 0,
+            pgp_key: None,
         };
         acc.aliases = Vec::new();
         let bundle = SettingsBundle {

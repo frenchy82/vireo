@@ -1,6 +1,10 @@
 # Changelog
 
-## 1.24.0 — 2026-09-07
+## 1.24.1-beta.1 — 2026-09-08
+
+Catch-up with stable 1.24.0: the same code, on the beta channel.
+
+## 1.24.0 — 2026-09-08
 
 The reader's own fonts and colours over the senders'.
 
@@ -31,6 +35,17 @@ The reader's own fonts and colours over the senders'.
   folders, so the choice does nothing there. Failures are logged and
   retried at the next sync. Stored per account as `empty_junk_days` and
   `empty_trash_days`.
+- **Settings in two panes** (#141, requested by @typedev). The settings
+  window is a sidebar of categories beside the chosen category's groups,
+  in place of the two long scrolling tabs. Under Accounts: Mail Accounts,
+  Tags, Filters, Senders (the allowed and blocked lists); under Settings:
+  General (with notifications), Appearance, Sidebar, Message List, Reading
+  (with conversations), Composing (with spelling), Privacy, Date and Time,
+  System, Backup. The Filters and Senders pages carry a search box that
+  narrows their lists as you type, so a long allow list or rule set is no
+  longer a scroll. The window opens wider to make room; under 640sp the
+  panes collapse to one, the sidebar first. The account editor still opens
+  over the content pane with its own back and Save header.
 - **OpenPGP, first slice: reading** (#133, requested by @greedykangaroo01).
   Vireo now decrypts and verifies incoming OpenPGP mail through the user's
   own GnuPG: `gpg` on the path, the keyring in `~/.gnupg`, the agent and its
@@ -47,6 +62,32 @@ The reader's own fonts and colours over the senders'.
   cached, and the background prefetch leaves encrypted mail alone so no
   passphrase prompt appears on its own. Signature verdicts are cached with
   the sender check. The Flatpak gains access to `~/.gnupg` and the agent
+  socket.
+- **OpenPGP, second slice: keys and sending, without a terminal** (#133).
+  An OpenPGP page in the settings sidebar lists your own keys and other
+  people's: generate a key for one of your addresses (a signing key with
+  an encryption subkey; the passphrase goes to gpg down a pipe and is not
+  kept), import a key file, export a public key, fetch a key by address
+  (WKD, then the keyservers), trust a key (a local signature with your own,
+  the fingerprint shown to check first) and remove one. In the reader, the
+  verdict popover offers "Fetch the sender's key" when the signing key is
+  missing (the message's own Autocrypt key first) and "Trust this key…"
+  when it is unvouched; either re-fetches the message so the chip follows
+  the keyring. An attached public key gets an "Import OpenPGP key" action in
+  the attachment drawer. Each account can name the key it signs with
+  (Automatic picks by address). The composer gains Sign and Encrypt
+  toggles: Sign sends PGP/MIME `multipart/signed` (the signed bytes are the
+  entity lettre puts on the wire; `micalg` from gpg's own digest), Encrypt
+  sends `multipart/encrypted` to every recipient's key and your own, signed
+  inside; a missing key of yours or theirs is named before anything leaves.
+  Drafts are kept as written; signing and encrypting happen at send. A reply
+  to an encrypted message starts with Encrypt on. The README carries a
+  setup guide.
+- **Settings window details.** The window opens at a fixed 740px and no
+  longer remembers a resize; the app menu entry reads "Settings"; the
+  account editor keeps the window's close button in its own header, and
+  choosing another category while an editor is open asks to save, discard
+  or stay. The General category wears the puzzle-piece icon.
   socket. Signing and encrypting outgoing mail, and key management, are the
   next slices.
 ## 1.23.2-beta.1 — 2026-09-07

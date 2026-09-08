@@ -760,6 +760,10 @@ pub enum AppMsg {
     SetOverrideFonts(bool),
     SetReaderFont(String),
     SetOverrideColors(bool),
+    /// Fetch a message's body again: its OpenPGP verdict changed (#133).
+    ReloadBody(Box<crate::models::Message>),
+    /// Select a settings category by id (the showcase hook).
+    ShowSettingsPage(String),
     ComposeTo(String),
     Reply,
     ReplyAll,
@@ -1668,6 +1672,8 @@ impl SimpleComponent for AppModel {
                     MessageViewOutput::SelectCards(keys) => AppMsg::SelectCards(keys),
                     MessageViewOutput::ComposeTo(addr) => AppMsg::ComposeTo(addr),
                     MessageViewOutput::AddContactAddr(addr) => AppMsg::AddContactAddr(addr),
+                    MessageViewOutput::ReloadBody(m) => AppMsg::ReloadBody(m),
+                    MessageViewOutput::Notice(text) => AppMsg::Notice(text),
                 });
 
         // The drawer owns a Paned whose top pane is the reader body, so hand it
@@ -1742,7 +1748,7 @@ impl SimpleComponent for AppModel {
         let help_menu = gtk::gio::Menu::new();
         {
             let settings = gtk::gio::Menu::new();
-            settings.append(Some(i18n("Accounts & Settings").as_str()), Some("win.accounts"));
+            settings.append(Some(i18n("Settings").as_str()), Some("win.accounts"));
             menu.append_section(None, &settings);
 
             let printing = gtk::gio::Menu::new();
@@ -2802,6 +2808,13 @@ impl SimpleComponent for AppModel {
                         } else {
                             AppMsg::OpenPreferences
                         });
+                        // Any other value names a sidebar category (#141).
+                        if panel != "accounts" && panel != "prefs" {
+                            let s = s.clone();
+                            gtk::glib::timeout_add_seconds_local_once(1, move || {
+                                s.input(AppMsg::ShowSettingsPage(panel));
+                            });
+                        }
                     });
                 }
                 let main: gtk::Window = root.clone().upcast();
@@ -3759,13 +3772,13 @@ impl SimpleComponent for AppModel {
                 let m = self.with_cached_body(*message);
                 match action {
                     RowAction::Reply => {
-                        self.open_inline_reply(m.account_id, reply_prefill(&m), Some((m.account_id, m.id)), &sender);
+                        self.open_inline_reply(m.account_id, self.reply_pgp(&m, reply_prefill(&m)), Some((m.account_id, m.id)), &sender);
                     }
                     RowAction::ReplyAll => {
                         let self_email = self.email_of(m.account_id).unwrap_or_default();
                         self.open_inline_reply(
                             m.account_id,
-                            reply_all_prefill(&m, &self_email),
+                            self.reply_pgp(&m, reply_all_prefill(&m, &self_email)),
                             Some((m.account_id, m.id)),
                             &sender,
                         );
@@ -3806,14 +3819,14 @@ impl SimpleComponent for AppModel {
                 match action {
                     RowAction::Reply => {
                         let m = self.with_cached_body(m);
-                        self.open_compose(m.account_id, reply_prefill(&m), &sender);
+                        self.open_compose(m.account_id, self.reply_pgp(&m, reply_prefill(&m)), &sender);
                     }
                     RowAction::ReplyAll => {
                         let m = self.with_cached_body(m);
                         let self_email = self.email_of(m.account_id).unwrap_or_default();
                         self.open_compose(
                             m.account_id,
-                            reply_all_prefill(&m, &self_email),
+                            self.reply_pgp(&m, reply_all_prefill(&m, &self_email)),
                             &sender,
                         );
                     }
@@ -3938,7 +3951,7 @@ impl SimpleComponent for AppModel {
 
             AppMsg::Reply => {
                 if let Some(m) = self.reply_target() {
-                    self.open_inline_reply(m.account_id, reply_prefill(&m), Some((m.account_id, m.id)), &sender);
+                    self.open_inline_reply(m.account_id, self.reply_pgp(&m, reply_prefill(&m)), Some((m.account_id, m.id)), &sender);
                 }
             }
 
@@ -3947,7 +3960,7 @@ impl SimpleComponent for AppModel {
                     let self_email = self.email_of(m.account_id).unwrap_or_default();
                     self.open_inline_reply(
                         m.account_id,
-                        reply_all_prefill(&m, &self_email),
+                        self.reply_pgp(&m, reply_all_prefill(&m, &self_email)),
                         Some((m.account_id, m.id)),
                         &sender,
                     );
@@ -4666,6 +4679,16 @@ impl SimpleComponent for AppModel {
                 }
             }
 
+            AppMsg::ShowSettingsPage(id) => {
+                if let Some(p) = &self.prefs {
+                    p.emit(PrefInput::ShowPageById(id));
+                }
+            }
+            AppMsg::ReloadBody(m) => {
+                if let Some(path) = self.resolve_folder_path(&m) {
+                    self.send_to(m.account_id, MailRequest::LoadBody { message_id: m.id, path, uid: m.uid });
+                }
+            }
             AppMsg::SetOverrideFonts(on) => {
                 if self.override_fonts != on {
                     self.override_fonts = on;
@@ -8037,6 +8060,8 @@ impl AppModel {
                 MessageWindowOutput::OpenAttachment(att) => AppMsg::OpenAttachmentItem(att),
                 MessageWindowOutput::SaveAllAttachments(items) => AppMsg::SaveAttachmentItems(items),
                 MessageWindowOutput::AllowSender(addr) => AppMsg::AllowSender(addr),
+                MessageWindowOutput::ReloadBody(m) => AppMsg::ReloadBody(m),
+                MessageWindowOutput::Notice(text) => AppMsg::Notice(text),
                 MessageWindowOutput::ComposeTo(addr) => AppMsg::ComposeTo(addr),
                 MessageWindowOutput::Closed => AppMsg::PopoutClosed(key),
             });
@@ -8182,6 +8207,7 @@ impl AppModel {
             in_reply_to: String::new(),
             references: String::new(),
             draft_origin: None,
+            encrypt: false,
             outbox_origin: Some(id),
             reply_addressed_to: String::new(),
         };
@@ -8256,11 +8282,13 @@ impl AppModel {
                 };
                 let cfg = Some(cfg);
                 let signature = cfg.and_then(|c| c.signature.clone()).unwrap_or_default();
+                let pgp_key = cfg.and_then(|c| c.pgp_key.clone());
                 let mut identities = vec![ComposeAccount {
                     id,
                     label,
                     signature: signature.clone(),
                     email: email.clone(),
+                    pgp_key: pgp_key.clone(),
                     alias_from: None,
                 }];
                 for alias in cfg.map(|c| c.aliases.as_slice()).unwrap_or_default() {
@@ -8278,6 +8306,7 @@ impl AppModel {
                         label: display.clone(),
                         signature: signature.clone(),
                         email: addr,
+                        pgp_key: pgp_key.clone(),
                         alias_from: Some(display),
                     });
                 }
@@ -9884,6 +9913,18 @@ impl AppModel {
             tray_mail: self.tray_mail,
             app_icon: self.app_icon.clone(),
             accounts_panel: accounts.widget().clone().upcast::<gtk::Widget>(),
+            accounts_sender: accounts.sender().clone(),
+            identities: self
+                .config
+                .iter()
+                .filter(|a| a.enabled)
+                .flat_map(|a| {
+                    std::iter::once((a.name.clone(), a.email.clone())).chain(a.aliases.iter().map(|al| {
+                        let (name, addr) = crate::config::split_identity(&al.identity);
+                        (if name.is_empty() { a.name.clone() } else { name }, addr)
+                    }))
+                })
+                .collect(),
             start_on_accounts: on_accounts,
         };
         let prefs = Preferences::builder()
@@ -10640,6 +10681,17 @@ impl AppModel {
     }
 
     /// The IMAP folder path a message lives in (its account's folder by id).
+    /// A reply to an encrypted message starts with Encrypt on (#133): the
+    /// verdict the reader had for the original says whether it was.
+    fn reply_pgp(&self, m: &Message, mut prefill: ComposePrefill) -> ComposePrefill {
+        prefill.encrypt = self
+            .sender_cache
+            .get(&(m.account_id, m.id))
+            .and_then(|c| c.pgp.as_ref())
+            .is_some_and(|p| p.encrypted);
+        prefill
+    }
+
     fn resolve_folder_path(&self, m: &Message) -> Option<String> {
         self.folders
             .get(&m.account_id)?
@@ -11229,6 +11281,7 @@ fn demo_account_configs() -> Vec<AccountConfig> {
         folder_roles: Default::default(),
         empty_junk_days: 0,
         empty_trash_days: 0,
+        pgp_key: None,
     };
     vec![
         mk("Jason M.", "jason@vireo.hyprlab.co", "#3584e4", "🚀"),
