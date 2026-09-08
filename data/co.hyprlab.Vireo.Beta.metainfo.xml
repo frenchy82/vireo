@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.24.3-beta.1" date="2026-09-08" type="development">
+      <description>
+        <p>Catch-up with stable 1.24.2: tags take any colour from the GTK colour chooser; the composer follows the GTK theme and a live light/dark switch.</p>
+      </description>
+    </release>
     <release version="1.24.2-beta.1" date="2026-09-08" type="development">
       <description>
         <p>Catch-up with stable 1.24.1: multi-line message previews show every line again; swiping a row to archive or delete slides it flush over a full-width strip.</p>
