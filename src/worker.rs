@@ -81,6 +81,9 @@ const PREFETCH_BODY_LIMIT: usize = 50;
 /// tree over and over. Explicit [`MailRequest::RefreshUnread`]s are never
 /// throttled — a refresh the user asked for always runs.
 const UNREAD_SWEEP_MIN: Duration = Duration::from_secs(60);
+/// How often an account's Junk / Trash auto-empty (#140) may run: it rides
+/// the unread sweep, but a server needs asking only a few times a day.
+const AUTO_EMPTY_MIN: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// How many leased per-folder IDLE watcher connections one account may hold at
 /// once (see [`watch_folder`]). The Inbox's permanent watcher and the main
@@ -697,6 +700,8 @@ async fn run_imap(
     // When the other folders' unread chips were last re-checked (None = not
     // yet this session; connect_and_list's full listing covers startup itself).
     let mut last_unread_sweep: Option<std::time::Instant> = None;
+    // When the Junk / Trash auto-empty (#140) last ran for this connection.
+    let mut last_auto_empty: Option<std::time::Instant> = None;
     // Whether the Inbox's permanent IDLE watcher has been spawned. It waits for
     // the main session to be up first — its connection must win the first slot
     // on servers with a per-user cap — and needs the folder list in the cache.
@@ -804,6 +809,8 @@ async fn run_imap(
                         .await;
                         last_unread_sweep = Some(std::time::Instant::now());
                         watch_changed_folders(&mut watchers, &account, &changed, &emit);
+                        auto_empty_imap(account_id, &account, sess, cache.as_ref(), &mut last_auto_empty, &emit)
+                            .await;
                     }
                 }
                 // Connected but the listing hasn't landed in the cache yet
@@ -1199,7 +1206,9 @@ async fn run_imap(
             } => match load_body_retry(&mut session, &account, &path, uid).await {
                 Ok((body, check, has_attachments)) => {
                     if let Some(c) = cache.as_ref() {
-                        c.save_body(account_id, &path, uid, &body);
+                        if body_cacheable(&check) {
+                            c.save_body(account_id, &path, uid, &body);
+                        }
                         c.save_sender_check(account_id, &path, uid, &check);
                         c.set_has_attachment(account_id, &path, uid, has_attachments);
                     }
@@ -1248,7 +1257,9 @@ async fn run_imap(
                                     continue;
                                 };
                                 if let Some(c) = cache.as_ref() {
-                                    c.save_body(account_id, &path, *uid, &body);
+                                    if body_cacheable(&check) {
+                                        c.save_body(account_id, &path, *uid, &body);
+                                    }
                                     c.save_sender_check(account_id, &path, *uid, &check);
                                     c.set_has_attachment(account_id, &path, *uid, has_attachments);
                                 }
@@ -1302,10 +1313,12 @@ async fn run_imap(
                 download: _,
             } => match load_raw_retry(&mut session, &account, &path, uid).await {
                 Ok(raw) => {
-                    let items = extract_attachments(&raw);
+                    let (items, cacheable) = attachments_of(&raw);
                     if let Some(c) = cache.as_ref() {
-                        c.save_attachments(account_id, &path, uid, &items);
-                        c.mark_attachments_checked(account_id, &path, uid);
+                        if cacheable {
+                            c.save_attachments(account_id, &path, uid, &items);
+                            c.mark_attachments_checked(account_id, &path, uid);
+                        }
                     }
                     emit(WorkerEvent::Attachments { message_id, items });
                 }
@@ -1414,6 +1427,8 @@ async fn run_imap(
                 .await;
                 last_unread_sweep = Some(std::time::Instant::now());
                 watch_changed_folders(&mut watchers, &account, &changed, &emit);
+                auto_empty_imap(account_id, &account, sess, cache.as_ref(), &mut last_auto_empty, &emit)
+                    .await;
             }
 
             MailRequest::MarkSpam { path, uid, dest } => {
@@ -2098,11 +2113,18 @@ async fn run_one_prefetch(
             .unwrap_or(false);
         if !already {
             if let Ok(raw) = load_raw_retry(session, account, &path, uid).await {
-                let attachments = extract_attachments(&raw);
-                let check = crate::verify::check_sender(&raw);
+                // OpenPGP mail is left for an explicit open (#133): nothing
+                // of it is cached, and decrypting here would raise the
+                // passphrase prompt out of nowhere.
+                if crate::pgp::detect(&raw).is_some() {
+                    emit(WorkerEvent::Status(prefetch_status(prefetch.len())));
+                    return;
+                }
+                let (_, check, _) = render_raw(&raw);
+                let (attachments, _) = attachments_of(&raw);
                 emit(WorkerEvent::SenderChecked { message_id: uid, check: check.clone() });
                 if let Some(c) = cache {
-                    c.save_body(account_id, &path, uid, &extract_body(&raw));
+                    c.save_body(account_id, &path, uid, &render_raw(&raw).0);
                     c.save_sender_check(account_id, &path, uid, &check);
                     c.save_attachments(account_id, &path, uid, &attachments);
                     // Mark as fetched so it's never re-downloaded to re-check,
@@ -2233,8 +2255,15 @@ async fn run_one_body_prefetch(
         return;
     }
     queue.pop_front();
-    if let Ok((body, check, has_attachments)) = load_body_retry(session, account, &path, uid).await
-    {
+    if let Ok(raw) = load_raw_retry(session, account, &path, uid).await {
+        // OpenPGP mail (#133) is left for an explicit open: nothing of it is
+        // cached or pushed ahead, and rendering it here would decrypt in the
+        // background — a passphrase prompt out of nowhere.
+        if crate::pgp::detect(&raw).is_some() {
+            emitted.insert((path, uid));
+            return;
+        }
+        let (body, check, has_attachments) = render_raw(&raw);
         if let Some(c) = cache {
             c.save_body(account_id, &path, uid, &body);
             c.save_sender_check(account_id, &path, uid, &check);
@@ -2640,6 +2669,62 @@ const INLINE_ATTACHMENT_MIN: usize = 64 * 1024;
 /// message's files without a fetch.
 pub fn extract_attachments_of(raw: &[u8]) -> Vec<crate::models::Attachment> {
     extract_attachments(raw)
+}
+
+/// What a raw message renders to: body HTML, the sender check (carrying the
+/// OpenPGP verdict, #133, when the message had any), and whether it has
+/// attachments. An encrypted message is decrypted through the user's GnuPG
+/// here, which may raise the agent's passphrase prompt — so this runs only
+/// for an explicit open, never for the background prefetch.
+fn render_raw(raw: &[u8]) -> (String, crate::models::SenderCheck, bool) {
+    let mut check = crate::verify::check_sender(raw);
+    match crate::pgp::unwrap_message(raw, &crate::pgp::Gpg::system()) {
+        Some(u) => {
+            let body = match &u.inner {
+                Some(inner) => extract_body(inner),
+                None => wrap_plain(&pgp_notice(&u.status)),
+            };
+            let has = u.inner.as_deref().is_some_and(|i| !extract_attachments(i).is_empty());
+            check.pgp = Some(u.status);
+            (body, check, has)
+        }
+        None => (extract_body(raw), check, !extract_attachments(raw).is_empty()),
+    }
+}
+
+/// The reader's stand-in for a message that could not be decrypted.
+fn pgp_notice(status: &crate::models::PgpStatus) -> String {
+    let mut text = status.summary();
+    for n in &status.notes {
+        text.push_str("\n");
+        text.push_str(n);
+    }
+    text
+}
+
+/// Whether a rendered body may go into the cache: never for anything
+/// OpenPGP. An encrypted message's plaintext lives only in the reader, and
+/// a failed decryption is retried at the next open. A signed one is fetched
+/// and verified afresh each time too, so importing or trusting the sender's
+/// key changes the verdict at the next open — a cached verdict would be the
+/// keyring as it stood the first time, for ever.
+fn body_cacheable(check: &crate::models::SenderCheck) -> bool {
+    check.pgp.is_none()
+}
+
+/// The attachments of a raw message, through any OpenPGP wrapping, and
+/// whether they may be cached (never for OpenPGP mail, like its body).
+fn attachments_of(raw: &[u8]) -> (Vec<crate::models::Attachment>, bool) {
+    match crate::pgp::detect(raw) {
+        None => (extract_attachments(raw), true),
+        Some(_) => {
+            let items = crate::pgp::unwrap_message(raw, &crate::pgp::Gpg::system())
+                .and_then(|u| u.inner)
+                .map(|inner| extract_attachments(&inner))
+                .unwrap_or_default();
+            (items, false)
+        }
+    }
 }
 
 /// Parse attachment parts (name, mime, decoded bytes) out of a raw message.
@@ -4380,6 +4465,184 @@ async fn list_folders(
 }
 
 /// Re-list folders (e.g. after auto-creating one) and push them to the UI.
+/// Auto-empty (#140): the roles the account wants emptied, with their ages.
+fn auto_empty_roles(account: &AccountConfig) -> Vec<(FolderKind, &'static str, u32)> {
+    [
+        (FolderKind::Junk, "junk", account.empty_junk_days),
+        (FolderKind::Trash, "trash", account.empty_trash_days),
+    ]
+    .into_iter()
+    .filter(|(_, _, days)| *days > 0)
+    .collect()
+}
+
+/// The folder holding a role for this account: the manual assignment (#82)
+/// when there is one, else the folder the listing detected.
+fn role_folder_path(account: &AccountConfig, folders: &[Folder], kind: FolderKind, role: &str) -> Option<String> {
+    if let Some(p) = account.folder_roles.get(role) {
+        if !p.is_empty() {
+            return Some(p.clone());
+        }
+    }
+    folders.iter().find(|f| f.kind == kind).map(|f| f.path.clone())
+}
+
+/// Whether the auto-empty is due: something is configured, and the last run
+/// on this connection is older than [`AUTO_EMPTY_MIN`] (or never happened).
+fn auto_empty_due(account: &AccountConfig, last: &mut Option<std::time::Instant>) -> bool {
+    if auto_empty_roles(account).is_empty() {
+        return false;
+    }
+    if last.is_some_and(|t| t.elapsed() < AUTO_EMPTY_MIN) {
+        return false;
+    }
+    *last = Some(std::time::Instant::now());
+    true
+}
+
+/// The cut-off, `days` ago, in the form IMAP SEARCH wants ("1-Aug-2026").
+/// SEARCH BEFORE compares internal dates by day, in the server's clock.
+fn imap_before_date(days: u32) -> String {
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+    cutoff.format("%-d-%b-%Y").to_string()
+}
+
+/// The same cut-off as an RFC 3339 instant for Graph's `$filter`.
+fn graph_before_date(days: u32) -> String {
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+    cutoff.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// Auto-empty (#140) for an IMAP account: delete for good whatever in the
+/// Junk / Trash folder is older than the account's chosen age. Rides the
+/// unread sweep, at most every [`AUTO_EMPTY_MIN`]. Age is the message's
+/// internal date, the day it reached the server, which is how the other
+/// clients count too. A failure is logged and tried again next time; the
+/// sweep never surfaces an error for a chore nobody is waiting on.
+async fn auto_empty_imap(
+    account_id: u32,
+    account: &AccountConfig,
+    session: &mut ImapSession,
+    cache: Option<&Cache>,
+    last: &mut Option<std::time::Instant>,
+    emit: &impl Fn(WorkerEvent),
+) {
+    if !auto_empty_due(account, last) {
+        return;
+    }
+    let folders = cache.map(|c| c.load_folders(account_id)).unwrap_or_default();
+    let mut purged_any = false;
+    for (kind, role, days) in auto_empty_roles(account) {
+        let Some(path) = role_folder_path(account, &folders, kind, role) else {
+            tracing::info!("auto-empty: account {account_id} has no {role} folder");
+            continue;
+        };
+        let before = imap_before_date(days);
+        let found = match sel(session, &path).await {
+            Ok(_) => search_uids(session, format!("BEFORE {before}")).await,
+            Err(e) => Err(e),
+        };
+        let uids: Vec<u32> = match found {
+            Ok(set) => set.into_iter().collect(),
+            Err(e) => {
+                tracing::warn!("auto-empty: could not search {path} on account {account_id}: {e}");
+                continue;
+            }
+        };
+        if uids.is_empty() {
+            continue;
+        }
+        match purge_messages(session, &path, &uids).await {
+            Ok(()) => {
+                if let Some(c) = cache {
+                    for uid in &uids {
+                        c.delete_message(account_id, &path, *uid);
+                    }
+                }
+                tracing::info!(
+                    "auto-empty: deleted {} message(s) older than {days} days from {path} on account {account_id}",
+                    uids.len()
+                );
+                purged_any = true;
+            }
+            Err(e) => {
+                tracing::warn!("auto-empty: could not delete from {path} on account {account_id}: {e}");
+            }
+        }
+    }
+    if purged_any {
+        refresh_folders(account_id, session, cache, emit).await;
+    }
+}
+
+/// Auto-empty (#140) for a Microsoft 365 account, by the well-known folder
+/// names and `receivedDateTime`.
+async fn auto_empty_graph(
+    token: &str,
+    account_id: u32,
+    account: &AccountConfig,
+    cache: Option<&Cache>,
+    state: &mut GraphState,
+    last: &mut Option<std::time::Instant>,
+    emit: &impl Fn(WorkerEvent),
+) {
+    if !auto_empty_due(account, last) {
+        return;
+    }
+    let folders = cache.map(|c| c.load_folders(account_id)).unwrap_or_default();
+    let mut purged_any = false;
+    for (kind, role, days) in auto_empty_roles(account) {
+        let well_known = match kind {
+            FolderKind::Junk => "junkemail",
+            _ => "deleteditems",
+        };
+        let path = role_folder_path(account, &folders, kind, role);
+        let url = format!(
+            "{GRAPH_BASE}/me/mailFolders/{well_known}/messages\
+             ?$filter=receivedDateTime%20le%20{}&$select=id&$top=100",
+            graph_before_date(days)
+        );
+        let t = token.to_string();
+        let items = tokio::task::spawn_blocking(move || graph_paged(&t, &url, GRAPH_INDEX_CAP))
+            .await
+            .unwrap_or_else(|_| Err("task failed".into()));
+        let ids: Vec<String> = match items {
+            Ok(items) => items.iter().filter_map(|v| v["id"].as_str().map(str::to_string)).collect(),
+            Err(e) => {
+                tracing::warn!("auto-empty: could not list {well_known} on account {account_id}: {e}");
+                continue;
+            }
+        };
+        if ids.is_empty() {
+            continue;
+        }
+        let mut deleted = 0usize;
+        for gid in ids {
+            let t = token.to_string();
+            let url = format!("{GRAPH_BASE}/me/messages/{gid}");
+            let ok = tokio::task::spawn_blocking(move || graph_delete_req(&t, &url))
+                .await
+                .unwrap_or_else(|_| Err("task failed".into()))
+                .is_ok();
+            if ok {
+                deleted += 1;
+                let uid = hash_uid(&gid);
+                state.uids.remove(&uid);
+                if let (Some(c), Some(path)) = (cache, path.as_deref()) {
+                    c.delete_message(account_id, path, uid);
+                }
+            }
+        }
+        tracing::info!(
+            "auto-empty: deleted {deleted} message(s) older than {days} days from {well_known} on account {account_id}"
+        );
+        purged_any |= deleted > 0;
+    }
+    if purged_any {
+        graph_refresh_unread(token, account_id, cache, state, emit).await;
+    }
+}
+
 async fn refresh_folders(
     account_id: u32,
     session: &mut ImapSession,
@@ -4773,7 +5036,23 @@ fn finish_preview(decoded: String) -> String {
         })
         .collect();
     let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some(p) = pgp_preview(&collapsed) {
+        return p;
+    }
     collapsed.chars().take(PREVIEW_CHARS).collect()
+}
+
+/// What the list says for an OpenPGP-encrypted message (#133), whose first
+/// text is otherwise the PGP/MIME version stub ("Version: 1") or the
+/// armour itself — neither of which says anything a reader wants to see.
+fn pgp_preview(collapsed: &str) -> Option<String> {
+    let t = collapsed.trim();
+    let stub = t.to_ascii_lowercase();
+    let stub = stub.trim_start_matches("version:").trim();
+    if stub == "1" || t.starts_with("-----BEGIN PGP MESSAGE-----") {
+        return Some(crate::models::ENCRYPTED_PREVIEW.to_string());
+    }
+    None
 }
 
 /// Drop the link furniture that plain-text alternatives are built from, so the
@@ -5372,17 +5651,14 @@ async fn load_body(
     // The whole message is in hand, so the sender check rides along for free
     // rather than costing a second fetch.
     let raw = fetches.iter().find_map(|f| f.body());
-    let body = raw
-        .map(extract_body)
-        .unwrap_or_else(|| "(empty message)".to_string());
-    let check = raw.map(crate::verify::check_sender).unwrap_or_default();
     // The paperclip is guessed from BODYSTRUCTURE (or, on servers whose structure
     // we can't parse, from the top-level Content-Type), and both guesses miss
     // shapes like Apple Mail's inline PDF nested under an alternative (issue #9).
     // The whole message is in hand here, so the guess can be replaced with fact
     // — at no extra network cost.
-    let has_attachments = raw.map(|r| !extract_attachments(r).is_empty()).unwrap_or(false);
-    Ok((body, check, has_attachments))
+    Ok(raw
+        .map(render_raw)
+        .unwrap_or_else(|| ("(empty message)".to_string(), Default::default(), false)))
 }
 
 /// Fetch several messages' bodies from one folder in a single `uid_fetch`.
@@ -5421,13 +5697,7 @@ async fn load_bodies(
         let (Some(uid), Some(raw)) = (last_uid, f.body()) else {
             continue;
         };
-        out.entry(uid).or_insert_with(|| {
-            (
-                extract_body(raw),
-                crate::verify::check_sender(raw),
-                !extract_attachments(raw).is_empty(),
-            )
-        });
+        out.entry(uid).or_insert_with(|| render_raw(raw));
     }
     Ok(out)
 }
@@ -6120,15 +6390,22 @@ async fn run_pop3(
             MailRequest::LoadBody { message_id, path: _, uid } => {
                 if let Some(body) = cache.as_ref().and_then(|c| c.load_body(account_id, INBOX, uid)) {
                     emit(WorkerEvent::Body { message_id, path: INBOX.to_string(), body });
+                    if let Some(check) = cache.as_ref().and_then(|c| c.load_sender_check(account_id, INBOX, uid)) {
+                        emit(WorkerEvent::SenderChecked { message_id, check });
+                    }
                     continue;
                 }
                 match pop3_fetch_raw(&account, uid).await {
                     Ok(raw) => {
-                        let body = extract_body(&raw);
+                        let (body, check, _) = render_raw(&raw);
                         if let Some(c) = cache.as_ref() {
-                            c.save_body(account_id, INBOX, uid, &body);
+                            if body_cacheable(&check) {
+                                c.save_body(account_id, INBOX, uid, &body);
+                            }
+                            c.save_sender_check(account_id, INBOX, uid, &check);
                         }
                         emit(WorkerEvent::Body { message_id, path: INBOX.to_string(), body });
+                        emit(WorkerEvent::SenderChecked { message_id, check });
                     }
                     Err(e) => emit(WorkerEvent::Error {
                         text: i18n_f("Could not load message: {e}", &[("e", &(e).to_string())]),
@@ -6145,15 +6422,22 @@ async fn run_pop3(
                         cache.as_ref().and_then(|c| c.load_body(account_id, INBOX, uid))
                     {
                         emit(WorkerEvent::Body { message_id, path: INBOX.to_string(), body });
+                        if let Some(check) = cache.as_ref().and_then(|c| c.load_sender_check(account_id, INBOX, uid)) {
+                            emit(WorkerEvent::SenderChecked { message_id, check });
+                        }
                         continue;
                     }
                     match pop3_fetch_raw(&account, uid).await {
                         Ok(raw) => {
-                            let body = extract_body(&raw);
+                            let (body, check, _) = render_raw(&raw);
                             if let Some(c) = cache.as_ref() {
-                                c.save_body(account_id, INBOX, uid, &body);
+                                if body_cacheable(&check) {
+                                    c.save_body(account_id, INBOX, uid, &body);
+                                }
+                                c.save_sender_check(account_id, INBOX, uid, &check);
                             }
                             emit(WorkerEvent::Body { message_id, path: INBOX.to_string(), body });
+                            emit(WorkerEvent::SenderChecked { message_id, check });
                         }
                         Err(e) => emit(WorkerEvent::Error {
                             text: i18n_f("Could not load message: {e}", &[("e", &(e).to_string())]),
@@ -6371,9 +6655,13 @@ async fn pop3_sync(
         // New message: download in full, cache its body + attachments.
         let raw = pop.retr(*num).await?;
         let msg = summary_from_raw(account_id, inbox_id, uid, &raw);
-        if let Some(c) = cache {
-            c.save_body(account_id, INBOX, uid, &extract_body(&raw));
-            let items = extract_attachments(&raw);
+        // OpenPGP mail (#133) is neither rendered nor cached here: it is
+        // decrypted or verified, in the reader only, when opened.
+        if let Some(c) = cache.filter(|_| crate::pgp::detect(&raw).is_none()) {
+            let (body, check, _) = render_raw(&raw);
+            c.save_body(account_id, INBOX, uid, &body);
+            c.save_sender_check(account_id, INBOX, uid, &check);
+            let (items, _) = attachments_of(&raw);
             if !items.is_empty() {
                 c.save_attachments(account_id, INBOX, uid, &items);
             }
@@ -7361,6 +7649,7 @@ fn graph_message(v: &serde_json::Value, account_id: u32, folder_id: u32) -> Opti
         .chars()
         .take(200)
         .collect();
+    let preview = pgp_preview(&preview).unwrap_or(preview);
     let from_addr = v["from"]["emailAddress"]["address"].as_str().unwrap_or("").to_string();
     let reply_to = graph_addrs(&v["replyTo"]);
     let reply_to =
@@ -7466,6 +7755,8 @@ async fn run_graph(
         emit(WorkerEvent::Folders(cached_folders));
     }
 
+    // When the Junk / Trash auto-empty (#140) last ran for this worker.
+    let mut last_auto_empty: Option<std::time::Instant> = None;
     let mut state = GraphState {
         folders: Default::default(),
         uids: Default::default(),
@@ -7564,16 +7855,24 @@ async fn run_graph(
             MailRequest::LoadBody { message_id, path, uid } => {
                 if let Some(body) = cache.as_ref().and_then(|c| c.load_body(account_id, &path, uid))
                 {
+                    let check = cache.as_ref().and_then(|c| c.load_sender_check(account_id, &path, uid));
                     emit(WorkerEvent::Body { message_id, path, body });
+                    if let Some(check) = check {
+                        emit(WorkerEvent::SenderChecked { message_id, check });
+                    }
                     continue;
                 }
                 match graph_fetch_raw(&account, &mut state, &path, uid, &emit).await {
                     Ok(raw) => {
-                        let body = extract_body(&raw);
+                        let (body, check, _) = render_raw(&raw);
                         if let Some(c) = cache.as_ref() {
-                            c.save_body(account_id, &path, uid, &body);
+                            if body_cacheable(&check) {
+                                c.save_body(account_id, &path, uid, &body);
+                            }
+                            c.save_sender_check(account_id, &path, uid, &check);
                         }
                         emit(WorkerEvent::Body { message_id, path, body });
+                        emit(WorkerEvent::SenderChecked { message_id, check });
                     }
                     Err(e) => emit(WorkerEvent::Error {
                         text: i18n_f("Could not load message: {e}", &[("e", &(e).to_string())]),
@@ -7588,15 +7887,22 @@ async fn run_graph(
                         cache.as_ref().and_then(|c| c.load_body(account_id, &path, uid))
                     {
                         emit(WorkerEvent::Body { message_id, path: path.clone(), body });
+                        if let Some(check) = cache.as_ref().and_then(|c| c.load_sender_check(account_id, &path, uid)) {
+                            emit(WorkerEvent::SenderChecked { message_id, check });
+                        }
                         continue;
                     }
                     match graph_fetch_raw(&account, &mut state, &path, uid, &emit).await {
                         Ok(raw) => {
-                            let body = extract_body(&raw);
+                            let (body, check, _) = render_raw(&raw);
                             if let Some(c) = cache.as_ref() {
-                                c.save_body(account_id, &path, uid, &body);
+                                if body_cacheable(&check) {
+                                    c.save_body(account_id, &path, uid, &body);
+                                }
+                                c.save_sender_check(account_id, &path, uid, &check);
                             }
                             emit(WorkerEvent::Body { message_id, path: path.clone(), body });
+                            emit(WorkerEvent::SenderChecked { message_id, check });
                         }
                         Err(e) => emit(WorkerEvent::Error {
                             text: i18n_f("Could not load message: {e}", &[("e", &(e).to_string())]),
@@ -8093,6 +8399,8 @@ async fn run_graph(
                 if let Some(token) = graph_token(&account, &quiet).await {
                     graph_refresh_unread(&token, account_id, cache.as_ref(), &mut state, &emit)
                         .await;
+                    auto_empty_graph(&token, account_id, &account, cache.as_ref(), &mut state, &mut last_auto_empty, &emit)
+                        .await;
                 }
             }
 
@@ -8483,6 +8791,8 @@ mod tests {
     fn sample_account() -> AccountConfig {
         AccountConfig {
             folder_roles: Default::default(),
+            empty_junk_days: 0,
+            empty_trash_days: 0,
             push: None,
             name: String::new(),
             email: "me@example.com".into(),
@@ -8797,6 +9107,24 @@ mod tests {
             "-- Regards, Steve"
         );
         assert_eq!(preview_from_part(b"--\r\nsigned off"), "-- signed off");
+    }
+
+    /// A PGP/MIME message's first part is the "Version: 1" stub, and an
+    /// inline one begins with the armour; the list says what it is instead.
+    #[test]
+    fn preview_names_an_encrypted_message() {
+        let marker = crate::models::ENCRYPTED_PREVIEW;
+        assert_eq!(preview_from_part(b"Version: 1\r\n"), marker);
+        assert_eq!(preview_from_part(b"version: 1"), marker);
+        assert_eq!(
+            preview_from_part(b"-----BEGIN PGP MESSAGE-----\r\n\r\nhQEMA3\r\n-----END PGP MESSAGE-----\r\n"),
+            marker
+        );
+        assert!(crate::models::preview_is_encrypted(marker));
+        assert_eq!(crate::models::preview_display(marker), "Encrypted message");
+        assert_eq!(crate::models::preview_display("Hello"), "Hello");
+        assert_eq!(pgp_preview("Version 1 of the plan is attached"), None);
+        assert_eq!(preview_from_part(b"Hello there"), "Hello there");
     }
 
     #[test]
@@ -9333,6 +9661,74 @@ mod tests {
         // "javascript:" isn't one of our recognized prefixes, so it stays plain text.
         let out = linkify("javascript:alert(1)");
         assert!(!out.contains("<a "), "got: {out}");
+    }
+
+    /// Auto-empty (#140): only the roles with an age are swept.
+    #[test]
+    fn auto_empty_roles_follow_the_ages() {
+        let mut acc = sample_account();
+        assert!(auto_empty_roles(&acc).is_empty());
+        acc.empty_trash_days = 14;
+        let roles = auto_empty_roles(&acc);
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].0, FolderKind::Trash);
+        assert_eq!(roles[0].2, 14);
+        acc.empty_junk_days = 7;
+        assert_eq!(auto_empty_roles(&acc).len(), 2);
+    }
+
+    /// The manual role assignment (#82) names the folder first; otherwise
+    /// the detected kind does.
+    #[test]
+    fn auto_empty_role_folder_prefers_the_assignment() {
+        let mut acc = sample_account();
+        let folders = vec![Folder {
+            id: 7,
+            account_id: 1,
+            name: "Deleted Messages".into(),
+            path: "Deleted Messages".into(),
+            kind: FolderKind::Trash,
+            unread: 0,
+        }];
+        assert_eq!(
+            role_folder_path(&acc, &folders, FolderKind::Trash, "trash").as_deref(),
+            Some("Deleted Messages")
+        );
+        assert_eq!(role_folder_path(&acc, &folders, FolderKind::Junk, "junk"), None);
+        acc.folder_roles.insert("trash".into(), "INBOX.Bin".into());
+        assert_eq!(
+            role_folder_path(&acc, &folders, FolderKind::Trash, "trash").as_deref(),
+            Some("INBOX.Bin")
+        );
+    }
+
+    /// The sweep runs once, then not again until the interval has passed.
+    #[test]
+    fn auto_empty_is_throttled() {
+        let mut acc = sample_account();
+        let mut last = None;
+        assert!(!auto_empty_due(&acc, &mut last), "nothing configured");
+        assert!(last.is_none());
+        acc.empty_junk_days = 7;
+        assert!(auto_empty_due(&acc, &mut last));
+        assert!(!auto_empty_due(&acc, &mut last), "just ran");
+        last = Some(std::time::Instant::now() - AUTO_EMPTY_MIN - Duration::from_secs(1));
+        assert!(auto_empty_due(&acc, &mut last));
+    }
+
+    /// IMAP wants "1-Aug-2026" (no zero padding); Graph an RFC 3339 instant.
+    #[test]
+    fn auto_empty_cutoffs_are_well_formed() {
+        let imap = imap_before_date(0);
+        let today = chrono::Utc::now().format("%-d-%b-%Y").to_string();
+        assert_eq!(imap, today);
+        assert!(!imap.starts_with('0'), "{imap}");
+        let parts: Vec<&str> = imap.split('-').collect();
+        assert_eq!(parts.len(), 3, "{imap}");
+        assert_eq!(parts[1].len(), 3, "{imap}");
+        let graph = graph_before_date(30);
+        assert!(chrono::DateTime::parse_from_rfc3339(&graph).is_ok(), "{graph}");
+        assert!(graph < chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
     }
 
     #[test]

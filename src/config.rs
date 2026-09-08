@@ -197,6 +197,17 @@ pub struct AccountConfig {
     /// "archive". Empty = fully automatic.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub folder_roles: std::collections::BTreeMap<String, String>,
+    /// Auto-empty (#140): mail in the Junk folder older than this many days
+    /// is deleted for good at each sync. 0 = never.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub empty_junk_days: u32,
+    /// The same for the Trash folder.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub empty_trash_days: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 /// A send-as alias (#34): an extra From identity the composer offers. By
@@ -602,6 +613,32 @@ impl MessageTheme {
     }
 }
 
+/// The reader's own typography and colours, laid over the sender's (#56).
+///
+/// What the reader applies: `font` is the Pango description to set mail in
+/// (`None` = the sender's fonts stand), `colors` forces the reader's own text
+/// and ground colours over the sender's. Built by the app from the three
+/// stored preferences, with the interface font filled in where none was
+/// chosen, so the reader never has to ask GTK.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct ReaderStyle {
+    /// Pango description ("Cantarell 11") of the font every message is set
+    /// in; `None` leaves the sender's fonts and sizes alone.
+    pub font: Option<String>,
+    /// Ignore the sender's text and background colours.
+    pub colors: bool,
+}
+
+impl ReaderStyle {
+    /// The sender's formatting stands entirely.
+    pub const NONE: ReaderStyle = ReaderStyle { font: None, colors: false };
+
+    /// Whether anything of the sender's is overridden.
+    pub fn active(&self) -> bool {
+        self.font.is_some() || self.colors
+    }
+}
+
 /// How dates are written: the system's own arrangement, or one the user picked
 /// regardless of it (#32).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -700,6 +737,17 @@ struct PrivacyFile {
     /// How email content is themed (independent of the app UI theme).
     #[serde(default)]
     message_theme: MessageTheme,
+    /// Set every message in the reader's own font instead of the sender's
+    /// (#56).
+    #[serde(default)]
+    override_fonts: bool,
+    /// That font, as a Pango description ("Cantarell 11"); empty = the
+    /// interface font.
+    #[serde(default)]
+    reader_font: String,
+    /// Ignore the sender's text and background colours (#56).
+    #[serde(default)]
+    override_colors: bool,
     /// Whether to post desktop notifications (new mail, error alerts).
     #[serde(default = "default_notifications")]
     notifications: bool,
@@ -971,6 +1019,9 @@ impl Default for PrivacyFile {
             single_message_card: default_single_message_card(),
             confirm_thread_delete: default_confirm_thread_delete(),
             message_theme: MessageTheme::default(),
+            override_fonts: false,
+            reader_font: String::new(),
+            override_colors: false,
             notifications: default_notifications(),
             notification_content: default_notification_content(),
             show_attachments: default_show_attachments(),
@@ -1444,6 +1495,12 @@ pub fn load_message_theme() -> MessageTheme {
     load_privacy().message_theme
 }
 
+/// The three reader-override preferences (#56): font switch, font, colour switch.
+pub fn load_reader_override() -> (bool, String, bool) {
+    let p = load_privacy();
+    (p.override_fonts, p.reader_font, p.override_colors)
+}
+
 /// Whether desktop notifications (new mail, error alerts) are enabled.
 pub fn load_notifications() -> bool {
     load_privacy().notifications
@@ -1593,6 +1650,9 @@ pub fn save_privacy(
     single_message_card: bool,
     confirm_thread_delete: bool,
     message_theme: MessageTheme,
+    override_fonts: bool,
+    reader_font: String,
+    override_colors: bool,
     notifications: bool,
     notification_content: bool,
     show_attachments: bool,
@@ -1653,6 +1713,9 @@ pub fn save_privacy(
         single_message_card,
         confirm_thread_delete,
         message_theme,
+        override_fonts,
+        reader_font,
+        override_colors,
         notifications,
         notification_content,
         show_attachments,
@@ -2340,6 +2403,8 @@ mod filter_tests {
             oauth_refresh: "TOKEN".into(),
             push: None,
             folder_roles: Default::default(),
+            empty_junk_days: 0,
+            empty_trash_days: 0,
         };
         acc.aliases = Vec::new();
         let bundle = SettingsBundle {
@@ -2358,6 +2423,16 @@ mod filter_tests {
         let back: SettingsBundle = toml::from_str(&text).unwrap();
         assert_eq!(back.accounts[0].email, "a@b.c");
         assert!(back.accounts[0].password.is_empty());
+        // Auto-empty (#140): "never" is left out of the file, an age is kept.
+        assert!(!text.contains("empty_junk_days"), "{text}");
+        assert_eq!(back.accounts[0].empty_trash_days, 0);
+        let mut aged = bundle;
+        aged.accounts[0].empty_trash_days = 30;
+        let text = toml::to_string_pretty(&aged).unwrap();
+        assert!(text.contains("empty_trash_days = 30"), "{text}");
+        let back: SettingsBundle = toml::from_str(&text).unwrap();
+        assert_eq!(back.accounts[0].empty_trash_days, 30);
+        assert_eq!(back.accounts[0].empty_junk_days, 0);
     }
 
     #[test]

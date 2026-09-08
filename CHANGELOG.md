@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.24.0 — 2026-09-07
+
+The reader's own fonts and colours over the senders'.
+
+- **Use my own font, Use my own colours** (#56, requested by @yioannides).
+  Two switches in Settings → Preferences → Reading. The first sets every
+  message in one font and size, whatever the sender chose: the interface
+  font, or any picked with the font button under the switch. Headings keep
+  their relative size and `pre`/`code` stay monospaced. The second ignores
+  the sender's text and background colours, so each message reads as plain
+  text on the reader's own ground, links in the accent colour; pictures
+  are kept. Both reach the printed page too. Every message card gains a
+  toggle on its action line that shows that one message as its sender
+  formatted it, and back, for the session. The reader's stylesheet is laid
+  over the message last and at id weight, so it outranks a sender's
+  `!important` rules short of inline ones; the message itself is
+  untouched, so View source, replies and forwards carry the original.
+  Stored in `privacy.toml` as `override_fonts`, `reader_font` (a Pango
+  description) and `override_colors`.
+- **Empty Junk and Trash automatically** (#140, requested by @typedev).
+  Two per-account choices in the account editor's Syncing group: never,
+  or after 7, 14 or 30 days. At each sync (a few times a day at most) the
+  worker deletes for good whatever in that folder is older than the age,
+  counted from the day the message reached the server, the way Thunderbird
+  and Apple Mail count. IMAP asks the server with `SEARCH BEFORE` and
+  expunges; Microsoft 365 filters the well-known folder on
+  `receivedDateTime` and deletes each message. A manual Special Folders
+  assignment names the folder to sweep. POP3 accounts have no server
+  folders, so the choice does nothing there. Failures are logged and
+  retried at the next sync. Stored per account as `empty_junk_days` and
+  `empty_trash_days`.
+- **OpenPGP, first slice: reading** (#133, requested by @greedykangaroo01).
+  Vireo now decrypts and verifies incoming OpenPGP mail through the user's
+  own GnuPG: `gpg` on the path, the keyring in `~/.gnupg`, the agent and its
+  pinentry for passphrases. PGP/MIME (`multipart/encrypted`,
+  `multipart/signed`) and the inline forms (an armoured block or a
+  clear-signed block in the text) are recognised. A message card shows a
+  lock (encrypted) and/or a shield (signed) beside the sender, green when
+  the signature checks out against a key the keyring trusts, amber for a
+  doubt (unknown or untrusted key, expired), red for a failure (bad
+  signature, revoked key, undecryptable); clicking it opens the verdict
+  with the details, above the sender check. Nothing decrypted is written
+  to disk: an encrypted message is decrypted for the reader at each open
+  (the agent remembers the passphrase), its body and attachments are never
+  cached, and the background prefetch leaves encrypted mail alone so no
+  passphrase prompt appears on its own. Signature verdicts are cached with
+  the sender check. The Flatpak gains access to `~/.gnupg` and the agent
+  socket. Signing and encrypting outgoing mail, and key management, are the
+  next slices.
 ## 1.23.2-beta.1 — 2026-09-07
 
 The beta channel catches up with stable 1.23.1: the same code, no

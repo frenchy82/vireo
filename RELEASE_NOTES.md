@@ -2,6 +2,13 @@
 
 Vireo is a clean, fast, GNOME-native email client built with Rust and libadwaita for Wayland desktops. Privacy-first: no telemetry, remote content blocked by default, and credentials kept in the system keyring.
 
+## What's new in 1.24.0
+
+**Your own font and colours for every message.** Two switches in Settings under Reading. "Use my own font" shows every message in one font and size instead of whatever the sender chose: the interface font, or any font you pick under the switch. Headings stay larger than body text and code stays monospaced. "Use my own colours" ignores the sender's text and background colours, so each message reads as plain text on the reader's ground, with links in the accent colour; pictures are kept. Each message card has a toggle on its action line that shows that one message as its sender formatted it, and back. Both settings apply to printing as well. Requested by [@yioannides](https://github.com/yioannides) (#56).
+
+**Junk and Trash empty themselves.** In each account's settings, under Syncing, choose to delete junk mail or trashed mail for good after 7, 14 or 30 days. Vireo checks at each sync and removes what has passed the age, counted from the day the message arrived. Off unless you turn it on. Requested by [@typedev](https://github.com/typedev) (#140).
+
+**OpenPGP: encrypted and signed mail can be read.** If you use GnuPG, Vireo now decrypts messages sent to your key and checks signatures, using your own keyring and asking for the passphrase the way gpg always does. A lock or shield beside the sender shows the result; click it for the details. Decrypted text is never stored on disk. Sending encrypted or signed mail comes in a later release. Requested by [@greedykangaroo01](https://github.com/greedykangaroo01) (#133).
 ## What's new in 1.23.2-beta.1
 
 The beta channel catches up with stable 1.23.1: everything in the next section.
