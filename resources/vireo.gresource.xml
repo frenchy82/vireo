@@ -5,12 +5,15 @@
 <gresources>
   <gresource prefix="/co/hyprlab/Vireo">
     <file>icons/scalable/actions/co.hyprlab.Vireo-adw-external-link-symbolic.svg</file>
+    <file>icons/scalable/actions/co.hyprlab.Vireo-alarm-symbolic.svg</file>
     <file>icons/scalable/actions/co.hyprlab.Vireo-applications-system-symbolic.svg</file>
     <file>icons/scalable/actions/co.hyprlab.Vireo-audio-x-generic-symbolic.svg</file>
     <file>icons/scalable/actions/co.hyprlab.Vireo-avatar-default-symbolic.svg</file>
     <file>icons/scalable/actions/co.hyprlab.Vireo-channel-secure-symbolic.svg</file>
+    <file>icons/scalable/actions/co.hyprlab.Vireo-cloud-symbolic.svg</file>
     <file>icons/scalable/actions/co.hyprlab.Vireo-code-symbolic.svg</file>
     <file>icons/scalable/actions/co.hyprlab.Vireo-contact-new-symbolic.svg</file>
+    <file>icons/scalable/actions/co.hyprlab.Vireo-dialog-password-symbolic.svg</file>
     <file>icons/scalable/actions/co.hyprlab.Vireo-dialog-warning-symbolic.svg</file>
     <file>icons/scalable/actions/co.hyprlab.Vireo-document-edit-symbolic.svg</file>
     <file>icons/scalable/actions/co.hyprlab.Vireo-document-open-recent-symbolic.svg</file>

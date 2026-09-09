@@ -5,9 +5,9 @@ use relm4::prelude::*;
 
 use crate::contacts::Suggestion;
 use crate::models::DraftOrigin;
-use crate::ui::rich_editor::{self, RichEditor};
+use crate::ui::rich_editor::{self, RichEditor, js_escape};
 use crate::worker::OutgoingMessage;
-use crate::i18n::i18n;
+use crate::i18n::{i18n, i18n_f};
 
 /// Which recipient field a suggestion is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +103,9 @@ pub struct ComposePrefill {
     /// For a reply: the original's To+Cc, so the composer can answer from the
     /// alias the mail was addressed to (#34). Empty otherwise.
     pub reply_addressed_to: String,
+    /// Send Later (#145): a queued message's scheduled time, kept while it is
+    /// edited so Send re-queues it for the same moment.
+    pub send_at: Option<i64>,
 }
 
 /// Everything the compose pane needs to open.
@@ -159,17 +162,58 @@ pub struct Compose {
     /// Whether this composer offers the inline/window toggle at all.
     can_toggle: bool,
     compact: bool,
+    /// A compact reply's field rows, revealed by the header button (#154)
+    /// or from the start by the preference.
+    fields_shown: bool,
     /// A recipient/subject field was edited since open (body edits are tracked
     /// separately by the editor itself). Used for save-if-dirty.
     fields_dirty: bool,
     /// OpenPGP (#133): sign the message; encrypt it to every recipient.
     sign: bool,
     encrypt: bool,
+    /// Send Later (#145): when set, Send queues the message for this time.
+    send_at: Option<i64>,
+    /// Cloud attachments (#144): the accounts files can be uploaded to, the
+    /// links already placed in the body, and how many uploads are running.
+    cloud_accounts: Vec<crate::cloud::CloudAccount>,
+    cloud_links: Vec<CloudLink>,
+    cloud_busy: u32,
+    /// Download passwords made for this message's links, to pass on
+    /// separately: (file name, password).
+    cloud_passwords: Vec<(String, String)>,
+}
+
+/// A share link placed in the body (#144), by the id of its paragraph.
+#[derive(Clone, Debug)]
+struct CloudLink {
+    id: String,
+    name: String,
+    url: String,
 }
 
 #[derive(Debug)]
 pub enum ComposeInput {
     Send,
+    /// Send Later (#145): queue for this unix time, then send as usual.
+    SendAt(i64),
+    /// Open the date-and-time picker.
+    PickSendTime,
+    /// Forget the scheduled time: Send goes out at once again.
+    ClearSendAt,
+    /// A compact reply shows or hides its From/To/Subject rows (#154).
+    ShowFields(bool),
+    /// Cloud attachments (#144): pick files to upload and share.
+    CloudAttach,
+    /// Files picked; ask which account and how, then upload.
+    CloudPicked(Vec<std::path::PathBuf>),
+    CloudUpload { paths: Vec<std::path::PathBuf>, account: crate::cloud::CloudAccount },
+    /// One upload finished (in a thread): the link, or why not.
+    CloudUploaded { name: String, result: Result<crate::cloud::ShareResult, String> },
+    /// Take a link back out of the body.
+    RemoveCloudLink(usize),
+    CopyCloudPasswords,
+    /// Move the draft being edited to Trash and close without saving.
+    DeleteDraft,
     /// The OpenPGP Sign toggle (#133).
     ToggleSign(bool),
     /// The OpenPGP Encrypt toggle; encrypting turns signing on too.
@@ -211,6 +255,9 @@ pub enum ComposeOutput {
     Send(Box<OutgoingMessage>),
     /// Save the message to the Drafts folder (no send).
     SaveDraft(Box<OutgoingMessage>),
+    /// Delete the draft this composer was opened from, and close it. The app
+    /// moves the draft to Trash (undoable, like deleting it from the list).
+    DeleteDraft { id: u32, origin: DraftOrigin },
     /// Ask the app to promote/demote this pane (inline ↔ window). Carries the id.
     ToggleWindow(u32),
     /// This pane is done (cancelled / sent / draft-saved / superseded). Carries
@@ -249,10 +296,93 @@ impl Component for Compose {
                         set_tooltip_text: Some(i18n("Save to Drafts").as_str()),
                         connect_clicked => ComposeInput::SaveDraft,
                     },
-                    pack_end = &gtk::Button {
-                        set_label: &i18n("Send"),
-                        add_css_class: "suggested-action",
-                        connect_clicked => ComposeInput::Send,
+                    // Only while editing an existing draft: the message is
+                    // moved to Trash, not saved, and the editor closes.
+                    pack_start = &gtk::Button {
+                        set_label: &i18n("Delete Draft"),
+                        set_tooltip_text: Some(i18n("Move this draft to Trash").as_str()),
+                        #[watch]
+                        set_visible: model.draft_origin.is_some(),
+                        connect_clicked => ComposeInput::DeleteDraft,
+                    },
+                    // Send, with Send Later beside it (#145): presets, or a
+                    // date and time of your own.
+                    pack_end = &gtk::Box {
+                        add_css_class: "linked",
+                        add_css_class: "send-split",
+                        gtk::Button {
+                            #[watch]
+                            set_label: &if model.send_at.is_some() { i18n("Schedule") } else { i18n("Send") },
+                            add_css_class: "suggested-action",
+                            connect_clicked => ComposeInput::Send,
+                        },
+                        // A floating divider, not a seam: the box paints the
+                        // accent behind it so the two read as one control.
+                        gtk::Separator {
+                            set_orientation: gtk::Orientation::Vertical,
+                        },
+                        gtk::MenuButton {
+                            set_icon_name: "co.hyprlab.Vireo-pan-down-symbolic",
+                            add_css_class: "suggested-action",
+                            set_tooltip_text: Some(i18n("Send later").as_str()),
+                            set_can_focus: false,
+                            #[wrap(Some)]
+                            set_popover = &gtk::Popover {
+                                gtk::Box {
+                                    set_orientation: gtk::Orientation::Vertical,
+                                    set_spacing: 2,
+                                    gtk::Button {
+                                        add_css_class: "flat",
+                                        set_halign: gtk::Align::Fill,
+                                        #[wrap(Some)]
+                                        set_child = &gtk::Label { set_label: &i18n("Send now"), set_halign: gtk::Align::Start },
+                                        connect_clicked[sender] => move |b| {
+                                            b.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>().map(|p| p.popdown());
+                                            sender.input(ComposeInput::ClearSendAt);
+                                            sender.input(ComposeInput::Send);
+                                        },
+                                    },
+                                    gtk::Separator {},
+                                    gtk::Button {
+                                        add_css_class: "flat",
+                                        #[wrap(Some)]
+                                        set_child = &gtk::Label { set_label: &i18n("Tomorrow morning (8:00)"), set_halign: gtk::Align::Start },
+                                        connect_clicked[sender] => move |b| {
+                                            b.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>().map(|p| p.popdown());
+                                            sender.input(ComposeInput::SendAt(preset_time(1, 8)));
+                                        },
+                                    },
+                                    gtk::Button {
+                                        add_css_class: "flat",
+                                        #[wrap(Some)]
+                                        set_child = &gtk::Label { set_label: &i18n("Tomorrow afternoon (13:00)"), set_halign: gtk::Align::Start },
+                                        connect_clicked[sender] => move |b| {
+                                            b.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>().map(|p| p.popdown());
+                                            sender.input(ComposeInput::SendAt(preset_time(1, 13)));
+                                        },
+                                    },
+                                    gtk::Button {
+                                        add_css_class: "flat",
+                                        #[wrap(Some)]
+                                        set_child = &gtk::Label { set_label: &i18n("Monday morning (8:00)"), set_halign: gtk::Align::Start },
+                                        connect_clicked[sender] => move |b| {
+                                            b.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>().map(|p| p.popdown());
+                                            sender.input(ComposeInput::SendAt(next_monday(8)));
+                                        },
+                                    },
+                                    gtk::Separator {},
+                                    gtk::Button {
+                                        add_css_class: "flat",
+                                        #[wrap(Some)]
+                                        set_child = &gtk::Label { set_label: &i18n("Pick a date and time…"), set_halign: gtk::Align::Start },
+                                        connect_clicked[sender] => move |b| {
+                                            b.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>().map(|p| p.popdown());
+                                            sender.input(ComposeInput::PickSendTime);
+                                        },
+                                    },
+                                },
+                            },
+                        },
                     },
                     // OpenPGP (#133): only offered where a gpg exists.
                     #[name = "encrypt_btn"]
@@ -278,6 +408,16 @@ impl Component for Compose {
                         set_tooltip_text: Some(i18n("Attach files").as_str()),
                         connect_clicked => ComposeInput::AttachFiles,
                     },
+                    // Cloud attachments (#144): only with an account set up.
+                    pack_end = &gtk::Button {
+                        set_icon_name: "co.hyprlab.Vireo-cloud-symbolic",
+                        set_tooltip_text: Some(i18n("Upload to cloud storage and share a link").as_str()),
+                        #[watch]
+                        set_visible: !model.cloud_accounts.is_empty(),
+                        #[watch]
+                        set_sensitive: model.cloud_busy == 0,
+                        connect_clicked => ComposeInput::CloudAttach,
+                    },
                     pack_end = &gtk::Button {
                         set_icon_name: "co.hyprlab.Vireo-x-office-address-book-symbolic",
                         set_tooltip_text: Some(i18n("Open Contacts").as_str()),
@@ -289,6 +429,70 @@ impl Component for Compose {
                     pack_end = &gtk::Button {
                         set_tooltip_text: Some(i18n("Open in window").as_str()),
                         connect_clicked => ComposeInput::ToggleWindowed,
+                    },
+                    // The compact reply's From/To/Subject rows (#154): folded
+                    // away by default, one press brings them back.
+                    #[name = "fields_btn"]
+                    pack_end = &gtk::ToggleButton {
+                        set_icon_name: "co.hyprlab.Vireo-pan-down-symbolic",
+                        add_css_class: "fields-chevron",
+                        set_tooltip_text: Some(i18n("Show From, To and Subject").as_str()),
+                        set_can_focus: false,
+                        #[watch]
+                        set_visible: model.compact && !model.windowed,
+                        connect_toggled[sender] => move |b| {
+                            sender.input(ComposeInput::ShowFields(b.is_active()));
+                        },
+                    },
+                },
+                // Send Later (#145): says when a scheduled message goes, with a
+                // way back to sending at once.
+                add_top_bar = &gtk::Box {
+                    add_css_class: "schedule-bar",
+                    set_spacing: 8,
+                    set_margin_start: 12,
+                    set_margin_end: 12,
+                    set_margin_top: 4,
+                    set_margin_bottom: 4,
+                    #[watch]
+                    set_visible: model.send_at.is_some(),
+                    gtk::Image { set_icon_name: Some("co.hyprlab.Vireo-alarm-symbolic") },
+                    gtk::Label {
+                        set_hexpand: true,
+                        set_halign: gtk::Align::Start,
+                        set_ellipsize: gtk::pango::EllipsizeMode::End,
+                        #[watch]
+                        set_label: &model.send_at.map(|t| i18n_f("Scheduled for {when}", &[("when", &crate::datefmt::date_time(t))])).unwrap_or_default(),
+                    },
+                    gtk::Button {
+                        add_css_class: "flat",
+                        set_label: &i18n("Send now instead"),
+                        connect_clicked => ComposeInput::ClearSendAt,
+                    },
+                },
+                // Cloud attachments (#144): the download passwords, which
+                // stay out of the message and go to the recipient some other way.
+                add_top_bar = &gtk::Box {
+                    set_spacing: 8,
+                    set_margin_start: 12,
+                    set_margin_end: 12,
+                    set_margin_top: 4,
+                    set_margin_bottom: 4,
+                    #[watch]
+                    set_visible: !model.cloud_passwords.is_empty(),
+                    gtk::Image { set_icon_name: Some("co.hyprlab.Vireo-dialog-password-symbolic") },
+                    gtk::Label {
+                        set_hexpand: true,
+                        set_halign: gtk::Align::Start,
+                        set_wrap: true,
+                        set_selectable: true,
+                        #[watch]
+                        set_label: &model.cloud_passwords.iter().map(|(n, p)| i18n_f("Download password for {name}: {password}", &[("name", n), ("password", p)])).collect::<Vec<_>>().join("\n"),
+                    },
+                    gtk::Button {
+                        add_css_class: "flat",
+                        set_label: &i18n("Copy"),
+                        connect_clicked => ComposeInput::CopyCloudPasswords,
                     },
                 },
 
@@ -381,6 +585,7 @@ impl Component for Compose {
         let outbox_origin = prefill.outbox_origin;
         let prefill_attachments = prefill.attachments.clone();
         let prefill_encrypt = prefill.encrypt;
+        let send_at = prefill.send_at;
         let current_sig = accounts.get(selected).map(|a| a.signature.clone()).unwrap_or_default();
 
         let completion = gtk::Popover::new();
@@ -431,9 +636,15 @@ impl Component for Compose {
             // A compact (fields-hidden) pane only makes sense once it is
             // addressed: replies arrive with To filled, forwards do not.
             compact: compact && !prefill.to.trim().is_empty(),
+            fields_shown: crate::config::load_reply_fields(),
             fields_dirty: false,
             sign: false,
             encrypt: false,
+            send_at,
+            cloud_accounts: crate::cloud::load_accounts(),
+            cloud_links: Vec::new(),
+            cloud_busy: 0,
+            cloud_passwords: Vec::new(),
         };
         let widgets = view_output!();
         if prefill_encrypt && crate::pgp::available() {
@@ -464,7 +675,8 @@ impl Component for Compose {
         // return when the composer pops out to a window. Never for a pane
         // that arrives unaddressed — a forward — which needs its To row
         // (#139).
-        widgets.fields_list.set_visible(!model.compact);
+        widgets.fields_list.set_visible(!model.compact || model.fields_shown);
+        widgets.fields_btn.set_active(model.fields_shown);
         {
             let more = gtk::Button::with_label(&i18n("More"));
             more.add_css_class("flat");
@@ -657,6 +869,153 @@ impl Component for Compose {
                 let _ = sender.output(ComposeOutput::Close(self.compose_id));
             }
 
+            ComposeInput::SendAt(at) => {
+                self.send_at = Some(at);
+                sender.input(ComposeInput::Send);
+            }
+
+            ComposeInput::ClearSendAt => {
+                self.send_at = None;
+            }
+
+            ComposeInput::ShowFields(on) => {
+                self.fields_shown = on;
+                widgets.fields_list.set_visible(!(self.compact && !self.windowed) || on);
+            }
+
+            ComposeInput::CloudAttach => {
+                let dialog = gtk::FileDialog::new();
+                dialog.set_title(&i18n("Upload to Cloud Storage"));
+                let parent = root.root().and_downcast::<gtk::Window>();
+                let s = sender.input_sender().clone();
+                dialog.open_multiple(parent.as_ref(), gtk::gio::Cancellable::NONE, move |res| {
+                    if let Ok(model) = res {
+                        let paths: Vec<_> = (0..model.n_items())
+                            .filter_map(|i| model.item(i).and_downcast::<gtk::gio::File>()?.path())
+                            .collect();
+                        if !paths.is_empty() {
+                            let _ = s.send(ComposeInput::CloudPicked(paths));
+                        }
+                    }
+                });
+            }
+
+            ComposeInput::CloudPicked(paths) => {
+                let parent = root.root().and_downcast::<gtk::Window>();
+                cloud_upload_dialog(parent.as_ref(), &self.cloud_accounts, paths, sender.input_sender().clone());
+            }
+
+            ComposeInput::CloudUpload { paths, account } => {
+                let Some(password) = crate::config::load_cloud_password(&account.key()) else {
+                    let parent = root.root().and_downcast::<gtk::Window>();
+                    let d = adw::MessageDialog::new(
+                        parent.as_ref(),
+                        Some(i18n("No app password").as_str()),
+                        Some(i18n_f("The app password for {name} is not in the keyring. Open Settings, Cloud Storage, and enter it again.", &[("name", &account.name)]).as_str()),
+                    );
+                    d.add_response("ok", &i18n("OK"));
+                    d.present();
+                    return;
+                };
+                for path in paths {
+                    let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    self.cloud_busy += 1;
+                    self.rebuild_attachments(&widgets.attach_box, &sender);
+                    let s = sender.input_sender().clone();
+                    let (a, pw) = (account.clone(), password.clone());
+                    std::thread::spawn(move || {
+                        let result = crate::cloud::upload_and_share(&a, &pw, &path);
+                        let _ = s.send(ComposeInput::CloudUploaded { name, result });
+                    });
+                }
+            }
+
+            ComposeInput::CloudUploaded { name, result } => {
+                self.cloud_busy = self.cloud_busy.saturating_sub(1);
+                match result {
+                    Ok(share) => {
+                        let id = format!("vireo-cloud-{}", crate::rng::token(8).unwrap_or_else(|_| share.size.to_string()));
+                        let mut caption = crate::cloud::human_size(share.size);
+                        if let Some(d) = &share.expires {
+                            caption.push_str(&format!(", {}", i18n_f("link expires {date}", &[("date", d)])));
+                        }
+                        if share.password.is_some() {
+                            caption.push_str(&format!(", {}", i18n("password-protected")));
+                        }
+                        let html = format!(
+                            "<p id=\"{id}\" data-vireo-cloud=\"1\">\u{1F4CE} <a href=\"{url}\">{name}</a> ({caption})</p>",
+                            url = html_escape(&share.url),
+                            name = html_escape(&share.name),
+                            caption = html_escape(&caption),
+                        );
+                        // Into the body where the user's own text ends: above
+                        // the signature, and above a quoted original in a
+                        // reply, so the link reads as part of the message.
+                        self.editor.run_js(&format!(
+                            "(function(){{var d=document.createElement('div');d.innerHTML='{}';\
+                             var p=d.firstChild;var b=document.body;\
+                             var first=null;var cands=b.querySelectorAll('.vireo-sig,.vireo-quote-attr,blockquote');\
+                             for(var i=0;i<cands.length;i++){{var t=cands[i];while(t.parentNode&&t.parentNode!==b)t=t.parentNode;\
+                             if(t.parentNode===b&&(!first||(t.compareDocumentPosition(first)&Node.DOCUMENT_POSITION_FOLLOWING)))first=t;}}\
+                             if(first)b.insertBefore(p,first);else b.appendChild(p);\
+                             document.dispatchEvent(new Event('input'));}})()",
+                            js_escape(&html)
+                        ));
+                        if let Some(p) = share.password.clone() {
+                            self.cloud_passwords.push((share.name.clone(), p));
+                        }
+                        self.cloud_links.push(CloudLink { id, name: share.name, url: share.url });
+                    }
+                    Err(e) => {
+                        let parent = root.root().and_downcast::<gtk::Window>();
+                        let d = adw::MessageDialog::new(
+                            parent.as_ref(),
+                            Some(i18n_f("Could not upload {name}", &[("name", &name)]).as_str()),
+                            Some(&e),
+                        );
+                        d.add_response("ok", &i18n("OK"));
+                        d.present();
+                    }
+                }
+                self.rebuild_attachments(&widgets.attach_box, &sender);
+            }
+
+            ComposeInput::RemoveCloudLink(i) => {
+                if i < self.cloud_links.len() {
+                    let link = self.cloud_links.remove(i);
+                    self.cloud_passwords.retain(|(n, _)| *n != link.name);
+                    self.editor.run_js(&format!(
+                        "(function(){{var p=document.getElementById('{}');if(p)p.remove();document.dispatchEvent(new Event('input'));}})()",
+                        js_escape(&link.id)
+                    ));
+                    self.rebuild_attachments(&widgets.attach_box, &sender);
+                }
+            }
+
+            ComposeInput::CopyCloudPasswords => {
+                let text = self
+                    .cloud_passwords
+                    .iter()
+                    .map(|(n, p)| format!("{n}: {p}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if let Some(display) = gtk::gdk::Display::default() {
+                    display.clipboard().set_text(&text);
+                }
+            }
+
+            ComposeInput::PickSendTime => {
+                let parent = root.root().and_downcast::<gtk::Window>();
+                pick_send_time(parent.as_ref(), self.send_at, sender.input_sender().clone());
+            }
+
+            ComposeInput::DeleteDraft => {
+                if let Some(origin) = self.draft_origin.clone() {
+                    let _ = sender
+                        .output(ComposeOutput::DeleteDraft { id: self.compose_id, origin });
+                }
+            }
+
             ComposeInput::ToggleWindowed => {
                 let _ = sender.output(ComposeOutput::ToggleWindow(self.compose_id));
             }
@@ -667,7 +1026,7 @@ impl Component for Compose {
                 size_for_host(root, &widgets.header, &widgets.editor_holder, windowed);
                 // A compact reply grows its field rows back in a window (and
                 // sheds them again if it returns inline).
-                widgets.fields_list.set_visible(!(self.compact && !windowed));
+                widgets.fields_list.set_visible(!(self.compact && !windowed) || self.fields_shown);
             }
 
             ComposeInput::FocusEditor => self.editor.grab_focus(),
@@ -971,6 +1330,7 @@ impl Compose {
             outbox_origin: self.outbox_origin,
             sign: self.sign,
             encrypt: self.encrypt,
+            send_at: self.send_at,
         }
     }
 
@@ -1127,8 +1487,99 @@ impl Compose {
                 cell.set_focusable(false);
             }
         }
-        flow.set_visible(!self.attachments.is_empty());
+        // Cloud links (#144) sit with the attachments but read as links: a
+        // cloud icon, the name, and a remove that also takes the paragraph
+        // out of the body. Uploads in flight show a spinner chip.
+        for (i, link) in self.cloud_links.iter().enumerate() {
+            let chip = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            chip.add_css_class("attach-chip");
+            chip.add_css_class("cloud-chip");
+            chip.set_halign(gtk::Align::Start);
+            chip.set_tooltip_text(Some(&link.url));
+            chip.append(&gtk::Image::from_icon_name("co.hyprlab.Vireo-cloud-symbolic"));
+            let lbl = gtk::Label::new(Some(&i18n_f("{name} (link)", &[("name", &link.name)])));
+            lbl.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+            lbl.set_max_width_chars(26);
+            chip.append(&lbl);
+            let rm = gtk::Button::from_icon_name("co.hyprlab.Vireo-window-close-symbolic");
+            rm.add_css_class("flat");
+            rm.set_valign(gtk::Align::Center);
+            let s = sender.input_sender().clone();
+            rm.connect_clicked(move |_| {
+                let _ = s.send(ComposeInput::RemoveCloudLink(i));
+            });
+            chip.append(&rm);
+            flow.append(&chip);
+            if let Some(cell) = chip.parent().and_downcast::<gtk::FlowBoxChild>() {
+                cell.set_halign(gtk::Align::Start);
+                cell.set_can_focus(false);
+                cell.set_focusable(false);
+            }
+        }
+        for _ in 0..self.cloud_busy {
+            let chip = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            chip.add_css_class("attach-chip");
+            chip.set_halign(gtk::Align::Start);
+            let spin = gtk::Spinner::new();
+            spin.start();
+            chip.append(&spin);
+            chip.append(&gtk::Label::new(Some(&i18n("Uploading…"))));
+            flow.append(&chip);
+            if let Some(cell) = chip.parent().and_downcast::<gtk::FlowBoxChild>() {
+                cell.set_halign(gtk::Align::Start);
+                cell.set_can_focus(false);
+            }
+        }
+        flow.set_visible(!self.attachments.is_empty() || !self.cloud_links.is_empty() || self.cloud_busy > 0);
     }
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// Which account to upload to, and a reminder of how its links are made.
+/// One account skips the question.
+fn cloud_upload_dialog(
+    parent: Option<&gtk::Window>,
+    accounts: &[crate::cloud::CloudAccount],
+    paths: Vec<std::path::PathBuf>,
+    sender: relm4::Sender<ComposeInput>,
+) {
+    if accounts.len() == 1 {
+        let _ = sender.send(ComposeInput::CloudUpload { paths, account: accounts[0].clone() });
+        return;
+    }
+    let n = paths.len();
+    let dialog = adw::MessageDialog::new(
+        parent,
+        Some(i18n("Upload to Cloud Storage").as_str()),
+        Some(crate::i18n::ni18n_f("Upload {n} file and put its share link in the message.", "Upload {n} files and put their share links in the message.", n as u32, &[("n", &n.to_string())]).as_str()),
+    );
+    dialog.add_response("cancel", &i18n("Cancel"));
+    dialog.add_response("upload", &i18n("Upload"));
+    dialog.set_default_response(Some("upload"));
+    dialog.set_close_response("cancel");
+    dialog.set_response_appearance("upload", adw::ResponseAppearance::Suggested);
+    let names: Vec<String> = accounts.iter().map(|a| if a.name.trim().is_empty() { a.base() } else { a.name.clone() }).collect();
+    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let combo = adw::ComboRow::new();
+    combo.set_title(&i18n("Account"));
+    combo.set_model(Some(&gtk::StringList::new(&name_refs)));
+    let group = adw::PreferencesGroup::new();
+    group.add(&combo);
+    dialog.set_extra_child(Some(&group));
+    let accounts = accounts.to_vec();
+    let paths = std::cell::RefCell::new(Some(paths));
+    dialog.connect_response(None, move |_, resp| {
+        if resp != "upload" {
+            return;
+        }
+        if let (Some(paths), Some(account)) = (paths.borrow_mut().take(), accounts.get(combo.selected() as usize)) {
+            let _ = sender.send(ComposeInput::CloudUpload { paths, account: account.clone() });
+        }
+    });
+    dialog.present();
 }
 
 /// The GtkText embedded somewhere inside a composite row — where Pango
@@ -1181,4 +1632,90 @@ fn pgp_send_check(from: &str, chosen_key: Option<&str>, fields: &[&str], encrypt
         }
     }
     Ok(())
+}
+
+
+/// Send Later presets (#145): `days` from today at `hour`:00, local time.
+fn preset_time(days: i64, hour: u32) -> i64 {
+    use chrono::{Duration, Local, TimeZone};
+    let day = (Local::now() + Duration::days(days)).date_naive();
+    let ndt = day.and_hms_opt(hour, 0, 0).unwrap_or_default();
+    Local.from_local_datetime(&ndt).single().map(|t| t.timestamp()).unwrap_or_else(crate::datefmt::now)
+}
+
+/// The coming Monday at `hour`:00 local time (a Monday today means next week's).
+fn next_monday(hour: u32) -> i64 {
+    use chrono::Datelike;
+    let today = chrono::Local::now().weekday().num_days_from_monday() as i64;
+    let ahead = (7 - today) % 7;
+    preset_time(if ahead == 0 { 7 } else { ahead }, hour)
+}
+
+/// The Send Later picker (#145): a calendar and an hour/minute pair, starting
+/// from the scheduled time if there is one, else the next full hour. A time
+/// already past is refused rather than queued to go at once by surprise.
+fn pick_send_time(parent: Option<&gtk::Window>, current: Option<i64>, sender: relm4::Sender<ComposeInput>) {
+    use chrono::{Datelike, Local, TimeZone, Timelike};
+    let start = match current {
+        Some(t) => Local.timestamp_opt(t, 0).single().unwrap_or_else(Local::now),
+        None => {
+            let n = Local::now() + chrono::Duration::hours(1);
+            n.with_minute(0).and_then(|n| n.with_second(0)).unwrap_or(n)
+        }
+    };
+    let dialog = adw::MessageDialog::new(parent, Some(i18n("Send later").as_str()), None);
+    dialog.add_response("cancel", &i18n("Cancel"));
+    dialog.add_response("ok", &i18n("Schedule"));
+    dialog.set_default_response(Some("ok"));
+    dialog.set_close_response("cancel");
+    dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+    let bx = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let calendar = gtk::Calendar::new();
+    calendar.set_year(start.year());
+    calendar.set_month(start.month0() as i32);
+    calendar.set_day(start.day() as i32);
+    bx.append(&calendar);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    row.set_halign(gtk::Align::Center);
+    let hour = gtk::SpinButton::with_range(0.0, 23.0, 1.0);
+    hour.set_value(start.hour() as f64);
+    hour.set_orientation(gtk::Orientation::Vertical);
+    hour.set_wrap(true);
+    let minute = gtk::SpinButton::with_range(0.0, 55.0, 5.0);
+    minute.set_value((start.minute() / 5 * 5) as f64);
+    minute.set_orientation(gtk::Orientation::Vertical);
+    minute.set_wrap(true);
+    row.append(&hour);
+    row.append(&gtk::Label::new(Some(":")));
+    row.append(&minute);
+    bx.append(&row);
+    dialog.set_extra_child(Some(&bx));
+    let chosen = move || -> Option<i64> {
+        let d = calendar.date();
+        let ndt = chrono::NaiveDate::from_ymd_opt(d.year(), d.month() as u32, d.day_of_month() as u32)?
+            .and_hms_opt(hour.value_as_int() as u32, minute.value_as_int() as u32, 0)?;
+        Local.from_local_datetime(&ndt).single().map(|t| t.timestamp())
+    };
+    dialog.connect_response(None, move |dlg, resp| {
+        if resp != "ok" {
+            return;
+        }
+        match chosen() {
+            Some(t) if t > crate::datefmt::now() => {
+                let _ = sender.send(ComposeInput::SendAt(t));
+            }
+            _ => {
+                // An explicit time in the past is a slip, not a request to
+                // send at once.
+                let d = adw::MessageDialog::new(
+                    dlg.transient_for().as_ref(),
+                    Some(i18n("That time has passed").as_str()),
+                    Some(i18n("Choose a time later than now.").as_str()),
+                );
+                d.add_response("ok", &i18n("OK"));
+                d.present();
+            }
+        }
+    });
+    dialog.present();
 }

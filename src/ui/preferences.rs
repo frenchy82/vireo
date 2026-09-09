@@ -47,6 +47,7 @@ pub struct PrefInit {
     pub swipe_reversed: bool,
     /// "New message" composes inline over the reading pane (vs a window).
     pub compose_inline: bool,
+    pub reply_fields: bool,
     pub paste_plain: bool,
     pub spellcheck: bool,
     pub spellcheck_langs: String,
@@ -212,6 +213,8 @@ pub struct Preferences {
     host_header: Option<adw::HeaderBar>,
     /// The OpenPGP page (#133), kept alive with the window.
     pgp_keys: Option<Controller<crate::ui::pgp_keys::PgpKeys>>,
+    /// The Cloud Storage page (#144), likewise.
+    cloud: Option<Controller<crate::ui::cloud_accounts::CloudAccounts>>,
     /// The account editor is up in the accounts slot: leaving it for another
     /// category asks about the unsaved changes first.
     editor_open: bool,
@@ -236,6 +239,7 @@ const SIDE_PAGES: &[(&str, &[SidePage])] = &[
             SidePage { id: "filters", title: i18n_noop("Filters"), icon: "co.hyprlab.Vireo-filter-folder-symbolic", accounts: true },
             SidePage { id: "senders", title: i18n_noop("Senders"), icon: "co.hyprlab.Vireo-contact-new-symbolic", accounts: true },
             SidePage { id: "openpgp", title: i18n_noop("OpenPGP"), icon: "co.hyprlab.Vireo-channel-secure-symbolic", accounts: false },
+            SidePage { id: "cloud", title: i18n_noop("Cloud Storage"), icon: "co.hyprlab.Vireo-cloud-symbolic", accounts: false },
         ],
     ),
     (
@@ -281,6 +285,7 @@ pub enum PrefInput {
     ToggleSwipeEnabled(bool),
     ToggleSwipeReversed(bool),
     ToggleComposeInline(bool),
+    ToggleReplyFields(bool),
     TogglePastePlain(bool),
     ToggleSpellcheck(bool),
     SpellLangsEdited(String),
@@ -350,6 +355,7 @@ pub enum PrefOutput {
     SetSwipeEnabled(bool),
     SetSwipeReversed(bool),
     SetComposeInline(bool),
+    SetReplyFields(bool),
     SetPastePlain(bool),
     SetSpellcheck(bool),
     SetSpellcheckLangs(String),
@@ -556,6 +562,10 @@ impl Component for Preferences {
                             // The OpenPGP key manager (#133), its own component.
                             #[name = "pgp_slot"]
                             add_named[Some("openpgp")] = &adw::Bin {},
+
+                            // Cloud attachment accounts (#144), its own component.
+                            #[name = "cloud_slot"]
+                            add_named[Some("cloud")] = &adw::Bin {},
 
                             add_named[Some("general")] = &adw::PreferencesPage {
                                 add = &adw::PreferencesGroup {
@@ -1006,6 +1016,17 @@ impl Component for Preferences {
                                         },
                                     },
 
+                                    #[name = "reply_fields_row"]
+                                    adw::SwitchRow {
+                                        set_title: &i18n("Show From, To and Subject in the reply panel"),
+                                        set_subtitle: &i18n("The inline reply opens with its address and subject rows \
+                                                       showing. Off, they stay folded away behind a button in \
+                                                       the panel's header."),
+                                        connect_active_notify[sender] => move |row| {
+                                            sender.input(PrefInput::ToggleReplyFields(row.is_active()));
+                                        },
+                                    },
+
                                     #[name = "paste_plain_row"]
                                     adw::SwitchRow {
                                         set_title: &i18n("Paste as plain text"),
@@ -1290,6 +1311,7 @@ impl Component for Preferences {
             accounts_sender: init.accounts_sender.clone(),
             host_header: None,
             pgp_keys: None,
+            cloud: None,
             editor_open: false,
         };
 
@@ -1484,6 +1506,7 @@ impl Component for Preferences {
         widgets.swipe_enabled_row.set_active(init.swipe_enabled);
         widgets.swipe_reversed_row.set_active(init.swipe_reversed);
         widgets.compose_inline_row.set_active(init.compose_inline);
+        widgets.reply_fields_row.set_active(init.reply_fields);
         widgets.paste_plain_row.set_active(init.paste_plain);
         widgets.spellcheck_row.set_active(init.spellcheck);
         // The language dropdown offers exactly what checking can use: the
@@ -1634,6 +1657,9 @@ impl Component for Preferences {
             .detach();
         widgets.pgp_slot.set_child(Some(pgp.widget()));
         model.pgp_keys = Some(pgp);
+        let cloud = crate::ui::cloud_accounts::CloudAccounts::builder().launch(()).detach();
+        widgets.cloud_slot.set_child(Some(cloud.widget()));
+        model.cloud = Some(cloud);
         // The sidebar (#141): a heading per section, a row per category.
         for (section, pages) in SIDE_PAGES {
             let heading = gtk::ListBoxRow::new();
@@ -1747,6 +1773,9 @@ impl Component for Preferences {
             }
             PrefInput::ToggleSwipeReversed(on) => {
                 let _ = sender.output(PrefOutput::SetSwipeReversed(on));
+            }
+            PrefInput::ToggleReplyFields(on) => {
+                let _ = sender.output(PrefOutput::SetReplyFields(on));
             }
             PrefInput::ToggleComposeInline(on) => {
                 let _ = sender.output(PrefOutput::SetComposeInline(on));

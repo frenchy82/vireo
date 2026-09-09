@@ -452,6 +452,7 @@ pub struct AppModel {
     swipe_reversed: bool,
     /// "New message" composes inline over the reading pane (vs a window).
     compose_inline: bool,
+    reply_fields: bool,
     paste_plain: bool,
     spellcheck: bool,
     spellcheck_langs: String,
@@ -502,7 +503,9 @@ pub struct AppModel {
     /// bring the messages back (found by Message-ID where the move put them).
     undo_stack: Vec<UndoEntry>,
     /// A draft awaiting its body before opening in the compose editor.
-    pending_draft: Option<Message>,
+    /// A draft whose body is being fetched before its editor opens, and
+    /// whether that editor goes in the reading pane (true) or a window.
+    pending_draft: Option<(Message, bool)>,
     /// Outstanding bulk MoveMessages requests awaiting a worker `BulkComplete`.
     /// Outstanding server-side bulk operations; while > 0 the refresh spinner
     /// spins and the status bar narrates.
@@ -542,6 +545,8 @@ pub enum AppMsg {
     SendCurrentOutbox,
     /// Try to send everything waiting, across accounts.
     RetryAllOutbox,
+    /// Send Later (#145): the half-minute clock that sends due queued mail.
+    SendDueScheduled,
     /// Cached gallery attachments for an account inbox arrived.
     GalleryItems { account_id: u32, items: Vec<crate::models::GalleryItem> },
     /// Gallery "Go to Message" — open the attachment's source message.
@@ -588,6 +593,8 @@ pub enum AppMsg {
     RenameFolderTo { account_id: u32, path: String, new_name: String },
     /// Delete a custom folder (its contents are moved to Trash first).
     DeleteFolder { account_id: u32, path: String },
+    /// Erase everything in a Trash or Junk folder (#152).
+    EmptyFolder { account_id: u32, folder_id: u32, path: String },
     AccountsReordered(Vec<String>),
     /// `solo` marks a reply the user picked out of a conversation on screen:
     /// show that message alone and don't go looking for its siblings.
@@ -701,6 +708,8 @@ pub enum AppMsg {
     SetSwipeEnabled(bool),
     SetSwipeReversed(bool),
     SetComposeInline(bool),
+    /// Reply panel shows its From/To/Subject rows from the start (#154).
+    SetReplyFields(bool),
     SetPastePlain(bool),
     SetSpellcheck(bool),
     SetSpellcheckLangs(String),
@@ -765,6 +774,9 @@ pub enum AppMsg {
     /// Select a settings category by id (the showcase hook).
     ShowSettingsPage(String),
     ComposeTo(String),
+    /// Showcase only (VIREO_SHOWCASE_FOLDER): switch to the first account's
+    /// folder of this kind, so a capture can start from Drafts, Sent, etc.
+    ShowcaseFolder(FolderKind),
     Reply,
     ReplyAll,
     Forward,
@@ -788,6 +800,9 @@ pub enum AppMsg {
     /// pre-downloaded — fetch them from the server now.
     SendMessage(Box<OutgoingMessage>),
     SaveDraftMessage(Box<OutgoingMessage>),
+    /// The composer's Delete Draft: trash the draft it was opened from and
+    /// close that composer without saving.
+    DeleteDraft { id: u32, origin: crate::models::DraftOrigin },
     DraftSaved,
     /// A composer (id) finished — tear down its host (window or inline revealer).
     ComposeClosed(u32),
@@ -1952,6 +1967,7 @@ impl SimpleComponent for AppModel {
             swipe_enabled: config::load_swipe_enabled(),
             swipe_reversed: config::load_swipe_reversed(),
             compose_inline: config::load_compose_inline(),
+            reply_fields: config::load_reply_fields(),
             paste_plain: config::load_paste_plain(),
             spellcheck: config::load_spellcheck(),
             spellcheck_langs: config::load_spellcheck_langs(),
@@ -2800,6 +2816,25 @@ impl SimpleComponent for AppModel {
                 // selected message, to check the composer's grounds (#148).
                 // VIREO_SHOWCASE_FLIP=dark|light then switches the app theme
                 // at 6 s, to check a live flip re-resolves those grounds.
+                // VIREO_SHOWCASE_FOLDER=drafts|sent|archive|junk|trash switches
+                // to that folder at 2 s, before the staging's 3 s selection
+                // moves onto its first row.
+                if let Ok(kind) = std::env::var("VIREO_SHOWCASE_FOLDER") {
+                    let kind = match kind.as_str() {
+                        "drafts" => Some(FolderKind::Drafts),
+                        "sent" => Some(FolderKind::Sent),
+                        "archive" => Some(FolderKind::Archive),
+                        "junk" => Some(FolderKind::Junk),
+                        "trash" => Some(FolderKind::Trash),
+                        _ => None,
+                    };
+                    if let Some(kind) = kind {
+                        let s = sender.clone();
+                        gtk::glib::timeout_add_seconds_local_once(2, move || {
+                            s.input(AppMsg::ShowcaseFolder(kind));
+                        });
+                    }
+                }
                 if std::env::var("VIREO_SHOWCASE_REPLY").is_ok() {
                     let s = sender.clone();
                     gtk::glib::timeout_add_seconds_local_once(4, move || {
@@ -2940,6 +2975,18 @@ impl SimpleComponent for AppModel {
             sender.input(AppMsg::OpenWithFiles(paths));
         }
 
+        // Send Later (#145): the app's clock. Every half minute, any queued
+        // message whose time has come is flushed by id, which sends it even
+        // though the ordinary flush leaves scheduled mail alone. One try per
+        // scheduling: a failure shows in the Outbox with Send Now to retry,
+        // rather than a loud attempt every tick.
+        {
+            let s = sender.clone();
+            gtk::glib::timeout_add_seconds_local(30, move || {
+                s.input(AppMsg::SendDueScheduled);
+                gtk::glib::ControlFlow::Continue
+            });
+        }
         ComponentParts { model, widgets }
     }
 
@@ -2985,6 +3032,23 @@ impl SimpleComponent for AppModel {
             AppMsg::SendCurrentOutbox => {
                 if let Some(m) = self.current.clone() {
                     self.send_to(m.account_id, MailRequest::FlushOutbox { id: Some(m.id) });
+                }
+            }
+
+            AppMsg::SendDueScheduled => {
+                let now = crate::datefmt::now();
+                let due: Vec<(u32, u32)> = self
+                    .outbox_by_account
+                    .iter()
+                    .flat_map(|(account_id, items)| {
+                        items
+                            .iter()
+                            .filter(|i| i.send_at.is_some_and(|t| t <= now) && i.attempts <= 1)
+                            .map(move |i| (*account_id, i.id))
+                    })
+                    .collect();
+                for (account_id, id) in due {
+                    self.send_to(account_id, MailRequest::FlushOutbox { id: Some(id) });
                 }
             }
 
@@ -3386,6 +3450,9 @@ impl SimpleComponent for AppModel {
                 CtxAction::RenameFolder { account_id, name, path } => {
                     self.prompt_rename_folder(account_id, name, path, &sender);
                 }
+                CtxAction::EmptyFolder { account_id, folder_id, name, path } => {
+                    self.confirm_empty_folder(account_id, folder_id, name, path, &sender);
+                }
             },
 
             AppMsg::DropMoveMessages { dest_account, dest, items } => {
@@ -3433,6 +3500,21 @@ impl SimpleComponent for AppModel {
 
             AppMsg::RenameFolderTo { account_id, path, new_name } => {
                 self.rename_folder_to(account_id, path, new_name);
+            }
+
+            AppMsg::EmptyFolder { account_id, folder_id, path } => {
+                // Gone locally at once; the worker's empty message list and
+                // zero count confirm it, or an error says why not.
+                self.message_cache.remove(&(account_id, folder_id));
+                self.folder_unread.insert((account_id, folder_id), 0);
+                if self.selected.as_ref().is_some_and(|s| s.account_id == account_id && s.folder_id == folder_id) {
+                    self.current = None;
+                    self.current_thread.clear();
+                    self.show_message(None, false);
+                    self.message_list.emit(MessageListInput::SetLoading);
+                }
+                self.push_unread_counts();
+                self.send_to(account_id, MailRequest::EmptyFolder { folder_id, path });
             }
 
             AppMsg::DeleteFolder { account_id, path } => {
@@ -3499,9 +3581,10 @@ impl SimpleComponent for AppModel {
                     self.show_outbox_message(&item);
                     return;
                 }
-                // Clicking a draft opens it in the compose editor, not the reader.
+                // Selecting a draft opens it in the compose editor, in the
+                // reading pane where the message would otherwise show.
                 if self.is_drafts_folder(m.account_id, m.folder_id) {
-                    self.open_draft(m, &sender);
+                    self.open_draft(m, true, &sender);
                     return;
                 }
                 self.attachments.clear();
@@ -3666,7 +3749,7 @@ impl SimpleComponent for AppModel {
             AppMsg::OpenMessageWindow { message: m, thread } => {
                 // Drafts open in the editor rather than a read-only window.
                 if self.is_drafts_folder(m.account_id, m.folder_id) {
-                    self.open_draft(m, &sender);
+                    self.open_draft(m, false, &sender);
                 } else {
                     // Popouts follow the reading pane's display order (#70).
                     let mut thread = thread;
@@ -3954,6 +4037,18 @@ impl SimpleComponent for AppModel {
                 // was selected. Have each account re-check them all.
                 for w in self.workers.values() {
                     let _ = w.send(MailRequest::RefreshUnread);
+                }
+            }
+
+            AppMsg::ShowcaseFolder(kind) => {
+                let account = self.active_account();
+                let found = self
+                    .folders
+                    .get(&account)
+                    .and_then(|fs| fs.iter().find(|f| f.kind == kind))
+                    .map(|f| (f.id, f.name.clone(), f.path.clone()));
+                if let Some((id, name, path)) = found {
+                    self.select_folder(account, id, name, path);
                 }
             }
 
@@ -4661,6 +4756,13 @@ impl SimpleComponent for AppModel {
                 }
             }
 
+            AppMsg::SetReplyFields(on) => {
+                if self.reply_fields != on {
+                    self.reply_fields = on;
+                    self.save_settings();
+                }
+            }
+
             AppMsg::SetPastePlain(on) => {
                 if self.paste_plain != on {
                     self.paste_plain = on;
@@ -4906,6 +5008,38 @@ impl SimpleComponent for AppModel {
                     return;
                 };
                 self.send_to(account_id, MailRequest::SaveDraft { message: out, folder_id, path });
+            }
+
+            AppMsg::DeleteDraft { id, origin } => {
+                // The same move the list's trash button makes for a draft, so
+                // it is undoable and the Drafts list updates in place. A draft
+                // the list no longer holds (a stale window) is erased by uid.
+                let cached = self
+                    .message_cache
+                    .get(&(origin.account_id, origin.folder_id))
+                    .and_then(|msgs| msgs.iter().find(|m| m.uid == origin.uid).cloned());
+                match cached {
+                    Some(m) => self.move_to(m, FolderKind::Trash),
+                    None => {
+                        self.send_to(
+                            origin.account_id,
+                            MailRequest::PurgeMessages {
+                                path: origin.path.clone(),
+                                uids: vec![origin.uid],
+                            },
+                        );
+                        self.send_to(
+                            origin.account_id,
+                            MailRequest::LoadMessages {
+                                folder_id: origin.folder_id,
+                                path: origin.path,
+                            },
+                        );
+                    }
+                }
+                self.pending_draft = None;
+                self.close_compose(id);
+                self.message_list.emit(MessageListInput::ReclaimFocus);
             }
 
             AppMsg::DraftSaved => {
@@ -5824,12 +5958,12 @@ impl SimpleComponent for AppModel {
                 self.body_cache
                     .insert((account_id, message_id), body.clone());
                 // If this body was fetched to open a draft, open the editor now.
-                if let Some(pd) = self.pending_draft.take() {
+                if let Some((pd, inline)) = self.pending_draft.take() {
                     if pd.account_id == account_id && pd.id == message_id {
-                        self.compose_from_draft(pd, body, &sender);
+                        self.compose_from_draft(pd, body, inline, &sender);
                         return;
                     }
-                    self.pending_draft = Some(pd);
+                    self.pending_draft = Some((pd, inline));
                 }
                 // A UID is unique only within its folder, and the background
                 // prefetch pushes bodies from every folder it syncs. Matching on
@@ -6324,6 +6458,7 @@ impl AppModel {
             self.swipe_enabled,
             self.swipe_reversed,
             self.compose_inline,
+            self.reply_fields,
             self.paste_plain,
             self.spellcheck,
             self.spellcheck_langs.clone(),
@@ -8141,14 +8276,16 @@ impl AppModel {
 
     /// Open a draft for editing: reuse a cached body if we have one, otherwise
     /// fetch it and open the editor once it arrives (see the `Body` handler).
-    fn open_draft(&mut self, m: Message, sender: &ComponentSender<Self>) {
+    /// `inline` puts the editor in the reading pane (a selected draft);
+    /// otherwise it gets a window (a draft opened by double-click or Enter).
+    fn open_draft(&mut self, m: Message, inline: bool, sender: &ComponentSender<Self>) {
         let body = if !m.body.is_empty() {
             Some(m.body.clone())
         } else {
             self.body_cache.get(&(m.account_id, m.id)).cloned()
         };
         match body {
-            Some(html) => self.compose_from_draft(m, html, sender),
+            Some(html) => self.compose_from_draft(m, html, inline, sender),
             None => {
                 if let Some(path) = self.resolve_folder_path(&m) {
                     self.send_to(
@@ -8156,7 +8293,7 @@ impl AppModel {
                         MailRequest::LoadBody { message_id: m.id, path, uid: m.uid },
                     );
                 }
-                self.pending_draft = Some(m);
+                self.pending_draft = Some((m, inline));
             }
         }
     }
@@ -8230,6 +8367,7 @@ impl AppModel {
             encrypt: false,
             outbox_origin: Some(id),
             reply_addressed_to: String::new(),
+            send_at: item.send_at,
         };
         // The Outbox stays the folder on screen: its list is still what's listed,
         // so its toolbar has to stay too. Leaving it would strand the user in a
@@ -8238,8 +8376,17 @@ impl AppModel {
     }
 
     /// Open the compose editor pre-filled from a draft, remembering its origin so
-    /// saving/sending replaces it.
-    fn compose_from_draft(&mut self, m: Message, body_html: String, sender: &ComponentSender<Self>) {
+    /// saving/sending replaces it. Inline, the editor covers the reading pane
+    /// the way a new message does, with the pane cleared beneath it: the draft
+    /// is what is selected, so nothing older should reappear when the editor
+    /// closes.
+    fn compose_from_draft(
+        &mut self,
+        m: Message,
+        body_html: String,
+        inline: bool,
+        sender: &ComponentSender<Self>,
+    ) {
         let path = self.resolve_folder_path(&m).unwrap_or_default();
         let prefill = ComposePrefill {
             to: m.to.clone(),
@@ -8254,7 +8401,17 @@ impl AppModel {
             }),
             ..Default::default()
         };
-        self.open_compose(m.account_id, prefill, sender);
+        if inline {
+            self.attachments.clear();
+            self.attachments_loading = false;
+            self.sync_attachment_drawer();
+            self.current = None;
+            self.current_thread.clear();
+            self.show_message(None, false);
+            self.open_inline_reply(m.account_id, prefill, None, sender);
+        } else {
+            self.open_compose(m.account_id, prefill, sender);
+        }
     }
 
     /// Assemble the `ComposeInit` for a composer (from-accounts + signatures,
@@ -8379,6 +8536,7 @@ impl AppModel {
             .forward(sender.input_sender(), |out| match out {
                 ComposeOutput::Send(msg) => AppMsg::SendMessage(msg),
                 ComposeOutput::SaveDraft(msg) => AppMsg::SaveDraftMessage(msg),
+                ComposeOutput::DeleteDraft { id, origin } => AppMsg::DeleteDraft { id, origin },
                 ComposeOutput::ToggleWindow(id) => AppMsg::ComposeToggleWindow(id),
                 ComposeOutput::Close(id) => AppMsg::ComposeClosed(id),
             })
@@ -9479,6 +9637,34 @@ impl AppModel {
         dialog.present();
     }
 
+    /// Empty Trash / Empty Junk (#152): there is no undo, so always ask.
+    fn confirm_empty_folder(
+        &self,
+        account_id: u32,
+        folder_id: u32,
+        name: String,
+        path: String,
+        sender: &ComponentSender<Self>,
+    ) {
+        let dialog = adw::MessageDialog::new(
+            Some(&self.window),
+            Some(&i18n_f("Empty “{name}”?", &[("name", &name)])),
+            Some(i18n("Every message in it will be erased from the server. This can’t be undone.").as_str()),
+        );
+        dialog.add_response("cancel", &i18n("Cancel"));
+        dialog.add_response("empty", &i18n("Empty"));
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        dialog.set_response_appearance("empty", adw::ResponseAppearance::Destructive);
+        let s = sender.clone();
+        dialog.connect_response(None, move |_, resp| {
+            if resp == "empty" {
+                s.input(AppMsg::EmptyFolder { account_id, folder_id, path: path.clone() });
+            }
+        });
+        dialog.present();
+    }
+
     /// Mark `m` as spam: tag `$Junk` and move it to the account's Junk folder
     /// (so the server's spam filter can learn from it).
     fn mark_spam_msg(&mut self, m: Message) {
@@ -9920,6 +10106,7 @@ impl AppModel {
             swipe_enabled: self.swipe_enabled,
             swipe_reversed: self.swipe_reversed,
             compose_inline: self.compose_inline,
+            reply_fields: self.reply_fields,
             paste_plain: self.paste_plain,
             spellcheck: self.spellcheck,
             spellcheck_langs: self.spellcheck_langs.clone(),
@@ -9975,6 +10162,7 @@ impl AppModel {
                 PrefOutput::SetSwipeEnabled(on) => AppMsg::SetSwipeEnabled(on),
                 PrefOutput::SetSwipeReversed(on) => AppMsg::SetSwipeReversed(on),
                 PrefOutput::SetComposeInline(on) => AppMsg::SetComposeInline(on),
+                PrefOutput::SetReplyFields(on) => AppMsg::SetReplyFields(on),
                 PrefOutput::SetPastePlain(on) => AppMsg::SetPastePlain(on),
                 PrefOutput::SetSpellcheck(on) => AppMsg::SetSpellcheck(on),
                 PrefOutput::SetSpellcheckLangs(l) => AppMsg::SetSpellcheckLangs(l),
@@ -10509,7 +10697,9 @@ impl AppModel {
         if let Some(msgs) = self.message_cache.get_mut(&(m.account_id, m.folder_id)) {
             msgs.retain(|x| x.uid != m.uid);
         }
-        if m.unread {
+        // The Drafts chip counts every draft, so leaving that folder always
+        // drops it by one; elsewhere only unread mail is counted.
+        if m.unread || self.is_drafts_folder(m.account_id, m.folder_id) {
             if let Some(n) = self.folder_unread.get_mut(&(m.account_id, m.folder_id)) {
                 *n = n.saturating_sub(1);
             }

@@ -213,6 +213,8 @@ pub enum MailRequest {
     /// Permanently erase messages from `path` (flag `\Deleted` + EXPUNGE), used
     /// when "delete" is asked for in Trash, where there is nowhere left to move to.
     PurgeMessages { path: String, uids: Vec<u32> },
+    /// Erase every message in a folder (Empty Trash / Empty Junk, #152).
+    EmptyFolder { folder_id: u32, path: String },
     /// Create a new mailbox (folder) at `path`.
     CreateFolder { path: String },
     /// Undo a move: find the messages (by Message-ID header — their UIDs
@@ -298,6 +300,9 @@ pub struct OutgoingMessage {
     /// Encrypt to every recipient's key (and the sender's): multipart/encrypted,
     /// signed inside when `sign` is set too.
     pub encrypt: bool,
+    /// Send Later (#145): unix seconds to send at. `None` sends now. A time
+    /// already past sends now too.
+    pub send_at: Option<i64>,
 }
 
 /// An event pushed from the worker back to the UI.
@@ -1189,7 +1194,8 @@ async fn run_imap(
                         // Refresh the true unread count (catches new mail and
                         // reads from other clients beyond the loaded window).
                         if let Some(sess) = session.as_mut() {
-                            if let Some(unread) = selected_unseen(sess).await {
+                            let kind = cached_folder_kind(cache.as_ref(), account_id, &path);
+                            if let Some(unread) = selected_chip_count(sess, kind).await {
                                 emit(WorkerEvent::FolderUnread { folder_id, unread });
                             }
                         }
@@ -1660,6 +1666,40 @@ async fn run_imap(
                 emit(WorkerEvent::BulkComplete);
             }
 
+            MailRequest::EmptyFolder { folder_id, path } => {
+                let sess = session.as_mut().unwrap();
+                let found = match sel(sess, &path).await {
+                    Ok(_) => search_uids(sess, "ALL").await,
+                    Err(e) => Err(e),
+                };
+                let result = match found {
+                    Ok(set) => {
+                        let uids: Vec<u32> = set.into_iter().collect();
+                        purge_messages(sess, &path, &uids).await.map(|()| uids)
+                    }
+                    Err(e) => Err(e),
+                };
+                match result {
+                    Ok(uids) => {
+                        if let Some(c) = cache.as_ref() {
+                            for uid in &uids {
+                                c.delete_message(account_id, &path, *uid);
+                            }
+                        }
+                        tracing::info!("emptied {path}: {} message(s) erased", uids.len());
+                        emit(WorkerEvent::Messages { folder_id, messages: Vec::new() });
+                        emit(WorkerEvent::FolderUnread { folder_id, unread: 0 });
+                    }
+                    Err(e) => {
+                        emit(WorkerEvent::Error {
+                            text: i18n_f("Could not empty the folder: {e}", &[("e", &e.to_string())]),
+                            connectivity: false,
+                        });
+                        lost = true;
+                    }
+                }
+            }
+
             MailRequest::CreateFolder { path } => {
                 let sess = session.as_mut().unwrap();
                 match create_folder(sess, &path).await {
@@ -1698,6 +1738,33 @@ async fn run_imap(
                             connectivity: false,
                         });
                         lost = true;
+                    }
+                }
+            }
+
+            // Send Later (#145): into the Outbox until its time.
+            MailRequest::Send { message, sent_path }
+                if message.send_at.is_some_and(|t| t > crate::datefmt::now()) =>
+            {
+                let at = message.send_at.unwrap_or_default();
+                schedule_send(cache.as_ref(), account_id, &account, &message, sent_path.as_deref(), at, &emit);
+                // The draft it was opened from is superseded by the queued copy.
+                if let Some(o) = message.draft_origin.clone() {
+                    if o.account_id == account_id {
+                        if let Some(sess) = session.as_mut() {
+                            let _ = delete_draft(sess, &o.path, o.uid).await;
+                        }
+                        if let Some(c) = cache.as_ref() {
+                            c.delete_message(account_id, &o.path, o.uid);
+                        }
+                        if let Ok(messages) = load_messages_retry(
+                            account_id, &mut session, &account, o.folder_id, &o.path,
+                            &mut use_envelope, cache.as_ref(),
+                        )
+                        .await
+                        {
+                            emit(WorkerEvent::Messages { folder_id: o.folder_id, messages });
+                        }
                     }
                 }
             }
@@ -1813,7 +1880,7 @@ async fn run_imap(
                 // A draft is kept as written: signing and encrypting happen
                 // at send time (#133).
                 let message = OutgoingMessage { sign: false, encrypt: false, ..*message };
-                match build_email(&account, &message) {
+                match build_draft(&account, &message) {
                     Ok(email) => {
                         let raw = email.formatted();
                         let append_res = {
@@ -2394,7 +2461,8 @@ async fn idle_wait(
                     // new mail lands in a background (unfocused) inbox — it would
                     // take an explicit reload / "All Inboxes" refresh to appear.
                     if let Some(sess) = session.as_mut() {
-                        if let Some(unread) = selected_unseen(sess).await {
+                        let kind = cached_folder_kind(cache, account_id, path);
+                        if let Some(unread) = selected_chip_count(sess, kind).await {
                             emit(WorkerEvent::FolderUnread { folder_id, unread });
                         }
                     }
@@ -2903,6 +2971,51 @@ fn queue_failed_send(
     sent_path: Option<&str>,
     error: &str,
 ) -> bool {
+    queue_outbox_message(cache, account_id, account, msg, sent_path, error, None)
+}
+
+/// Send Later (#145): park the message in the Outbox until `at`. The bytes are
+/// built now, like a failed send's, so the attachments are read while they
+/// exist; the app's clock sends it when the time comes, or the next launch
+/// does if Vireo was not running then. Replaces the queued row it was edited
+/// from, and drops the draft it was opened from (the caller handles the
+/// server-side copy).
+fn schedule_send(
+    cache: Option<&Cache>,
+    account_id: u32,
+    account: &AccountConfig,
+    msg: &OutgoingMessage,
+    sent_path: Option<&str>,
+    at: i64,
+    emit: &impl Fn(WorkerEvent),
+) {
+    let queued = queue_outbox_message(cache, account_id, account, msg, sent_path, "", Some(at));
+    if queued {
+        if let (Some(old), Some(c)) = (msg.outbox_origin, cache) {
+            c.delete_outbox(old);
+        }
+        emit(WorkerEvent::Notice(i18n_f(
+            "“{subject}” will be sent {when}",
+            &[("subject", &msg.subject), ("when", &crate::datefmt::date_time(at))],
+        )));
+    } else {
+        emit(WorkerEvent::Error {
+            text: i18n("Could not schedule the message: there is no local store to keep it in."),
+            connectivity: false,
+        });
+    }
+    emit_outbox(cache, account_id, emit);
+}
+
+fn queue_outbox_message(
+    cache: Option<&Cache>,
+    account_id: u32,
+    account: &AccountConfig,
+    msg: &OutgoingMessage,
+    sent_path: Option<&str>,
+    error: &str,
+    send_at: Option<i64>,
+) -> bool {
     let Some(cache) = cache else {
         return false;
     };
@@ -2936,6 +3049,7 @@ fn queue_failed_send(
             &raw,
             sent_path,
             error,
+            send_at,
         )
         .is_some()
 }
@@ -2955,10 +3069,16 @@ async fn flush_outbox(
     loud: bool,
 ) {
     let Some(cache) = cache else { return };
+    // A scheduled message waits for its time; asking for it by id (Send Now,
+    // or the app's clock) sends it regardless.
+    let now = crate::datefmt::now();
     let items: Vec<crate::models::OutboxItem> = cache
         .outbox_items(account_id)
         .into_iter()
-        .filter(|item| id.is_none_or(|wanted| wanted == item.id))
+        .filter(|item| match id {
+            Some(wanted) => wanted == item.id,
+            None => item.send_at.is_none_or(|t| t <= now),
+        })
         .collect();
     if items.is_empty() {
         return;
@@ -3182,10 +3302,29 @@ fn mailbox(name: &str, addr: &str) -> Result<Mailbox, SmtpError> {
     }
 }
 
-/// Send the message and return its raw RFC 822 bytes (for saving to Sent).
-/// Build the RFC 822 email (headers + MIME body) from a composed message. Shared
-/// by SMTP sending and by saving to Drafts (no network).
+/// Build the RFC 822 email (headers + MIME body) from a composed message, for
+/// sending: the SMTP envelope is derived from To/Cc/Bcc, so a message with no
+/// recipient is refused here as well as in the composer.
 fn build_email(account: &AccountConfig, msg: &OutgoingMessage) -> Result<LettreMessage, SmtpError> {
+    build_message(account, msg, false)
+}
+
+/// Build the same bytes for the Drafts folder. A draft is often saved before
+/// any address is typed (the composer saves on the way out whenever the body
+/// was edited), and lettre refuses to build a message whose envelope has no
+/// destination — "missing destination address, invalid envelope". The
+/// envelope is only ever used by SMTP, and a draft is appended as raw bytes,
+/// so a recipient-less draft gets an explicit envelope naming the sender,
+/// which never reaches the formatted headers.
+fn build_draft(account: &AccountConfig, msg: &OutgoingMessage) -> Result<LettreMessage, SmtpError> {
+    build_message(account, msg, true)
+}
+
+fn build_message(
+    account: &AccountConfig,
+    msg: &OutgoingMessage,
+    draft: bool,
+) -> Result<LettreMessage, SmtpError> {
     // A send-as alias replaces the From header (and, if the alias has its own
     // SMTP, the transport — see `send_raw_smtp`); the Sent copy and everything
     // else about the send stays the account's (#34).
@@ -3196,15 +3335,27 @@ fn build_email(account: &AccountConfig, msg: &OutgoingMessage) -> Result<LettreM
         },
         None => (mailbox(&account.name, &account.email)?, account.email.clone()),
     };
+    let sender_address = from.email.clone();
     let mut builder = LettreMessage::builder().from(from);
+    let mut recipients = 0;
     for (name, addr) in parse_recipients(&msg.to) {
         builder = builder.to(mailbox(&name, &addr)?);
+        recipients += 1;
     }
     for (name, addr) in parse_recipients(&msg.cc) {
         builder = builder.cc(mailbox(&name, &addr)?);
+        recipients += 1;
     }
     for (name, addr) in parse_recipients(&msg.bcc) {
         builder = builder.bcc(mailbox(&name, &addr)?);
+        recipients += 1;
+    }
+    if draft && recipients == 0 {
+        let envelope = lettre::address::Envelope::new(
+            Some(sender_address.clone()),
+            vec![sender_address],
+        )?;
+        builder = builder.envelope(envelope);
     }
     // Our own Message-ID, in the account's own domain. Without one the SMTP
     // server assigns it on the way out — so the copy filed in Sent has no id at
@@ -4576,8 +4727,8 @@ async fn list_folders(
     // Ask the server for each folder's true unread count. STATUS is cheap and
     // downloads no message content, so this stays fast even for huge mailboxes.
     for f in folders.iter_mut() {
-        if let Ok(mb) = box_status(session, &f.path, "(UNSEEN)").await {
-            f.unread = mb.unseen.unwrap_or(0);
+        if let Ok(mb) = box_status(session, &f.path, "(UNSEEN MESSAGES)").await {
+            f.unread = if chip_counts_all(f.kind) { mb.exists } else { mb.unseen.unwrap_or(0) };
         }
     }
 
@@ -4840,7 +4991,7 @@ async fn refresh_unread_counts(
             tracing::debug!("sweep: cannot examine {}", f.path);
             continue;
         };
-        let Some(unread) = selected_unseen(session).await else {
+        let Some(unread) = selected_chip_count(session, Some(f.kind)).await else {
             continue;
         };
         emit(WorkerEvent::FolderUnread { folder_id: f.id, unread });
@@ -4860,6 +5011,38 @@ async fn refresh_unread_counts(
         );
     }
     changed
+}
+
+/// Whether a folder's sidebar chip counts every message rather than unread
+/// ones. Drafts: a draft is never unread, and the chip is there to say how
+/// many are waiting to be finished.
+pub fn chip_counts_all(kind: FolderKind) -> bool {
+    kind == FolderKind::Drafts
+}
+
+/// The chip number for a folder whose messages are all in hand.
+fn chip_count_of(kind: FolderKind, messages: &[Message]) -> u32 {
+    if chip_counts_all(kind) {
+        messages.len() as u32
+    } else {
+        messages.iter().filter(|m| m.unread).count() as u32
+    }
+}
+
+/// The chip number for the currently-selected mailbox: unseen, or every
+/// message for a kind that counts them all. `None` for an unknown kind
+/// counts unseen.
+async fn selected_chip_count(session: &mut ImapSession, kind: Option<FolderKind>) -> Option<u32> {
+    if kind.is_some_and(chip_counts_all) {
+        search_uids(session, "ALL").await.ok().map(|uids| uids.len() as u32)
+    } else {
+        selected_unseen(session).await
+    }
+}
+
+/// A folder's kind as the cache last saw it, by path.
+fn cached_folder_kind(cache: Option<&Cache>, account_id: u32, path: &str) -> Option<FolderKind> {
+    cache?.load_folders(account_id).into_iter().find(|f| f.path == path).map(|f| f.kind)
 }
 
 /// Count unseen messages in the currently-selected mailbox via SEARCH (safe on
@@ -6661,6 +6844,8 @@ async fn run_pop3(
                     }),
                 }
             }
+            // POP3 shows only its Inbox; there is no Trash or Junk to empty.
+            MailRequest::EmptyFolder { .. } => {}
             MailRequest::MoveMessages { uids, .. } | MailRequest::PurgeMessages { uids, .. } => {
                 for uid in uids {
                     if pop3_delete(&account, uid).await.is_ok() {
@@ -6915,6 +7100,11 @@ async fn run_mock(
             | MailRequest::DeleteOutbox { .. }
             | MailRequest::RefreshUnread
             | MailRequest::Reconnect => {}
+            // The demo's folders are fixed, but an emptied one reads as empty.
+            MailRequest::EmptyFolder { folder_id, .. } => {
+                emit(WorkerEvent::Messages { folder_id, messages: Vec::new() });
+                emit(WorkerEvent::FolderUnread { folder_id, unread: 0 });
+            }
             // The demo backend sends nothing, so its Outbox is always empty.
             MailRequest::LoadOutbox => emit(WorkerEvent::Outbox { items: Vec::new() }),
             // Signal completion so the demo's bulk spinner clears.
@@ -7700,7 +7890,8 @@ fn graph_list_folders(token: &str, account_id: u32) -> Result<Vec<GraphFolder>, 
         }
     }
 
-    const SELECT: &str = "$select=id,displayName,childFolderCount,unreadItemCount";
+    const SELECT: &str =
+        "$select=id,displayName,childFolderCount,unreadItemCount,totalItemCount";
     let roots = graph_paged(
         token,
         &format!("{GRAPH_BASE}/me/mailFolders?$top=100&{SELECT}"),
@@ -7734,7 +7925,10 @@ fn graph_list_folders(token: &str, account_id: u32) -> Result<Vec<GraphFolder>, 
                 name,
                 path,
                 kind,
-                unread: v["unreadItemCount"].as_i64().unwrap_or(0).max(0) as u32,
+                unread: {
+                    let field = if chip_counts_all(kind) { "totalItemCount" } else { "unreadItemCount" };
+                    v[field].as_i64().unwrap_or(0).max(0) as u32
+                },
             },
         });
     }
@@ -7849,6 +8043,16 @@ struct GraphState {
 }
 
 impl GraphState {
+    /// The chip number for a folder just loaded: every draft in Drafts,
+    /// unread mail elsewhere.
+    fn chip_count(&self, folder_id: u32, messages: &[Message]) -> u32 {
+        let kind = match &self.drafts {
+            Some((id, _)) if *id == folder_id => FolderKind::Drafts,
+            _ => FolderKind::Custom,
+        };
+        chip_count_of(kind, messages)
+    }
+
     fn adopt_folders(&mut self, list: &[GraphFolder]) {
         self.folders = list
             .iter()
@@ -7966,7 +8170,7 @@ async fn run_graph(
                 .await
                 {
                     Ok(messages) => {
-                        let unread = messages.iter().filter(|m| m.unread).count() as u32;
+                        let unread = state.chip_count(folder_id, &messages);
                         emit(WorkerEvent::Messages { folder_id, messages });
                         emit(WorkerEvent::FolderUnread { folder_id, unread });
                         // Graph loads the whole folder in one pass — there is no
@@ -8204,26 +8408,28 @@ async fn run_graph(
             }
 
             MailRequest::PurgeMessages { path, uids } => {
-                for uid in uids {
-                    let deleted = match graph_resolve(&account, &mut state, &path, uid, &emit).await
-                    {
-                        Some((token, gid)) => {
-                            let url = format!("{GRAPH_BASE}/me/messages/{gid}");
-                            tokio::task::spawn_blocking(move || graph_delete_req(&token, &url))
-                                .await
-                                .unwrap_or_else(|_| Err("task failed".into()))
-                                .is_ok()
-                        }
-                        None => false,
-                    };
-                    if deleted {
-                        state.uids.remove(&uid);
-                        if let Some(c) = cache.as_ref() {
-                            c.delete_message(account_id, &path, uid);
-                        }
-                    }
-                }
+                graph_purge_uids(&account, account_id, &mut state, &path, uids, cache.as_ref(), &emit).await;
                 emit(WorkerEvent::BulkComplete);
+            }
+
+            MailRequest::EmptyFolder { folder_id, path } => {
+                // No bulk endpoint for an arbitrary folder: list it, then
+                // delete each message the way a purge does.
+                let Some(token) = graph_token(&account, &emit).await else { continue };
+                match graph_load_folder(&token, account_id, folder_id, &path, cache.as_ref(), &mut state).await {
+                    Ok(messages) => {
+                        let uids: Vec<u32> = messages.iter().map(|m| m.uid).collect();
+                        let n = uids.len();
+                        graph_purge_uids(&account, account_id, &mut state, &path, uids, cache.as_ref(), &emit).await;
+                        tracing::info!("emptied {path}: {n} message(s) erased");
+                        emit(WorkerEvent::Messages { folder_id, messages: Vec::new() });
+                        emit(WorkerEvent::FolderUnread { folder_id, unread: 0 });
+                    }
+                    Err(e) => emit(WorkerEvent::Error {
+                        text: i18n_f("Could not empty the folder: {e}", &[("e", &e.to_string())]),
+                        connectivity: false,
+                    }),
+                }
             }
 
             MailRequest::UndoMove { path, dest, dest_folder_id, message_ids } => {
@@ -8247,7 +8453,7 @@ async fn run_graph(
                             )
                             .await
                             {
-                                let unread = messages.iter().filter(|m| m.unread).count() as u32;
+                                let unread = state.chip_count(dest_folder_id, &messages);
                                 emit(WorkerEvent::Messages {
                                     folder_id: dest_folder_id,
                                     messages,
@@ -8363,7 +8569,7 @@ async fn run_graph(
             MailRequest::SaveDraft { message, folder_id, path } => {
                 emit(WorkerEvent::Status(i18n("Saving draft…")));
                 let message = OutgoingMessage { sign: false, encrypt: false, ..*message };
-                let saved = match build_email(&account, &message) {
+                let saved = match build_draft(&account, &message) {
                     Ok(email) => {
                         let raw = email.formatted();
                         match graph_token(&account, &emit).await {
@@ -8438,6 +8644,27 @@ async fn run_graph(
             }
 
             // `sent_path` is unused: Graph's sendMail files the Sent copy itself.
+            // Send Later (#145): into the Outbox until its time.
+            MailRequest::Send { message, sent_path: _ }
+                if message.send_at.is_some_and(|t| t > crate::datefmt::now()) =>
+            {
+                let at = message.send_at.unwrap_or_default();
+                schedule_send(cache.as_ref(), account_id, &account, &message, None, at, &emit);
+                if let Some(o) = message.draft_origin.clone() {
+                    if o.account_id == account_id {
+                        if let Some((tok, gid)) =
+                            graph_resolve(&account, &mut state, &o.path, o.uid, &emit).await
+                        {
+                            let url = format!("{GRAPH_BASE}/me/messages/{gid}");
+                            let _ = tokio::task::spawn_blocking(move || graph_delete_req(&tok, &url)).await;
+                        }
+                        if let Some(c) = cache.as_ref() {
+                            c.delete_message(account_id, &o.path, o.uid);
+                        }
+                    }
+                }
+            }
+
             MailRequest::Send { message, sent_path: _ } => {
                 emit(WorkerEvent::Status(i18n("Sending…")));
                 match graph_send_message(&account, &message, &emit).await {
@@ -8612,6 +8839,37 @@ async fn graph_refresh_unread(
     emit(WorkerEvent::Folders(folders));
     for (folder_id, unread) in counts {
         emit(WorkerEvent::FolderUnread { folder_id, unread });
+    }
+}
+
+/// Delete messages for good, one Graph request each; the cache and the uid
+/// map forget every one that went.
+async fn graph_purge_uids(
+    account: &AccountConfig,
+    account_id: u32,
+    state: &mut GraphState,
+    path: &str,
+    uids: Vec<u32>,
+    cache: Option<&Cache>,
+    emit: &impl Fn(WorkerEvent),
+) {
+    for uid in uids {
+        let deleted = match graph_resolve(account, state, path, uid, emit).await {
+            Some((token, gid)) => {
+                let url = format!("{GRAPH_BASE}/me/messages/{gid}");
+                tokio::task::spawn_blocking(move || graph_delete_req(&token, &url))
+                    .await
+                    .unwrap_or_else(|_| Err("task failed".into()))
+                    .is_ok()
+            }
+            None => false,
+        };
+        if deleted {
+            state.uids.remove(&uid);
+            if let Some(c) = cache {
+                c.delete_message(account_id, path, uid);
+            }
+        }
     }
 }
 
@@ -8873,10 +9131,14 @@ async fn graph_flush_outbox(
     emit: &impl Fn(WorkerEvent),
 ) {
     let Some(cache) = cache else { return };
+    let now = crate::datefmt::now();
     let items: Vec<crate::models::OutboxItem> = cache
         .outbox_items(account_id)
         .into_iter()
-        .filter(|item| id.is_none_or(|wanted| wanted == item.id))
+        .filter(|item| match id {
+            Some(wanted) => wanted == item.id,
+            None => item.send_at.is_none_or(|t| t <= now),
+        })
         .collect();
     if items.is_empty() {
         return;
@@ -8974,7 +9236,27 @@ mod tests {
             outbox_origin: None,
             sign: false,
             encrypt: false,
+            send_at: None,
         }
+    }
+
+    /// A draft saved before any address is typed: the bytes build without a
+    /// To header, and the send path still refuses the same message.
+    #[test]
+    fn recipient_less_draft_builds_but_send_does_not() {
+        let account = sample_account();
+        let mut msg = sample_outgoing();
+        msg.body = "half-written".into();
+        let raw = build_draft(&account, &msg).expect("draft builds").formatted();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(!text.contains("\r\nTo:"), "no To header: {text}");
+        assert!(text.contains("half-written"), "{text}");
+        let err = build_email(&account, &msg).expect_err("send needs a recipient").to_string();
+        assert!(err.contains("missing destination"), "{err}");
+        // With a recipient the draft is built the ordinary way.
+        msg.to = "Peer <peer@vireo.invalid>".into();
+        let raw = build_draft(&account, &msg).expect("builds").formatted();
+        assert!(String::from_utf8_lossy(&raw).contains("peer@vireo.invalid"));
     }
 
     /// OpenPGP sending (#133), end to end against a real gpg in a throwaway
@@ -9157,6 +9439,7 @@ mod tests {
             queued_at: 0,
             attempts: 1,
             last_error: String::new(),
+            send_at: None,
         }
     }
 
