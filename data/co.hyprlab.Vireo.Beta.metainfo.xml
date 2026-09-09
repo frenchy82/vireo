@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.25.2-beta.1" date="2026-09-09" type="development">
+      <description>
+        <p>Catch-up with stable 1.25.1: French translation completed for the 1.25.0 features, thread node dots drawn whole, richer demo content.</p>
+      </description>
+    </release>
     <release version="1.25.1-beta.1" date="2026-09-09" type="development">
       <description>
         <p>Catch-up with stable 1.25.0: Send Later, cloud attachments, Empty Trash and Empty Junk, reply-panel fields, drafts in the reading pane, quote folding fixes, French update.</p>
