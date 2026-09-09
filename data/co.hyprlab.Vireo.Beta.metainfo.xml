@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.24.4-beta.1" date="2026-09-08" type="development">
+      <description>
+        <p>Catch-up with stable 1.24.3: French translation updated to cover the 1.23 and 1.24 features.</p>
+      </description>
+    </release>
     <release version="1.24.3-beta.1" date="2026-09-08" type="development">
       <description>
         <p>Catch-up with stable 1.24.2: tags take any colour from the GTK colour chooser; the composer follows the GTK theme and a live light/dark switch.</p>
