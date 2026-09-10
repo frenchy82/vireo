@@ -43,7 +43,7 @@ trackers by default — no telemetry, no analytics.
 - **Conversation threading**, compose/reply/forward with HTML signatures, editable drafts, and full folder management.
 - **Outbox** — a send that fails is kept and retried when the connection returns, not lost; queued messages can be edited, sent by hand or discarded.
 - **Send later** — schedule a message for tomorrow morning, Monday, or any date and time; it waits in the Outbox, editable, until then.
-- **Cloud attachments** — upload a large file to your own Nextcloud, ownCloud or OpenCloud and put a share link in the message, with an optional expiry and download password.
+- **Cloud attachments** — upload a large file to your own Nextcloud, ownCloud, OpenCloud or Seafile server, or to OneDrive or Dropbox, and put a share link in the message, with an optional expiry and download password.
 - **Message previews** — the first one to three lines of each message under its subject in the list (or off).
 - **Single-key shortcuts** — Gmail-style `j`/`k`, `r`, `a`, `d` and friends, without a modifier (see below).
 - **Printing** — print a message with its sender, recipients and date, with an in-app preview that also saves straight to PDF.
@@ -187,10 +187,14 @@ client_secret = "your-client-secret"
 
 [microsoft]
 client_id = "your-azure-application-client-id"  # public client, no secret
+
+[dropbox]
+client_id = "your-dropbox-app-key"  # public client, no secret
 ```
 
-or via the `VIREO_GOOGLE_CLIENT_ID` / `VIREO_GOOGLE_CLIENT_SECRET` and
-`VIREO_MICROSOFT_CLIENT_ID` / `VIREO_MICROSOFT_CLIENT_SECRET` environment variables.
+or via the `VIREO_GOOGLE_CLIENT_ID` / `VIREO_GOOGLE_CLIENT_SECRET`,
+`VIREO_MICROSOFT_CLIENT_ID` / `VIREO_MICROSOFT_CLIENT_SECRET` and
+`VIREO_DROPBOX_CLIENT_ID` environment variables.
 
 **Bundling a Google client at build time** (for maintainers) — set the env vars
 during the build and they're compiled in via `option_env!`:
@@ -198,6 +202,69 @@ during the build and they're compiled in via `option_env!`:
 ```sh
 VIREO_GOOGLE_CLIENT_ID=... VIREO_GOOGLE_CLIENT_SECRET=... cargo build --release
 ```
+
+### Cloud attachments (Nextcloud, OneDrive, Dropbox, Seafile)
+
+Settings → Cloud Storage holds the accounts the composer's upload button can
+put files on. A file goes to the account's upload folder and a share link,
+with the size and any expiry, is placed in the message above your signature.
+Every kind of account can expire links after a number of days and protect
+them with a download password, shown to you to pass on separately. The
+account's settings are the defaults: the upload dialog in the composer
+shows them for each upload, where the expiry can be changed or removed,
+the password turned on or off, and a password of your own typed in place
+of the generated one.
+
+- **OneDrive** — through GNOME Online Accounts: add your Microsoft 365
+  account under Settings → Online Accounts, then pick it in the cloud
+  account's editor. GOA holds the sign-in and refreshes the token, so Vireo
+  stores no password or key. Uploads go into the upload folder (made when
+  missing) and are shared with "anyone with the link". **Link expiry and
+  download passwords need a Microsoft 365 subscription or OneDrive for
+  Business**: a free personal OneDrive refuses the link when either is
+  set, so a new OneDrive account starts with both off, and the editor says
+  so. The connection check finds out what the drive's plan allows and
+  greys out the rows it rules out, with the reason, in the account's
+  settings and in the upload dialog. Uploads and plain links work on any
+  OneDrive. Google Drive is not offered: GNOME Online Accounts
+  does not ask Google for Drive access on every system, and Vireo carries
+  no Google client of its own.
+- **Nextcloud, ownCloud, OpenCloud** — the server URL, your user name and an
+  app password (made under *Security* in the server's personal settings).
+  Uploads go over WebDAV; links come from the files-sharing API.
+- **Seafile** — the server URL, your e-mail and your password. If the
+  account uses two-step verification, also enter the current code from your
+  authenticator app: Vireo signs in with it once, gets an API token from the
+  server and keeps that in the keyring instead of the password (Seafile's
+  web interface shows no such token itself; one obtained another way, say
+  from the `api2/auth-token/` endpoint, can be pasted in the password
+  field). Uploads go into a library (made when missing, "Vireo" by default)
+  and a folder inside it.
+- **Dropbox** — sign in through your browser. Dropbox only lets a registered
+  app sign in, so make one for yourself; it takes a minute and stays private:
+  1. Open [dropbox.com/developers/apps](https://www.dropbox.com/developers/apps)
+     signed in to your Dropbox and press **Create app**.
+  2. Choose **Scoped access**, then the access type: **App folder** gives
+     Vireo its own folder under *Apps* and nothing else, **Full Dropbox** puts
+     uploads in the folder named in the account's settings.
+  3. Give the app a name no one else has used ("Vireo for Jane", say) and
+     press **Create app**.
+  4. On the **Permissions** tab tick `account_info.read`,
+     `files.content.write` and `sharing.write`, then press **Submit**.
+  5. On the **Settings** tab, under *OAuth 2 → Redirect URIs*, enter
+     `http://localhost:41597/` and press **Add**. The port is fixed because
+     Dropbox matches redirect URIs exactly.
+  6. Copy the **App key** from the top of the Settings tab.
+
+  In Vireo, add a Dropbox account under Settings → Cloud Storage, paste the
+  app key and press **Connect with Dropbox**; the browser opens, you approve
+  the app, and the account's e-mail appears in the dialog. The app can stay
+  in *Development* status, which allows your own account (Dropbox asks for a
+  production review only past a few hundred users). A build can carry an app
+  key of its own (the `[dropbox]` entry in `oauth.toml`, or
+  `VIREO_DROPBOX_CLIENT_ID` at build time), in which case the field can stay
+  empty. Link passwords and expiry dates are a paid Dropbox feature; on a
+  Basic plan leave both off, or the share step reports it.
 
 ### OpenPGP (encrypted and signed mail)
 

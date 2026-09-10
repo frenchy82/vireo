@@ -1,5 +1,89 @@
 # Changelog
 
+## 1.25.3-beta.1 — 2026-09-09
+
+Catch-up with stable 1.25.2: the same code, on the beta channel.
+
+## 1.25.2 — 2026-09-09
+
+Cloud attachments grow to OneDrive, Dropbox and Seafile, with link terms
+chosen per upload; recipient suggestions remember everyone you write to.
+
+- **OneDrive, Dropbox and Seafile as cloud storage** (#144 follow-up).
+  Settings → Cloud Storage starts with a Service choice: Nextcloud,
+  ownCloud or OpenCloud as before, OneDrive, Dropbox, or Seafile.
+  - *OneDrive* goes through GNOME Online Accounts: the editor lists the
+    Microsoft 365 accounts GOA has (`goa::list_files_accounts`, the Files
+    switch shown when off) and the account keeps only the GOA id
+    (`goa_id`; no keyring entry, `CloudAccount::has_secret`). Tokens come
+    from GOA's `GetAccessToken` at each use. Simple upload to 60 MB, then
+    an upload session in 10 MiB chunks, rename on a taken name,
+    `createLink` (anonymous view) with the expiry and password. What the
+    plan allows on a link is probed at Check Connection or Save
+    (`cloud::probe_link_terms`: a personal drive with a free-tier quota
+    takes neither expiry nor password, a Microsoft 365 personal one both,
+    a business drive an expiry but no password), kept on the account
+    (`link_expiry`, `link_password`, `link_note` in `cloud.toml`), and the
+    rows it rules out are greyed out with the reason in the editor and
+    the upload dialog; the check result says what still works. A new
+    OneDrive account starts with both off. Google Drive was built the same
+    way and dropped: Fedora builds GOA without Google's Files feature, so
+    its token carries no Drive scope.
+  - *Dropbox* signs in through the browser (OAuth with PKCE against the
+    app key typed in, or one the build carries via `oauth.toml`
+    `[dropbox]` / `VIREO_DROPBOX_CLIENT_ID`; the listener sits on the
+    fixed port 41597 because Dropbox matches redirect URIs exactly, and a
+    new sign-in takes the port over from a stale one), keeps the refresh
+    token in the keyring under `cloud:dropbox|<e-mail>`, uploads through
+    `files/upload` or an upload session over 150 MB (autorename on a
+    taken name, folders made on the way), and shares with
+    `create_shared_link_with_settings`; a link password or expiry on a
+    Basic plan is reported as such. The editor carries step-by-step app
+    setup instructions.
+  - *Seafile* signs in with the account password (turned into an API
+    token by `api2/auth-token/`); an account with two-step verification
+    enters the current code too, and the token the server returns is what
+    the keyring keeps (`seafile_login_with_code`, `X-SEAFILE-OTP`).
+    Uploads go into a library (found by name, made when missing) and a
+    folder inside it through the upload-link endpoint as a streamed
+    multipart body; `api/v2.1/share-links/` makes the link with the
+    password and `expire_days`.
+  - Old `cloud.toml` entries read as Nextcloud. **None of the three was
+    tried against a live account.**
+- **Per-upload link terms.** The composer's cloud upload dialog (shown
+  for every upload now, the account row only with more than one account)
+  carries the expiry in days, the password switch and a password field,
+  seeded from the chosen account's settings and reset when the account
+  changes; what is set applies to that upload alone. A typed password is
+  used for every file of the upload, an empty field gets one generated
+  per file. `ComposeInput::CloudUpload` carries the adjusted account copy
+  and `link_password`; `cloud::upload_and_share` takes the fixed
+  password.
+- **Cloud account editor as a page.** Adding or editing a cloud account
+  slides an editor page in over the Cloud Storage list, the way the mail
+  Accounts editor does (an `AdwNavigationView` in `CloudAccounts`, a
+  header with Save, the shared settings header hidden meanwhile and the
+  leave-editor prompt covering it; `CloudAccountsOutput::EditorOpen`,
+  `PrefInput::CloudEditorOpen`). The expiry and password rows form a
+  "Link defaults" group that says the upload dialog starts from them and
+  can change them per upload; "0 keeps the link indefinitely". The name
+  row is titled "Account name, such as … (optional)" per service.
+- **Recipient suggestions remember everyone you write to.** The worker
+  recorded a sent message's recipients only when SMTP or Graph succeeded
+  on the first try; a send through the Outbox, a scheduled one or a
+  flush never recorded them. The app now records them at the moment Send
+  is pressed, whatever route follows, hands them to every composer
+  already open (`ComposeInput::AddSuggestions`), and logs a failed
+  write. Your own account addresses are in the list too, flagged and
+  sorted after everyone else (`Suggestion::own`), where before they were
+  left out altogether.
+- **Settings window** opens 32 px taller (772), so its sidebar needs no
+  scrollbar.
+- **App icon gallery** gains "Vireo envelope, blue subtle": the bird
+  envelope with the bird in a darker blue, after the yellow one.
+- **Sign-in success page** shows the bare app icon, without the rounded
+  tile behind it.
+
 ## 1.25.2-beta.1 — 2026-09-09
 
 Catch-up with stable 1.25.1: the same code, on the beta channel.

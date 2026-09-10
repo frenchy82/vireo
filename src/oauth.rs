@@ -45,6 +45,19 @@ const GOOGLE_CLIENT_SECRET: &str = match option_env!("VIREO_GOOGLE_CLIENT_SECRET
 // API (issue #36); a user-supplied client via env/oauth.toml still works.
 const MICROSOFT_CLIENT_ID: &str = "";
 const MICROSOFT_CLIENT_SECRET: &str = "";
+// Dropbox (cloud attachments, #144): a public client with PKCE, so an app
+// key alone is enough. A build can bundle one via `VIREO_DROPBOX_CLIENT_ID`;
+// otherwise the user makes an app in the Dropbox App Console and types its
+// key into the account's settings.
+const DROPBOX_CLIENT_ID: &str = match option_env!("VIREO_DROPBOX_CLIENT_ID") {
+    Some(v) => v,
+    None => "",
+};
+
+/// Dropbox matches loopback redirect URIs exactly, port included, so the
+/// listener for its sign-in is on this fixed port and the app's registered
+/// redirect URI is `http://localhost:41597/`.
+pub const DROPBOX_REDIRECT_PORT: u16 = 41597;
 
 /// The Vireo app icon, embedded so the success page needs no external resources.
 const ICON_PNG: &[u8] = include_bytes!("../data/icons/hicolor/256x256/apps/co.hyprlab.Vireo.png");
@@ -88,8 +101,7 @@ const SUCCESS_TEMPLATE: &str = r##"<!doctype html>
   @keyframes rise { from { opacity:0; transform:translateY(14px) scale(.98); } }
   .hero { position:relative; width:92px; margin:0 auto 22px;
           animation:pop .5s .12s cubic-bezier(.2,1.4,.4,1) both; }
-  .hero img { width:92px; height:92px; border-radius:22px; display:block;
-              box-shadow:0 16px 40px rgba(0,0,0,.4); }
+  .hero img { width:92px; height:92px; display:block; }
   @keyframes pop { from { transform:scale(.4); opacity:0; } }
   .check { position:absolute; right:-5px; bottom:-5px; width:33px; height:33px; border-radius:50%;
            display:grid; place-items:center;
@@ -243,6 +255,7 @@ pub fn provider_credentials(provider: &str) -> (String, String) {
             MICROSOFT_CLIENT_SECRET,
             false,
         ),
+        "dropbox" => ("VIREO_DROPBOX_CLIENT_ID", "VIREO_DROPBOX_CLIENT_SECRET", DROPBOX_CLIENT_ID, "", false),
         _ => ("", "", "", "", true),
     };
 
@@ -271,6 +284,8 @@ struct OAuthFile {
     google: Option<FileCreds>,
     #[serde(default)]
     microsoft: Option<FileCreds>,
+    #[serde(default)]
+    dropbox: Option<FileCreds>,
 }
 
 #[derive(Deserialize, Default)]
@@ -288,6 +303,7 @@ fn creds_from_file(provider: &str) -> Option<(String, String)> {
     let creds = match provider {
         "google" => file.google,
         "microsoft" => file.microsoft,
+        "dropbox" => file.dropbox,
         _ => None,
     }?;
     Some((creds.client_id, creds.client_secret))
@@ -336,18 +352,32 @@ fn open_uri_portal(uri: &str) -> Result<(), Box<dyn std::error::Error>> {
 /// Run the interactive authorization-code + PKCE flow (blocking — call off the
 /// UI thread). Opens the browser and waits for the loopback redirect.
 pub fn run_flow(settings: &OAuthSettings) -> Result<FlowResult, String> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    // Dropbox matches the redirect URI exactly, port and all, so its
+    // listener sits on a fixed port the app registers; the others accept
+    // any loopback port.
+    let dropbox = settings.token_url.contains("dropboxapi.com");
+    let listener = if dropbox {
+        bind_fixed_port(DROPBOX_REDIRECT_PORT)?
+    } else {
+        TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?
+    };
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     // Microsoft (Entra) only ignores the port when matching *localhost* loopback
     // redirects — a random-port 127.0.0.1 URI would need the exact port registered,
     // which we can't do. Google (and others) accept the 127.0.0.1 literal. The
     // listener is on 127.0.0.1 either way; browsers resolve localhost to it.
-    let host = if settings.token_url.contains("microsoftonline") {
+    let host = if settings.token_url.contains("microsoftonline") || dropbox {
         "localhost"
     } else {
         "127.0.0.1"
     };
     let redirect = format!("http://{host}:{port}/");
+    // What asks for a refresh token: Dropbox has its own parameter for it.
+    let offline = if dropbox {
+        "&token_access_type=offline"
+    } else {
+        "&access_type=offline&prompt=consent"
+    };
 
     // PKCE S256 (RFC 7636 §4.2). With `plain` the challenge *is* the verifier, so
     // anyone who gets to read the authorization URL — browser history, an
@@ -360,8 +390,7 @@ pub fn run_flow(settings: &OAuthSettings) -> Result<FlowResult, String> {
     let challenge = pkce_challenge(&verifier);
     let auth_url = format!(
         "{base}?response_type=code&client_id={cid}&redirect_uri={redir}&scope={scope}\
-         &code_challenge={chal}&code_challenge_method=S256&state={state}\
-         &access_type=offline&prompt=consent",
+         &code_challenge={chal}&code_challenge_method=S256&state={state}{offline}",
         base = settings.auth_url,
         cid = pct(&settings.client_id),
         redir = pct(&redirect),
@@ -422,6 +451,35 @@ pub fn refresh_access_token(settings: &OAuthSettings, refresh_token: &str) -> Re
     Ok(token.access_token)
 }
 
+/// Listen on a fixed loopback port. An earlier sign-in of ours still
+/// waiting there (the wait lasts five minutes, and its dialog may be long
+/// gone) is told to stop with a `cancel` request, and the bind is tried
+/// again.
+fn bind_fixed_port(port: u16) -> Result<TcpListener, String> {
+    let mut last = None;
+    for _ in 0..8 {
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(l) => return Ok(l),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+                if let Ok(mut s) = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+                    let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                    let _ = s.write_all(b"GET /?cancel=1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+                    let mut sink = [0u8; 512];
+                    let _ = s.read(&mut sink);
+                }
+                last = Some(e);
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Err(e) => return Err(format!("could not listen on localhost port {port} for the sign-in redirect: {e}")),
+        }
+    }
+    Err(format!(
+        "could not listen on localhost port {port} for the sign-in redirect: {}. Another program is using it.",
+        last.map(|e| e.to_string()).unwrap_or_default()
+    ))
+}
+
 /// Accept the browser redirect and return the authorization code, validating the
 /// anti-CSRF state. Times out after 5 minutes.
 fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String, String> {
@@ -435,6 +493,11 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String,
                 let n = stream.read(&mut buf).map_err(|e| e.to_string())?;
                 let req = String::from_utf8_lossy(&buf[..n]);
                 let line = req.lines().next().unwrap_or("");
+                // A newer sign-in of ours taking the port over.
+                if line.starts_with("GET /?cancel=1 ") {
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    return Err("this sign-in was replaced by a newer one".into());
+                }
                 let (code, state) = parse_redirect(line);
 
                 let body = success_page();
@@ -545,7 +608,27 @@ fn pct_decode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::pkce_challenge;
+    use super::*;
+
+    #[test]
+    fn a_stale_waiter_gives_up_the_fixed_port() {
+        // Something of ours on the port, waiting like wait_for_code does:
+        // one request ends it.
+        let old = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = old.local_addr().unwrap().port();
+        let waiter = std::thread::spawn(move || {
+            let (mut s, _) = old.accept().unwrap();
+            let mut buf = [0u8; 256];
+            let n = s.read(&mut buf).unwrap();
+            let line = String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or("").to_string();
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            drop(old);
+            line
+        });
+        let fresh = bind_fixed_port(port).expect("takes the port over");
+        assert_eq!(fresh.local_addr().unwrap().port(), port);
+        assert!(waiter.join().unwrap().starts_with("GET /?cancel=1 "));
+    }
 
     #[test]
     fn the_pkce_challenge_matches_the_rfc_7636_vector() {
