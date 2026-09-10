@@ -48,6 +48,9 @@ pub struct PrefInit {
     /// "New message" composes inline over the reading pane (vs a window).
     pub compose_inline: bool,
     pub reply_fields: bool,
+    /// The identity new messages are sent from (#157); empty = the open
+    /// folder's account. One of `identities`' addresses.
+    pub compose_default_from: String,
     pub paste_plain: bool,
     pub spellcheck: bool,
     pub spellcheck_langs: String,
@@ -86,6 +89,9 @@ pub struct PrefInit {
     pub accounts_panel: gtk::Widget,
     /// Open showing the Accounts tab instead of Preferences.
     pub start_on_accounts: bool,
+    /// The category to open on, when the app remembers one from earlier
+    /// this session; overrides `start_on_accounts`.
+    pub start_page: Option<String>,
     /// The persisted "this window opens to" choice (true = Accounts).
     pub settings_open_accounts: bool,
     /// The accounts component's inbox, for the sidebar to pick its pages.
@@ -213,6 +219,9 @@ pub struct Preferences {
     host_header: Option<adw::HeaderBar>,
     /// The OpenPGP page (#133), kept alive with the window.
     pgp_keys: Option<Controller<crate::ui::pgp_keys::PgpKeys>>,
+    /// (name, address) per enabled account and alias, the rows of the
+    /// "Send new messages from" combo after its first (#157).
+    identities: Vec<(String, String)>,
     /// The Cloud Storage page (#144), likewise.
     cloud: Option<Controller<crate::ui::cloud_accounts::CloudAccounts>>,
     /// The account editor is up in the accounts slot: leaving it for another
@@ -288,6 +297,9 @@ pub enum PrefInput {
     ToggleSwipeReversed(bool),
     ToggleComposeInline(bool),
     ToggleReplyFields(bool),
+    /// The "Send new messages from" combo: 0 = the open folder's account,
+    /// then `identities` in order.
+    ChangeComposeDefaultFrom(u32),
     TogglePastePlain(bool),
     ToggleSpellcheck(bool),
     SpellLangsEdited(String),
@@ -339,6 +351,8 @@ pub enum PrefInput {
 
 #[derive(Debug)]
 pub enum PrefOutput {
+    /// A category was shown, so the app can reopen the window on it.
+    PageShown(String),
     SetAutoRemoteContent(bool),
     SetShowRemoteBanner(bool),
     SetGravatar(bool),
@@ -360,6 +374,7 @@ pub enum PrefOutput {
     SetSwipeReversed(bool),
     SetComposeInline(bool),
     SetReplyFields(bool),
+    SetComposeDefaultFrom(String),
     SetPastePlain(bool),
     SetSpellcheck(bool),
     SetSpellcheckLangs(String),
@@ -1046,6 +1061,16 @@ impl Component for Preferences {
                                         },
                                     },
 
+                                    #[name = "default_from_row"]
+                                    adw::ComboRow {
+                                        set_title: &i18n("Send new messages from"),
+                                        set_subtitle: &i18n("Replies still answer from the address the \
+                                                       original was sent to."),
+                                        connect_selected_notify[sender] => move |row| {
+                                            sender.input(PrefInput::ChangeComposeDefaultFrom(row.selected()));
+                                        },
+                                    },
+
                                     #[name = "paste_plain_row"]
                                     adw::SwitchRow {
                                         set_title: &i18n("Paste as plain text"),
@@ -1277,8 +1302,11 @@ impl Component for Preferences {
                                 add = &adw::PreferencesGroup {
                                     set_title: &i18n("Backup"),
                                     set_description: Some(
-                                        i18n("Accounts and preferences as one file. Passwords stay in the \
-                                         system keyring and are never exported.").as_str()
+                                        i18n("Everything Vireo keeps, as one file: mail and cloud storage \
+                                         accounts, preferences, filters, tags, the sidebar and window \
+                                         layout, the app icon choice and the words taught to the spell \
+                                         checker. Passwords and sign-ins stay in the system keyring and \
+                                         are never exported; OpenPGP keys stay in GnuPG.").as_str()
                                     ),
 
                                     adw::ActionRow {
@@ -1330,6 +1358,7 @@ impl Component for Preferences {
             accounts_sender: init.accounts_sender.clone(),
             host_header: None,
             pgp_keys: None,
+            identities: init.identities.clone(),
             cloud: None,
             editor_open: false,
             editor_page: "accounts",
@@ -1527,6 +1556,31 @@ impl Component for Preferences {
         widgets.swipe_reversed_row.set_active(init.swipe_reversed);
         widgets.compose_inline_row.set_active(init.compose_inline);
         widgets.reply_fields_row.set_active(init.reply_fields);
+        // "Send new messages from": the open folder's account, then every
+        // enabled account and alias, labelled as the composer's From row
+        // labels them. Only meaningful with more than one identity.
+        {
+            let mut labels: Vec<String> = vec![i18n("Account of the current folder")];
+            labels.extend(model.identities.iter().map(|(name, addr)| {
+                if name.trim().is_empty() {
+                    addr.clone()
+                } else {
+                    format!("{name} <{addr}>")
+                }
+            }));
+            let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+            widgets.default_from_row.set_model(Some(&gtk::StringList::new(&refs)));
+            let want = init.compose_default_from.trim();
+            let sel = model
+                .identities
+                .iter()
+                .position(|(_, addr)| addr.eq_ignore_ascii_case(want))
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            widgets.default_from_row.set_selected(sel as u32);
+            widgets.default_from_row.set_visible(model.identities.len() > 1);
+            widen_combo_value(&widgets.default_from_row, 50);
+        }
         widgets.paste_plain_row.set_active(init.paste_plain);
         widgets.spellcheck_row.set_active(init.spellcheck);
         // The language dropdown offers exactly what checking can use: the
@@ -1720,7 +1774,12 @@ impl Component for Preferences {
         model.side_list = Some(widgets.side_list.clone());
         model.content_page = Some(widgets.content_page.clone());
         model.split = Some(widgets.split.clone());
-        model.select_row(if init.start_on_accounts { "accounts" } else { "general" });
+        let first = init
+            .start_page
+            .as_deref()
+            .filter(|id| side_page(id).is_some())
+            .unwrap_or(if init.start_on_accounts { "accounts" } else { "general" });
+        model.select_row(first);
         model.host_header = Some(widgets.host_header.clone());
 
         ComponentParts { model, widgets }
@@ -1800,6 +1859,14 @@ impl Component for Preferences {
             }
             PrefInput::ToggleReplyFields(on) => {
                 let _ = sender.output(PrefOutput::SetReplyFields(on));
+            }
+            PrefInput::ChangeComposeDefaultFrom(index) => {
+                let addr = (index > 0)
+                    .then(|| self.identities.get(index as usize - 1))
+                    .flatten()
+                    .map(|(_, addr)| addr.clone())
+                    .unwrap_or_default();
+                let _ = sender.output(PrefOutput::SetComposeDefaultFrom(addr));
             }
             PrefInput::ToggleComposeInline(on) => {
                 let _ = sender.output(PrefOutput::SetComposeInline(on));
@@ -1929,6 +1996,7 @@ impl Component for Preferences {
                     self.ask_to_leave_editor(&id, &sender);
                 } else {
                     self.show_page(&id);
+                    let _ = sender.output(PrefOutput::PageShown(id));
                 }
             }
             PrefInput::ShowPageById(id) => self.select_row(&id),
@@ -2039,5 +2107,39 @@ fn placement_from_index(idx: u32) -> crate::config::SectionPlacement {
         1 => AboveAccounts,
         2 => BelowAccounts,
         _ => AllInboxes,
+    }
+}
+
+/// Give a combo row's selected-value label `extra` more pixels than the
+/// ellipsized width libadwaita allows it, so a sentence-length choice
+/// ("Account of the current folder") reads whole instead of trailing off.
+/// The value label is the row's only descendant label showing the
+/// selected string; nothing else in the row is touched.
+fn widen_combo_value(row: &adw::ComboRow, extra: i32) {
+    let Some(want) = row
+        .selected_item()
+        .and_downcast::<gtk::StringObject>()
+        .map(|s| s.string().to_string())
+    else {
+        return;
+    };
+    fn find(w: &gtk::Widget, want: &str) -> Option<gtk::Label> {
+        if let Some(label) = w.downcast_ref::<gtk::Label>() {
+            if label.label() == want {
+                return Some(label.clone());
+            }
+        }
+        let mut child = w.first_child();
+        while let Some(c) = child {
+            if let Some(hit) = find(&c, want) {
+                return Some(hit);
+            }
+            child = c.next_sibling();
+        }
+        None
+    }
+    if let Some(label) = find(row.upcast_ref::<gtk::Widget>(), &want) {
+        let (_, natural, _, _) = label.measure(gtk::Orientation::Horizontal, -1);
+        label.set_width_request(natural + extra);
     }
 }

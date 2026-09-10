@@ -19,7 +19,7 @@ const DEFAULT_COLOR: &str = "#3584e4";
 /// How an account signs in, chosen via the single Provider dropdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderKind {
-    /// Manual IMAP/POP3 + password ("Other (IMAP/POP3)…").
+    /// Manual IMAP/POP3 + password ("IMAP/POP3 Account").
     Manual,
     /// A known IMAP provider: password auth with auto-filled servers.
     Preset,
@@ -37,6 +37,10 @@ enum ProviderKind {
 /// their servers from `crate::oauth::preset`; Manual/Custom are user-entered).
 pub(crate) struct Provider {
     label: &'static str,
+    /// The brand id of its mark (`brand::image_or`): "mail", the blue
+    /// envelope, for manual IMAP/POP3; "mail-oauth", the yellow one, for
+    /// custom OAuth.
+    brand: &'static str,
     kind: ProviderKind,
     imap_host: &'static str,
     imap_port: u16,
@@ -53,6 +57,10 @@ impl Provider {
     }
     pub(crate) fn wizard_label(&self) -> &'static str {
         self.label
+    }
+    /// The plain IMAP/POP3 entry, the wizard's default.
+    pub(crate) fn wizard_is_manual(&self) -> bool {
+        self.kind == ProviderKind::Manual
     }
     pub(crate) fn wizard_servers(&self) -> (&'static str, u16, &'static str, u16) {
         (self.imap_host, self.imap_port, self.smtp_host, self.smtp_port)
@@ -79,26 +87,27 @@ impl Provider {
 
 const APP_PW: &str = i18n_noop("Requires an app-specific password (not your normal login password).");
 
-/// The Provider dropdown, in display order. OAuth options first, then the major
-/// app-password IMAP providers, then the two manual escape hatches. IMAP uses
-/// SSL/TLS on 993; SMTP uses implicit TLS on 465 or STARTTLS on 587.
+/// The Provider dropdown, in display order. The plain IMAP/POP3 entry first
+/// (the default), then the OAuth options, the major app-password IMAP
+/// providers, and custom OAuth last. IMAP uses SSL/TLS on 993; SMTP uses
+/// implicit TLS on 465 or STARTTLS on 587.
 pub(crate) const PROVIDERS: &[Provider] = &[
-    Provider { label: "Google (Gmail) — sign in", kind: ProviderKind::Google, imap_host: "", imap_port: 0, smtp_host: "", smtp_port: 0, hint: i18n_noop("Sign in with your browser — no password needed.") },
-    Provider { label: "Microsoft 365 / Outlook", kind: ProviderKind::Microsoft, imap_host: "", imap_port: 0, smtp_host: "", smtp_port: 0, hint: i18n_noop("Sign in through GNOME Online Accounts.") },
-    Provider { label: "iCloud", kind: ProviderKind::Preset, imap_host: "imap.mail.me.com", imap_port: 993, smtp_host: "smtp.mail.me.com", smtp_port: 587, hint: APP_PW },
-    Provider { label: "Yahoo Mail", kind: ProviderKind::Preset, imap_host: "imap.mail.yahoo.com", imap_port: 993, smtp_host: "smtp.mail.yahoo.com", smtp_port: 465, hint: APP_PW },
-    Provider { label: "Proton Mail (Bridge)", kind: ProviderKind::Preset, imap_host: "127.0.0.1", imap_port: 1143, smtp_host: "127.0.0.1", smtp_port: 1025, hint: i18n_noop("Requires Proton Mail Bridge running locally.") },
-    Provider { label: "Fastmail", kind: ProviderKind::Preset, imap_host: "imap.fastmail.com", imap_port: 993, smtp_host: "smtp.fastmail.com", smtp_port: 465, hint: APP_PW },
-    Provider { label: "AOL Mail", kind: ProviderKind::Preset, imap_host: "imap.aol.com", imap_port: 993, smtp_host: "smtp.aol.com", smtp_port: 465, hint: APP_PW },
-    Provider { label: "Zoho Mail", kind: ProviderKind::Preset, imap_host: "imap.zoho.com", imap_port: 993, smtp_host: "smtp.zoho.com", smtp_port: 465, hint: "" },
-    Provider { label: "GMX", kind: ProviderKind::Preset, imap_host: "imap.gmx.com", imap_port: 993, smtp_host: "mail.gmx.com", smtp_port: 587, hint: i18n_noop("Enable POP/IMAP access in GMX settings first.") },
-    Provider { label: "Yandex Mail", kind: ProviderKind::Preset, imap_host: "imap.yandex.com", imap_port: 993, smtp_host: "smtp.yandex.com", smtp_port: 465, hint: APP_PW },
-    Provider { label: "Mail.com", kind: ProviderKind::Preset, imap_host: "imap.mail.com", imap_port: 993, smtp_host: "smtp.mail.com", smtp_port: 587, hint: "" },
-    Provider { label: "Custom (OAuth)…", kind: ProviderKind::CustomOAuth, imap_host: "", imap_port: 0, smtp_host: "", smtp_port: 0, hint: i18n_noop("Enter your provider's OAuth endpoints, then sign in.") },
-    Provider { label: "Other (IMAP/POP3)…", kind: ProviderKind::Manual, imap_host: "", imap_port: 0, smtp_host: "", smtp_port: 0, hint: i18n_noop("Enter your server details manually.") },
+    Provider { label: "IMAP/POP3 Account", brand: "mail", kind: ProviderKind::Manual, imap_host: "", imap_port: 0, smtp_host: "", smtp_port: 0, hint: i18n_noop("Enter your server details manually.") },
+    Provider { label: "Google (Gmail) — sign in", brand: "gmail", kind: ProviderKind::Google, imap_host: "", imap_port: 0, smtp_host: "", smtp_port: 0, hint: i18n_noop("Sign in with your browser — no password needed.") },
+    Provider { label: "Microsoft 365 / Outlook", brand: "outlook", kind: ProviderKind::Microsoft, imap_host: "", imap_port: 0, smtp_host: "", smtp_port: 0, hint: i18n_noop("Sign in through GNOME Online Accounts.") },
+    Provider { label: "iCloud", brand: "icloud", kind: ProviderKind::Preset, imap_host: "imap.mail.me.com", imap_port: 993, smtp_host: "smtp.mail.me.com", smtp_port: 587, hint: APP_PW },
+    Provider { label: "Yahoo Mail", brand: "yahoo", kind: ProviderKind::Preset, imap_host: "imap.mail.yahoo.com", imap_port: 993, smtp_host: "smtp.mail.yahoo.com", smtp_port: 465, hint: APP_PW },
+    Provider { label: "Proton Mail (Bridge)", brand: "proton", kind: ProviderKind::Preset, imap_host: "127.0.0.1", imap_port: 1143, smtp_host: "127.0.0.1", smtp_port: 1025, hint: i18n_noop("Requires Proton Mail Bridge running locally.") },
+    Provider { label: "Fastmail", brand: "fastmail", kind: ProviderKind::Preset, imap_host: "imap.fastmail.com", imap_port: 993, smtp_host: "smtp.fastmail.com", smtp_port: 465, hint: APP_PW },
+    Provider { label: "AOL Mail", brand: "aol", kind: ProviderKind::Preset, imap_host: "imap.aol.com", imap_port: 993, smtp_host: "smtp.aol.com", smtp_port: 465, hint: APP_PW },
+    Provider { label: "Zoho Mail", brand: "zoho", kind: ProviderKind::Preset, imap_host: "imap.zoho.com", imap_port: 993, smtp_host: "smtp.zoho.com", smtp_port: 465, hint: "" },
+    Provider { label: "GMX", brand: "gmx", kind: ProviderKind::Preset, imap_host: "imap.gmx.com", imap_port: 993, smtp_host: "mail.gmx.com", smtp_port: 587, hint: i18n_noop("Enable POP/IMAP access in GMX settings first.") },
+    Provider { label: "Yandex Mail", brand: "yandex", kind: ProviderKind::Preset, imap_host: "imap.yandex.com", imap_port: 993, smtp_host: "smtp.yandex.com", smtp_port: 465, hint: APP_PW },
+    Provider { label: "Mail.com", brand: "mailcom", kind: ProviderKind::Preset, imap_host: "imap.mail.com", imap_port: 993, smtp_host: "smtp.mail.com", smtp_port: 587, hint: "" },
+    Provider { label: "Custom (OAuth)…", brand: "mail-oauth", kind: ProviderKind::CustomOAuth, imap_host: "", imap_port: 0, smtp_host: "", smtp_port: 0, hint: i18n_noop("Enter your provider's OAuth endpoints, then sign in.") },
 ];
 
-/// Dropdown index of the "Other (IMAP/POP3)…" manual entry (the default).
+/// Dropdown index of the "IMAP/POP3 Account" manual entry (the default).
 fn manual_index() -> u32 {
     PROVIDERS
         .iter()
@@ -259,6 +268,9 @@ pub enum AccountsInput {
     AddTag,
     EditTag(usize),
     RemoveTag(usize),
+    /// A tag row was dragged onto another: reorder (#157). The order is the
+    /// sidebar's, and the 1–9 shortcuts'.
+    MoveTag { from: usize, to: usize },
     TagAdded(crate::config::Tag),
     TagEdited(usize, crate::config::Tag),
 }
@@ -434,7 +446,9 @@ impl Component for AccountsWindow {
                                     set_description: Some(
                                         i18n("Label messages with one or more coloured tags. \
                                          Tags are stored on the mail server as IMAP keywords, \
-                                         so Thunderbird and other clients show the same tags.").as_str()
+                                         so Thunderbird and other clients show the same tags. \
+                                         Drag a tag to reorder: the order here is the sidebar's, \
+                                         and the first nine answer to the 1–9 keys.").as_str()
                                     ),
                                     #[wrap(Some)]
                                     set_header_suffix = &gtk::Button {
@@ -603,6 +617,15 @@ impl Component for AccountsWindow {
                                 add_css_class: "suggested-action",
                                 connect_clicked => AccountsInput::Save,
                             },
+                            // Left of Save, only while editing an existing
+                            // account; asks before removing.
+                            #[name = "remove_btn"]
+                            pack_end = &gtk::Button {
+                                set_label: &i18n("Remove"),
+                                add_css_class: "destructive-action",
+                                set_visible: false,
+                                connect_clicked => AccountsInput::RemoveCurrent,
+                            },
                         },
 
                         #[wrap(Some)]
@@ -615,6 +638,18 @@ impl Component for AccountsWindow {
                             // credentials; Vireo only mirrors them, and can hide it
                             // locally. Both facts belong together, above the fields
                             // they explain.
+                            // The provider's mark over the form, following
+                            // the Provider picker (a generic envelope for
+                            // manual IMAP and custom OAuth).
+                            add = &adw::PreferencesGroup {
+                                #[name = "provider_mark"]
+                                gtk::Image {
+                                    set_pixel_size: 56,
+                                    set_halign: gtk::Align::Center,
+                                    set_margin_bottom: 6,
+                                },
+                            },
+
                             #[name = "goa_banner"]
                             add = &adw::PreferencesGroup {
                                 set_visible: false,
@@ -972,16 +1007,6 @@ impl Component for AccountsWindow {
                             // For a GOA-imported account this removes it from
                             // Vireo only — it stays in GNOME Online Accounts and
                             // returns to the import list.
-                            #[name = "remove_group"]
-                            add = &adw::PreferencesGroup {
-                                gtk::Button {
-                                    set_label: &i18n("Remove Account"),
-                                    add_css_class: "destructive-action",
-                                    set_halign: gtk::Align::Center,
-                                    connect_clicked => AccountsInput::RemoveCurrent,
-                                },
-                            },
-
                             add = &adw::PreferencesGroup {
                                 gtk::Label {
                                     set_wrap: true,
@@ -1090,7 +1115,7 @@ impl Component for AccountsWindow {
         widgets
             .provider_row
             .set_model(Some(&gtk::StringList::new(&provider_labels)));
-        widgets.provider_row.set_list_factory(Some(&non_ellipsizing_factory()));
+        widgets.provider_row.set_factory(Some(&provider_factory()));
 
         // Push override choices mirror AccountConfig::push (None / Some(true)
         // / Some(false), in that order).
@@ -1178,7 +1203,7 @@ impl Component for AccountsWindow {
                 self.sig_editor.set_html("");
                 widgets.color_btn.set_rgba(&parse_color(DEFAULT_COLOR));
                 widgets.emoji_btn.set_label(&i18n("Add"));
-                widgets.remove_group.set_visible(false);
+                widgets.remove_btn.set_visible(false);
                 // A prior GOA edit may have hidden the provider picker.
                 widgets.provider_row.set_visible(true);
                 widgets.nav.push_by_tag("editor");
@@ -1232,7 +1257,7 @@ impl Component for AccountsWindow {
                 widgets.goa_banner.set_visible(is_goa);
                 // GOA accounts get the same Remove flow — it removes the account
                 // from Vireo only (back to the import list); GNOME keeps it.
-                widgets.remove_group.set_visible(true);
+                widgets.remove_btn.set_visible(true);
                 // GNOME owns a GOA account's connection outright, so the server
                 // and credential section isn't shown at all — only what Vireo
                 // owns (name, label, colour, signature, aliases) plus the email
@@ -1909,6 +1934,15 @@ impl Component for AccountsWindow {
                     let _ = sender.output(AccountsOutput::SetTags(self.tags.clone()));
                 }
             }
+            AccountsInput::MoveTag { from, to } => {
+                if from < self.tags.len() && from != to {
+                    let tag = self.tags.remove(from);
+                    let to = to.min(self.tags.len());
+                    self.tags.insert(to, tag);
+                    self.rebuild_tag_rows(&sender);
+                    let _ = sender.output(AccountsOutput::SetTags(self.tags.clone()));
+                }
+            }
             AccountsInput::TagAdded(tag) => {
                 self.tags.push(tag);
                 self.rebuild_tag_rows(&sender);
@@ -2269,6 +2303,9 @@ impl AccountsWindow {
             handle.add_css_class("dim-label");
             hbox.append(&handle);
 
+            // The provider's mark, left of the name and address.
+            hbox.append(&crate::brand::image_or(brand_for_account(acc), 28, crate::brand::GENERIC_MAIL));
+
             let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
             vbox.set_hexpand(true);
             vbox.set_valign(gtk::Align::Center);
@@ -2385,6 +2422,7 @@ impl AccountsWindow {
         for (pos, g) in self.goa.iter().enumerate() {
             let row = adw::ActionRow::new();
             row.set_title(&g.email);
+            row.add_prefix(&crate::brand::image_or(brand_for_goa(&g.provider), 24, crate::brand::GENERIC_MAIL));
             let mut subtitle = if g.provider.is_empty() {
                 "Mail".to_string()
             } else {
@@ -2421,6 +2459,11 @@ impl AccountsWindow {
     /// the servers for known providers.
     fn apply_provider(&self, widgets: &AccountsWindowWidgets) {
         let p = provider_at(widgets.provider_row.selected());
+        // The mark over the form: a GNOME Online Account's comes from the
+        // account itself (its picker is hidden), otherwise the picker's.
+        let editing_goa = self.editing.and_then(|i| self.accounts.get(i)).filter(|a| a.goa_id.is_some());
+        let brand = editing_goa.map(brand_for_account).unwrap_or(p.brand);
+        crate::brand::set_image(&widgets.provider_mark, brand, 56, crate::brand::GENERIC_MAIL);
         let is_password = p.is_password();
         let is_oauth = p.is_oauth();
         let is_custom = matches!(p.kind, ProviderKind::CustomOAuth);
@@ -2546,6 +2589,55 @@ fn activate_online_accounts_panel() -> Result<(), gtk::glib::Error> {
         gtk::gio::Cancellable::NONE,
     )?;
     Ok(())
+}
+
+/// The brand id for a GNOME Online Accounts provider name ("Google",
+/// "Microsoft 365"…): the two mail providers GOA offers, else the blue
+/// envelope.
+pub(crate) fn brand_for_goa(provider: &str) -> &'static str {
+    let p = provider.to_ascii_lowercase();
+    if p.contains("google") {
+        "gmail"
+    } else if p.contains("microsoft") || p.contains("outlook") || p.contains("365") {
+        "outlook"
+    } else {
+        "mail"
+    }
+}
+
+/// The Provider picker's rows: the provider's mark (or the generic
+/// envelope) before its name, in the row and in the list that drops down.
+/// Shared with the welcome wizard's picker, which lists a subset by the
+/// same labels.
+pub(crate) fn provider_factory() -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
+            let bx = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            let label = gtk::Label::new(None);
+            label.set_xalign(0.0);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::None);
+            bx.append(&gtk::Image::new());
+            bx.append(&label);
+            item.set_child(Some(&bx));
+        }
+    });
+    factory.connect_bind(|_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+        // By name, not position: the row's own selected-value slot is a
+        // list item with no position.
+        let name = item.item().and_downcast::<gtk::StringObject>().map(|o| o.string().to_string()).unwrap_or_default();
+        let Some(provider) = PROVIDERS.iter().find(|p| p.label == name) else { return };
+        let Some(bx) = item.child().and_downcast::<gtk::Box>() else { return };
+        let Some(old) = bx.first_child() else { return };
+        let label = old.next_sibling().and_downcast::<gtk::Label>();
+        bx.remove(&old);
+        bx.prepend(&crate::brand::image_or(provider.brand, 20, crate::brand::GENERIC_MAIL));
+        if let Some(label) = label {
+            label.set_label(&name);
+        }
+    });
+    factory
 }
 
 fn non_ellipsizing_factory() -> gtk::SignalListItemFactory {
@@ -2727,7 +2819,7 @@ fn fill_editor(widgets: &AccountsWindowWidgets, acc: &AccountConfig) {
     widgets.name_row.set_text(&acc.name);
     widgets.email_row.set_text(&acc.email);
     // Reflect the account's provider in the dropdown (OAuth by endpoint, known
-    // password providers by server, otherwise "Other (IMAP/POP3)…").
+    // password providers by server, otherwise "IMAP/POP3 Account").
     widgets.provider_row.set_selected(provider_index_for_account(acc));
     widgets
         .protocol_row
@@ -2882,6 +2974,39 @@ fn provider_index_for_account(acc: &AccountConfig) -> u32 {
         return kind_index(kind);
     }
     preset_index_for_host(&acc.imap_host)
+}
+
+/// The brand id of the service an existing account is on: Microsoft 365
+/// over Graph, an OAuth account by its token endpoint, otherwise by its
+/// incoming server (the well-known hosts, then the provider table, whose
+/// manual entry gives anything else the blue envelope).
+fn brand_for_account(acc: &AccountConfig) -> &'static str {
+    if acc.protocol == Protocol::Graph {
+        return "outlook";
+    }
+    if let Some(s) = acc.oauth_settings.as_ref().filter(|_| acc.oauth) {
+        if s.token_url.contains("googleapis") {
+            return "gmail";
+        }
+        if s.token_url.contains("microsoftonline") {
+            return "outlook";
+        }
+    }
+    // Native OAuth against anything else: the custom-OAuth envelope.
+    if acc.oauth && acc.goa_id.is_none() {
+        return "mail-oauth";
+    }
+    let host = acc.imap_host.trim().to_ascii_lowercase();
+    if host.contains("gmail") || host.contains("googlemail") {
+        return "gmail";
+    }
+    if host.contains("outlook") || host.contains("office365") || host.contains("hotmail") || host.contains("live.com") {
+        return "outlook";
+    }
+    if host.contains("proton") {
+        return "proton";
+    }
+    provider_at(preset_index_for_host(&host)).brand
 }
 
 fn parse_color(hex: &str) -> gtk::gdk::RGBA {
@@ -3082,7 +3207,41 @@ impl AccountsWindow {
             row.connect_activated(move |_| s.input(AccountsInput::EditTag(i)));
             row.set_title(&gtk::glib::markup_escape_text(&t.name));
             row.set_subtitle(&gtk::glib::markup_escape_text(&t.keyword));
+            let handle = gtk::Image::from_icon_name("co.hyprlab.Vireo-list-drag-handle-symbolic");
+            handle.add_css_class("dim-label");
+            row.add_prefix(&handle);
             row.add_prefix(&crate::ui::context_menu::swatch_widget(&t.color, true));
+            // The number that toggles it from the keyboard (#157), for the
+            // first nine.
+            if i < 9 {
+                let key = gtk::Label::new(Some(&(i + 1).to_string()));
+                key.add_css_class("shortcut-key");
+                key.set_valign(gtk::Align::Center);
+                key.set_tooltip_text(Some(
+                    i18n("Press this key on a message to add or remove the tag (with single-key shortcuts on)").as_str(),
+                ));
+                row.add_suffix(&key);
+            }
+            // Drag to reorder, as the accounts list does.
+            let drag = gtk::DragSource::new();
+            drag.set_actions(gtk::gdk::DragAction::MOVE);
+            let from = i as u32;
+            drag.connect_prepare(move |_, _, _| {
+                Some(gtk::gdk::ContentProvider::for_value(&from.to_value()))
+            });
+            row.add_controller(drag);
+            let drop = gtk::DropTarget::new(gtk::glib::Type::U32, gtk::gdk::DragAction::MOVE);
+            let to = i;
+            let input = sender.input_sender().clone();
+            drop.connect_drop(move |_, value, _, _| {
+                if let Ok(from) = value.get::<u32>() {
+                    let _ = input.send(AccountsInput::MoveTag { from: from as usize, to });
+                    true
+                } else {
+                    false
+                }
+            });
+            row.add_controller(drop);
             let edit = gtk::Image::from_icon_name("co.hyprlab.Vireo-document-edit-symbolic");
             edit.set_margin_start(6);
             row.add_suffix(&edit);

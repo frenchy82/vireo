@@ -5,7 +5,7 @@
 <h1 align="center">Vireo</h1>
 
 <p align="center">
-  A clean, fast, <strong>GNOME-native</strong> email client — built with Rust and libadwaita, privacy-first.
+  A fast, <strong>GNOME-native</strong> email client — built with Rust and libadwaita, privacy-first.
 </p>
 
 <p align="center">
@@ -73,6 +73,8 @@ time for this list in the app; the same key closes it again.
 | <kbd>/</kbd> | Search | <kbd>s</kbd> | Star or unstar |
 | <kbd>c</kbd> | Compose | <kbd>m</kbd> | Mark read or unread |
 | <kbd>?</kbd> | This list | <kbd>x</kbd> | Select the row (for a bulk action) |
+| | | <kbd>1</kbd> … <kbd>9</kbd> | Add or remove a tag (the first nine, in Settings order) |
+| | | <kbd>0</kbd> | Remove every tag |
 
 <kbd>Esc</kbd> backs out of a reply, forward or compose and returns you to the
 message list. It works whether or not single-key shortcuts are enabled — as does
@@ -452,6 +454,11 @@ upstream — their work ships in the app and is credited in the About window:
   (IPv6 included), pausing an account while its Mail service is off in GNOME
   Settings, OAuth-aware connection tests, and a timeout on stalled IMAP
   connections.
+- [**Yiannis Ioannides**](https://github.com/yioannides) ([#75](https://github.com/hyprlab/vireo/pull/75)) — the
+  `--user` flag in the Flatpak install instructions, so a local install no
+  longer asks for root; and a long run of requests and design feedback that
+  shaped tags, split replies, the reader's own font and colours, Empty Trash
+  and the reply panel's fields.
 
 Not every contribution is code. Thanks to
 [**p-mitana**](https://github.com/p-mitana) for a thorough round of design
@@ -482,5 +489,11 @@ before it lands (with the change explained on the pull request).
 
 Vireo is free software licensed under the **GNU Affero General Public License
 v3.0 or later** ([AGPL-3.0-or-later](LICENSE)).
+
+The Nextcloud, ownCloud, OpenCloud, OneDrive, Dropbox and Seafile marks shown
+in Settings are trademarks of their owners, used only to identify those
+services, and are not covered by that licence (see
+[data/brands/README.md](data/brands/README.md)). Vireo is not affiliated with
+or endorsed by any of them.
 
 © 2026 Hyprlab

@@ -62,6 +62,12 @@ pub struct CloudAccount {
     pub name: String,
     #[serde(default)]
     pub kind: CloudKind,
+    /// Which product a `Nextcloud`-kind server is: "nextcloud", "owncloud"
+    /// or "opencloud" (they speak the same WebDAV + OCS). Chosen in the
+    /// Service picker; found from the server's status page for accounts
+    /// made before the picker told them apart. Empty = not known yet.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub product: String,
     /// The server's base URL, e.g. `https://cloud.example.com` (not used
     /// by Dropbox).
     #[serde(default)]
@@ -87,6 +93,10 @@ pub struct CloudAccount {
     /// Links expire this many days after upload; 0 keeps them.
     #[serde(default)]
     pub expire_days: u32,
+    /// Off, the account stays configured but is not offered in the
+    /// composer, like a paused mail account.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     /// Protect every link with a generated download password.
     #[serde(default)]
     pub password: bool,
@@ -99,6 +109,70 @@ pub struct CloudAccount {
     /// Why, in a phrase for the greyed-out rows.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub link_note: String,
+}
+
+/// One entry of the Service picker: a kind, and for the WebDAV kinds the
+/// product, with the name shown and the brand id of its mark.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Service {
+    pub kind: CloudKind,
+    pub product: &'static str,
+    pub name: &'static str,
+}
+
+impl Service {
+    /// The brand id of its mark (`brand::image`).
+    pub fn brand(&self) -> &'static str {
+        match self.kind {
+            CloudKind::Nextcloud => self.product,
+            CloudKind::Dropbox => "dropbox",
+            CloudKind::Seafile => "seafile",
+            CloudKind::OneDrive => "onedrive",
+        }
+    }
+}
+
+/// The services offered, in picker order. Names are the services' own
+/// and are not translated.
+pub const SERVICES: [Service; 6] = [
+    Service { kind: CloudKind::Nextcloud, product: "nextcloud", name: "Nextcloud" },
+    Service { kind: CloudKind::Nextcloud, product: "owncloud", name: "ownCloud" },
+    Service { kind: CloudKind::Nextcloud, product: "opencloud", name: "OpenCloud" },
+    Service { kind: CloudKind::OneDrive, product: "", name: "OneDrive" },
+    Service { kind: CloudKind::Dropbox, product: "", name: "Dropbox" },
+    Service { kind: CloudKind::Seafile, product: "", name: "Seafile" },
+];
+
+/// Which product a WebDAV server is, from its `status.php` (Nextcloud and
+/// ownCloud 10 answer `productname`; Infinite Scale and OpenCloud answer
+/// `product`). Unauthenticated and quick; none when the server does not
+/// say or cannot be reached.
+pub fn detect_product(base: &str) -> Option<String> {
+    let base = base.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    let v: serde_json::Value = ureq::get(&format!("{base}/status.php"))
+        .timeout(Duration::from_secs(15))
+        .call()
+        .ok()?
+        .into_json()
+        .ok()?;
+    let name = v["productname"]
+        .as_str()
+        .or_else(|| v["product"].as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let product = if name.contains("nextcloud") {
+        "nextcloud"
+    } else if name.contains("opencloud") {
+        "opencloud"
+    } else if name.contains("owncloud") || name.contains("infinite scale") {
+        "owncloud"
+    } else {
+        return None;
+    };
+    Some(product.to_string())
 }
 
 /// What a service lets a public link carry, as found by
@@ -115,11 +189,16 @@ fn default_folder() -> String {
     "Vireo".to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl CloudAccount {
     pub fn empty() -> Self {
         CloudAccount {
             name: String::new(),
             kind: CloudKind::Nextcloud,
+            product: "nextcloud".to_string(),
             url: String::new(),
             user: String::new(),
             folder: default_folder(),
@@ -127,11 +206,29 @@ impl CloudAccount {
             client_id: String::new(),
             goa_id: String::new(),
             expire_days: 7,
+            enabled: true,
             password: false,
             link_expiry: None,
             link_password: None,
             link_note: String::new(),
         }
+    }
+
+    /// The brand id of the service this account is on (`brand::image`):
+    /// the product for a Nextcloud-kind server, else the kind's own name.
+    /// Empty while a pre-picker server's product is still unknown.
+    pub fn brand(&self) -> &str {
+        match self.kind {
+            CloudKind::Nextcloud => self.product.as_str(),
+            CloudKind::Dropbox => "dropbox",
+            CloudKind::Seafile => "seafile",
+            CloudKind::OneDrive => "onedrive",
+        }
+    }
+
+    /// The Service picker entry this account matches, if any.
+    pub fn service_index(&self) -> Option<usize> {
+        SERVICES.iter().position(|s| s.kind == self.kind && (self.kind != CloudKind::Nextcloud || s.product == self.product))
     }
 
     /// Whether the service lets this account's links expire (assumed
@@ -240,6 +337,11 @@ pub fn load_accounts() -> Vec<CloudAccount> {
     let Some(path) = path() else { return Vec::new() };
     let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
     toml::from_str::<CloudFile>(&text).map(|f| f.accounts).unwrap_or_default()
+}
+
+/// The accounts the composer offers: those switched on.
+pub fn load_enabled_accounts() -> Vec<CloudAccount> {
+    load_accounts().into_iter().filter(|a| a.enabled).collect()
 }
 
 pub fn save_accounts(accounts: &[CloudAccount]) {

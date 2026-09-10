@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.26.1-beta.1" date="2026-09-10" type="development">
+      <description>
+        <p>Catch-up with stable 1.26.0: a default sender for new messages, number keys for tags, the services' own marks throughout Settings and the wizard, the Cloud Storage panel reworked, the Settings window reopening on the last category, a fuller settings backup, French updated.</p>
+      </description>
+    </release>
     <release version="1.25.3-beta.1" date="2026-09-09" type="development">
       <description>
         <p>Catch-up with stable 1.25.2: cloud attachments to OneDrive, Dropbox and Seafile with per-upload link terms, recipient suggestions that remember everyone you write to.</p>

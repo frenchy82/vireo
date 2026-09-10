@@ -13,22 +13,21 @@ use crate::cloud::{self, CloudAccount, CloudKind};
 use crate::i18n::{i18n, i18n_f};
 
 /// How a kind is named in the editor and the list.
-pub fn kind_label(kind: CloudKind) -> String {
-    match kind {
-        CloudKind::Nextcloud => i18n("Nextcloud, ownCloud or OpenCloud"),
-        CloudKind::Dropbox => i18n("Dropbox"),
-        CloudKind::Seafile => i18n("Seafile"),
-        CloudKind::OneDrive => i18n("OneDrive"),
-    }
-}
-
 pub struct CloudAccounts {
     accounts: Vec<CloudAccount>,
+    /// Keyring keys of the servers already asked which product they are
+    /// (accounts from before the picker told them apart), so a list
+    /// rebuild does not ask again.
+    probed: std::collections::HashSet<String>,
     list: gtk::ListBox,
     toasts: Option<adw::ToastOverlay>,
     nav: Option<adw::NavigationView>,
     editor_page: Option<adw::NavigationPage>,
     editor_slot: Option<adw::Bin>,
+    /// The editor header's Remove, shown while an existing account is up.
+    remove_btn: Option<gtk::Button>,
+    /// Which account the editor shows (none for a new one).
+    editing: Option<usize>,
     /// What the editor's Save does, while one is up: reads the form and
     /// sends `Save` (or starts the sign-in that will); answers whether it
     /// accepted the form.
@@ -41,6 +40,13 @@ pub enum CloudAccountsInput {
     /// The editor for a new account of that kind.
     AddOf(CloudKind),
     Edit(usize),
+    /// The editor header's Remove: ask about the account being edited.
+    RemoveCurrent,
+    /// Ask before removing that account.
+    ConfirmRemove(usize),
+    /// A row's switch: keep the account, but offer it (or not) in the
+    /// composer.
+    ToggleEnabled { index: usize, enabled: bool },
     Remove(usize),
     /// The editor page's Save button.
     SaveClicked,
@@ -52,6 +58,9 @@ pub enum CloudAccountsInput {
     Save { index: Option<usize>, account: CloudAccount, password: String },
     /// A sign-in the editor finished after closing went wrong.
     Failed(String),
+    /// A server said which product it is (`cloud::detect_product`), for
+    /// the account with that keyring key.
+    ProductDetected { key: String, product: String },
 }
 
 #[derive(Debug)]
@@ -86,18 +95,37 @@ impl SimpleComponent for CloudAccounts {
                             set_child = &adw::PreferencesPage {
                                 add = &adw::PreferencesGroup {
                                     set_title: &i18n("Cloud storage"),
-                                    set_description: Some(&i18n("Upload a large file to Nextcloud, ownCloud, OpenCloud, OneDrive, Dropbox or Seafile and put a share link in the message instead of an attachment.")),
+                                    set_description: Some(&i18n("Connect your cloud storage provider to upload and share large files instead of an attachment. A cloud icon appears in the compose toolbar once a provider is added.\n\nSupported providers: Nextcloud, ownCloud, OpenCloud, OneDrive, Dropbox and Seafile.")),
+                                    // Across from the heading: the services' marks
+                                    // (picker order), with Add Account under them.
                                     #[wrap(Some)]
-                                    set_header_suffix = &gtk::Button {
-                                        set_label: &i18n("Add Account…"),
-                                        set_valign: gtk::Align::Center,
+                                    set_header_suffix = &gtk::Box {
+                                        set_orientation: gtk::Orientation::Vertical,
+                                        set_spacing: 20,
+                                        set_valign: gtk::Align::Start,
                                         set_margin_start: 24,
-                                        connect_clicked => CloudAccountsInput::Add,
+                                        #[name = "brands"]
+                                        gtk::Box {
+                                            set_orientation: gtk::Orientation::Horizontal,
+                                            set_spacing: 12,
+                                            set_halign: gtk::Align::End,
+                                        },
+                                        gtk::Button {
+                                            set_label: &i18n("Add Account…"),
+                                            set_halign: gtk::Align::End,
+                                            connect_clicked => CloudAccountsInput::Add,
+                                        },
                                     },
                                     #[name = "list"]
                                     gtk::ListBox {
                                         add_css_class: "boxed-list",
                                         set_selection_mode: gtk::SelectionMode::None,
+                                        set_margin_top: 16,
+                                        // A row opens its editor, as the Mail
+                                        // Accounts list does.
+                                        connect_row_activated[sender] => move |_, row| {
+                                            sender.input(CloudAccountsInput::Edit(row.index() as usize));
+                                        },
                                     },
                                     #[name = "empty"]
                                     gtk::Label {
@@ -128,6 +156,15 @@ impl SimpleComponent for CloudAccounts {
                                 add_css_class: "suggested-action",
                                 connect_clicked => CloudAccountsInput::SaveClicked,
                             },
+                            // Left of Save, only while editing an existing
+                            // account; asks before removing.
+                            #[name = "remove_btn"]
+                            pack_end = &gtk::Button {
+                                set_label: &i18n("Remove"),
+                                add_css_class: "destructive-action",
+                                set_visible: false,
+                                connect_clicked => CloudAccountsInput::RemoveCurrent,
+                            },
                         },
 
                         #[wrap(Some)]
@@ -154,13 +191,21 @@ impl SimpleComponent for CloudAccounts {
 
     fn init(_init: (), root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
         let widgets = view_output!();
+        for service in cloud::SERVICES.iter() {
+            let mark = crate::brand::image(service.brand(), 22);
+            mark.set_tooltip_text(Some(service.name));
+            widgets.brands.append(&mark);
+        }
         let mut model = CloudAccounts {
             accounts: cloud::load_accounts(),
+            probed: std::collections::HashSet::new(),
             list: widgets.list.clone(),
             toasts: Some(widgets.toasts.clone()),
             nav: Some(widgets.nav.clone()),
             editor_page: Some(widgets.editor_page.clone()),
             editor_slot: Some(widgets.editor_slot.clone()),
+            remove_btn: Some(widgets.remove_btn.clone()),
+            editing: None,
             save_action: Rc::new(RefCell::new(None)),
         };
         model.rebuild(&sender);
@@ -214,8 +259,47 @@ impl SimpleComponent for CloudAccounts {
                     self.open_editor(Some(i), a, &sender);
                 }
             }
+            CloudAccountsInput::ToggleEnabled { index, enabled } => {
+                if let Some(a) = self.accounts.get_mut(index) {
+                    if a.enabled != enabled {
+                        a.enabled = enabled;
+                        cloud::save_accounts(&self.accounts);
+                    }
+                }
+            }
+            CloudAccountsInput::RemoveCurrent => {
+                if let Some(i) = self.editing {
+                    sender.input(CloudAccountsInput::ConfirmRemove(i));
+                }
+            }
+            CloudAccountsInput::ConfirmRemove(i) => {
+                let Some(a) = self.accounts.get(i) else { return };
+                let name = if a.name.trim().is_empty() { a.where_shown() } else { a.name.clone() };
+                let parent = relm4::main_application().active_window();
+                let dialog = adw::MessageDialog::new(
+                    parent.as_ref(),
+                    Some(&i18n_f("Remove {name}?", &[("name", &name)])),
+                    Some(&i18n("Vireo forgets the account and its sign-in. Files already uploaded, and the links in messages you sent, stay where they are.")),
+                );
+                dialog.add_response("cancel", &i18n("Cancel"));
+                dialog.add_response("remove", &i18n("Remove"));
+                dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
+                let s = sender.input_sender().clone();
+                dialog.connect_response(None, move |_, response| {
+                    if response == "remove" {
+                        let _ = s.send(CloudAccountsInput::Remove(i));
+                    }
+                });
+                dialog.present();
+            }
             CloudAccountsInput::Remove(i) => {
                 if i < self.accounts.len() {
+                    if self.editing == Some(i) {
+                        self.editing = None;
+                        self.close_editor();
+                    }
                     let a = self.accounts.remove(i);
                     crate::config::delete_cloud_password(&a.key());
                     cloud::save_accounts(&self.accounts);
@@ -233,6 +317,17 @@ impl SimpleComponent for CloudAccounts {
             }
             CloudAccountsInput::CloseEditor => self.close_editor(),
             CloudAccountsInput::Failed(e) => self.toast(&e),
+            CloudAccountsInput::ProductDetected { key, product } => {
+                let mut changed = false;
+                for a in self.accounts.iter_mut().filter(|a| a.key() == key && a.product.is_empty()) {
+                    a.product = product.clone();
+                    changed = true;
+                }
+                if changed {
+                    cloud::save_accounts(&self.accounts);
+                    self.rebuild(&sender);
+                }
+            }
             CloudAccountsInput::Save { index, account, password } => {
                 if !password.is_empty() && account.has_secret() {
                     if let Err(e) = crate::config::store_cloud_password(&account.key(), &password) {
@@ -268,6 +363,10 @@ impl CloudAccounts {
     fn open_editor(&mut self, index: Option<usize>, account: CloudAccount, sender: &ComponentSender<Self>) {
         let (Some(nav), Some(page), Some(slot)) = (&self.nav, &self.editor_page, &self.editor_slot) else { return };
         page.set_title(&if index.is_some() { i18n("Edit Cloud Account") } else { i18n("Add Cloud Account") });
+        self.editing = index;
+        if let Some(b) = &self.remove_btn {
+            b.set_visible(index.is_some());
+        }
         let (form, save) = build_editor(index, account, sender.input_sender().clone());
         slot.set_child(Some(&form));
         *self.save_action.borrow_mut() = Some(save);
@@ -290,8 +389,20 @@ impl CloudAccounts {
             self.list.remove(&child);
         }
         for (i, a) in self.accounts.iter().enumerate() {
-            let row = adw::ActionRow::new();
-            row.set_title(&if a.name.trim().is_empty() { a.where_shown() } else { a.name.clone() });
+            // The same card as a Mail Accounts row: mark, name over
+            // details, then a chevron; the row itself opens the editor.
+            let row = gtk::ListBoxRow::new();
+            row.set_activatable(true);
+            let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+            hbox.add_css_class("account-list-row");
+            hbox.append(&crate::brand::image(a.brand(), 28));
+            let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            vbox.set_hexpand(true);
+            vbox.set_valign(gtk::Align::Center);
+            let title = gtk::Label::new(Some(&if a.name.trim().is_empty() { a.where_shown() } else { a.name.clone() }));
+            title.set_halign(gtk::Align::Start);
+            title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            title.add_css_class("account-name");
             let mut sub = format!("{} · {}", a.where_shown(), a.user);
             if a.expire_days > 0 {
                 sub.push_str(&format!(" · {}", i18n_f("links expire after {n} days", &[("n", &a.expire_days.to_string())])));
@@ -299,26 +410,40 @@ impl CloudAccounts {
             if a.password {
                 sub.push_str(&format!(" · {}", i18n("password-protected")));
             }
-            row.set_subtitle(&sub);
-            row.add_prefix(&gtk::Image::from_icon_name("co.hyprlab.Vireo-cloud-symbolic"));
-            let edit = gtk::Button::from_icon_name("co.hyprlab.Vireo-document-edit-symbolic");
-            edit.add_css_class("flat");
-            edit.set_valign(gtk::Align::Center);
-            edit.set_tooltip_text(Some(&i18n("Edit")));
+            let subtitle = gtk::Label::new(Some(&sub));
+            subtitle.set_halign(gtk::Align::Start);
+            subtitle.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            subtitle.add_css_class("account-email");
+            vbox.append(&title);
+            vbox.append(&subtitle);
+            hbox.append(&vbox);
+            // A server from before the picker told Nextcloud, ownCloud and
+            // OpenCloud apart: ask it once, in the background, and fill in
+            // its mark when it answers.
+            if a.kind == CloudKind::Nextcloud && a.product.is_empty() && self.probed.insert(a.key()) {
+                let (key, base) = (a.key(), a.base());
+                let s = sender.input_sender().clone();
+                std::thread::spawn(move || {
+                    if let Some(product) = cloud::detect_product(&base) {
+                        let _ = s.send(CloudAccountsInput::ProductDetected { key, product });
+                    }
+                });
+            }
+            // On/off without removing, as a mail account's row has.
+            let toggle = gtk::Switch::new();
+            toggle.set_valign(gtk::Align::Center);
+            toggle.set_tooltip_text(Some(&i18n("Offer this account in the composer")));
+            toggle.set_active(a.enabled);
             let s = sender.input_sender().clone();
-            edit.connect_clicked(move |_| {
-                let _ = s.send(CloudAccountsInput::Edit(i));
+            toggle.connect_state_set(move |_, state| {
+                let _ = s.send(CloudAccountsInput::ToggleEnabled { index: i, enabled: state });
+                gtk::glib::Propagation::Proceed
             });
-            row.add_suffix(&edit);
-            let rm = gtk::Button::from_icon_name("co.hyprlab.Vireo-user-trash-symbolic");
-            rm.add_css_class("flat");
-            rm.set_valign(gtk::Align::Center);
-            rm.set_tooltip_text(Some(&i18n("Remove")));
-            let s = sender.input_sender().clone();
-            rm.connect_clicked(move |_| {
-                let _ = s.send(CloudAccountsInput::Remove(i));
-            });
-            row.add_suffix(&rm);
+            hbox.append(&toggle);
+            let next = gtk::Image::from_icon_name("co.hyprlab.Vireo-go-next-symbolic");
+            next.add_css_class("dim-label");
+            hbox.append(&next);
+            row.set_child(Some(&hbox));
             self.list.append(&row);
         }
         self.list.set_visible(!self.accounts.is_empty());
@@ -339,19 +464,63 @@ fn build_editor(
 ) -> (gtk::Widget, Rc<dyn Fn() -> bool>) {
     let group = adw::PreferencesGroup::new();
     group.set_title(&i18n("Account"));
-    let kinds: Vec<String> = CloudKind::ALL.iter().map(|k| kind_label(*k)).collect();
-    let kind_refs: Vec<&str> = kinds.iter().map(String::as_str).collect();
+    let names: Vec<&str> = cloud::SERVICES.iter().map(|s| s.name).collect();
     let kind = adw::ComboRow::new();
     kind.set_title(&i18n("Service"));
-    kind.set_model(Some(&gtk::StringList::new(&kind_refs)));
-    kind.set_selected(CloudKind::ALL.iter().position(|k| *k == account.kind).unwrap_or(0) as u32);
+    kind.set_model(Some(&gtk::StringList::new(&names)));
+    // Each entry with the service's mark before its name, in the row and
+    // in the list that drops down.
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
+            let bx = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            let label = gtk::Label::new(None);
+            label.set_xalign(0.0);
+            bx.append(&gtk::Image::new());
+            bx.append(&label);
+            item.set_child(Some(&bx));
+        }
+    });
+    factory.connect_bind(|_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+        // By name, not position: the row's own selected-value slot is a
+        // list item with no position.
+        let name = item.item().and_downcast::<gtk::StringObject>().map(|s| s.string().to_string()).unwrap_or_default();
+        let Some(service) = cloud::SERVICES.iter().find(|s| s.name == name) else { return };
+        let Some(bx) = item.child().and_downcast::<gtk::Box>() else { return };
+        // (image, label): swap the image for the service's mark, name the label.
+        let Some(old) = bx.first_child() else { return };
+        let label = old.next_sibling().and_downcast::<gtk::Label>();
+        bx.remove(&old);
+        bx.prepend(&crate::brand::image(service.brand(), 20));
+        if let Some(label) = label {
+            label.set_label(service.name);
+        }
+    });
+    kind.set_factory(Some(&factory));
+    kind.set_selected(account.service_index().unwrap_or(0) as u32);
+    // The service's mark over the form, following the picker.
+    let header_mark = gtk::Image::new();
+    header_mark.set_pixel_size(56);
+    header_mark.set_halign(gtk::Align::Center);
+    header_mark.set_margin_bottom(18);
+    let set_header_mark = {
+        let header_mark = header_mark.clone();
+        move |id: &str| {
+            match crate::brand::texture(id, 112) {
+                Some(t) => header_mark.set_paintable(Some(&t)),
+                None => header_mark.set_icon_name(Some("co.hyprlab.Vireo-cloud-symbolic")),
+            }
+        }
+    };
+    set_header_mark(account.brand());
     // The kind is chosen when the account is made; afterwards the
     // sign-in and the keyring entry belong to it.
     kind.set_sensitive(index.is_none());
     // What the account is called in the list; optional, the server or
-    // service stands in when empty. Titled per kind with an example, so
-    // it does not read as asking for the user's own name.
+    // service stands in when empty.
     let name = adw::EntryRow::new();
+    name.set_title(&i18n("Nickname (optional)"));
     name.set_text(&account.name);
     let url = adw::EntryRow::new();
     url.set_title(&i18n("Server URL"));
@@ -426,7 +595,7 @@ fn build_editor(
     defaults.set_description(Some(&i18n(
         "How share links from this account are made unless you choose otherwise for an email: the upload dialog in the composer shows these values and lets you change them for that upload alone.",
     )));
-    defaults.set_margin_top(12);
+    defaults.set_margin_top(28);
     defaults.add(&expire);
     defaults.add(&protect);
 
@@ -444,6 +613,7 @@ fn build_editor(
     check_box.append(&status);
 
     let bx = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    bx.append(&header_mark);
     bx.append(&group);
     bx.append(&app_key_hint);
     bx.append(&goa_hint);
@@ -459,9 +629,13 @@ fn build_editor(
     // (OneDrive plans differ); saved with the account.
     let link_terms: Rc<RefCell<Option<Option<cloud::LinkTerms>>>> = Rc::new(RefCell::new(None));
 
-    let selected_kind = {
+    let selected_service = {
         let kind = kind.clone();
-        move || CloudKind::ALL.get(kind.selected() as usize).copied().unwrap_or_default()
+        move || cloud::SERVICES.get(kind.selected() as usize).copied().unwrap_or(cloud::SERVICES[0])
+    };
+    let selected_kind = {
+        let selected_service = selected_service.clone();
+        move || selected_service().kind
     };
 
     // The GOA accounts the picker currently lists (those of the kind's
@@ -519,8 +693,7 @@ fn build_editor(
 
     // The fields each kind wants.
     let apply_kind = {
-        let (name, url, user, pass, code, seafile_hint, app_key, app_key_hint, library, check, protect, expire, goa_row, goa_hint) = (
-            name.clone(),
+        let (url, user, pass, code, seafile_hint, app_key, app_key_hint, library, check, protect, expire, goa_row, goa_hint) = (
             url.clone(),
             user.clone(),
             pass.clone(),
@@ -539,7 +712,8 @@ fn build_editor(
         let fill_goa = fill_goa.clone();
         let apply_terms = apply_terms.clone();
         let known = account.clone();
-        move |k: CloudKind| {
+        move |service: cloud::Service| {
+            let k = service.kind;
             let dropbox = k == CloudKind::Dropbox;
             let goa = k.via_goa();
             url.set_visible(!dropbox && !goa);
@@ -557,7 +731,6 @@ fn build_editor(
                 check.set_label(&i18n("Check Connection"));
                 expire.set_subtitle(&i18n("Days; 0 keeps the link indefinitely. Needs Microsoft 365 or OneDrive for Business"));
                 protect.set_subtitle(&i18n("A download password is made for each file and shown to you, to pass on separately. Needs Microsoft 365 or OneDrive for Business"));
-                name.set_title(&i18n("Account name, such as Work OneDrive (optional)"));
                 // A new OneDrive account starts with both off, so a free
                 // personal OneDrive works as it is.
                 if !editing {
@@ -573,14 +746,12 @@ fn build_editor(
             expire.set_subtitle(&i18n("Days; 0 keeps the link indefinitely"));
             match k {
                 CloudKind::Nextcloud => {
-                    name.set_title(&i18n("Account name, such as Work Nextcloud (optional)"));
                     user.set_title(&i18n("User name"));
                     pass.set_title(&if editing { i18n("App password (leave empty to keep)") } else { i18n("App password") });
                     protect.set_subtitle(&i18n("A download password is made for each file and shown to you, to pass on separately"));
                     check.set_label(&i18n("Check Connection"));
                 }
                 CloudKind::Seafile => {
-                    name.set_title(&i18n("Account name, such as Team Seafile (optional)"));
                     user.set_title(&i18n("E-mail"));
                     pass.set_title(&if editing { i18n("Password (leave empty to keep)") } else { i18n("Password") });
                     protect.set_subtitle(&i18n("A download password is made for each file and shown to you, to pass on separately"));
@@ -589,7 +760,6 @@ fn build_editor(
                 // Handled above, before the return.
                 CloudKind::OneDrive => {}
                 CloudKind::Dropbox => {
-                    name.set_title(&i18n("Account name, such as Personal Dropbox (optional)"));
                     protect.set_subtitle(&i18n("A download password is made for each file and shown to you, to pass on separately. Dropbox allows link passwords and expiry dates on paid plans only."));
                     check.set_label(&i18n("Connect with Dropbox…"));
                     app_key_hint.set_label(&i18n_f(
@@ -607,13 +777,15 @@ fn build_editor(
             }
         }
     };
-    apply_kind(account.kind);
+    apply_kind(cloud::SERVICES[account.service_index().unwrap_or(0)]);
     {
         let apply_kind = apply_kind.clone();
         let status = status.clone();
-        let selected_kind = selected_kind.clone();
+        let selected_service = selected_service.clone();
         kind.connect_selected_notify(move |_| {
-            apply_kind(selected_kind());
+            let service = selected_service();
+            apply_kind(service);
+            set_header_mark(service.brand());
             status.set_label("");
         });
     }
@@ -629,13 +801,14 @@ fn build_editor(
             expire.clone(),
             protect.clone(),
         );
-        let selected_kind = selected_kind.clone();
+        let selected_service = selected_service.clone();
         let dropbox_login = dropbox_login.clone();
         let existing = account.clone();
         let (goa_row, goa_listed) = (goa_row.clone(), goa_listed.clone());
         let link_terms = link_terms.clone();
         move || {
-            let kind = selected_kind();
+            let service = selected_service();
+            let kind = service.kind;
             let goa = if kind.via_goa() {
                 goa_listed.borrow().get(goa_row.selected() as usize).map(|a| (a.id.clone(), a.email.clone()))
             } else {
@@ -651,6 +824,8 @@ fn build_editor(
             let mut a = CloudAccount {
                 name: name.text().trim().to_string(),
                 kind,
+                product: service.product.to_string(),
+                enabled: existing.enabled,
                 url: url.text().trim().to_string(),
                 user,
                 folder: folder.text().trim().to_string(),

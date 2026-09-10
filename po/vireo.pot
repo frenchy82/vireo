@@ -195,6 +195,12 @@ msgstr ""
 msgid "Settings Imported"
 msgstr ""
 
+msgid ""
+"{n} mail account(s), the cloud storage accounts and all preferences were "
+"imported. Restart Vireo to apply them. Passwords and sign-ins are not part "
+"of a backup; re-enter them on first use if this is a new machine."
+msgstr ""
+
 msgid "Later"
 msgstr ""
 
@@ -225,6 +231,9 @@ msgstr ""
 msgid ""
 "Single-key shortcuts are switched off. Turn them on in Settings → System & "
 "Appearance."
+msgstr ""
+
+msgid "Your tags"
 msgstr ""
 
 msgid "Restarting Vireo"
@@ -479,6 +488,12 @@ msgstr ""
 msgid "Select this row (for a bulk action)"
 msgstr ""
 
+msgid "Add or remove a tag (the first nine, in Settings order)"
+msgstr ""
+
+msgid "Remove every tag"
+msgstr ""
+
 msgid "Everything else"
 msgstr ""
 
@@ -677,6 +692,9 @@ msgstr ""
 msgid "Requires an app-specific password (not your normal login password)."
 msgstr ""
 
+msgid "Enter your server details manually."
+msgstr ""
+
 msgid "Sign in with your browser — no password needed."
 msgstr ""
 
@@ -690,9 +708,6 @@ msgid "Enable POP/IMAP access in GMX settings first."
 msgstr ""
 
 msgid "Enter your provider's OAuth endpoints, then sign in."
-msgstr ""
-
-msgid "Enter your server details manually."
 msgstr ""
 
 msgid "Mail Accounts"
@@ -712,7 +727,9 @@ msgstr ""
 
 msgid ""
 "Label messages with one or more coloured tags. Tags are stored on the mail "
-"server as IMAP keywords, so Thunderbird and other clients show the same tags."
+"server as IMAP keywords, so Thunderbird and other clients show the same "
+"tags. Drag a tag to reorder: the order here is the sidebar's, and the first "
+"nine answer to the 1–9 keys."
 msgstr ""
 
 msgid "Add Tag…"
@@ -972,9 +989,6 @@ msgstr ""
 msgid "Import File…"
 msgstr ""
 
-msgid "Remove Account"
-msgstr ""
-
 msgid ""
 "Your password is stored in the system keyring (secret-service), never in "
 "plain text on disk."
@@ -1099,6 +1113,11 @@ msgid ", tagged {tag}"
 msgstr ""
 
 msgid "Remove filter"
+msgstr ""
+
+msgid ""
+"Press this key on a message to add or remove the tag (with single-key "
+"shortcuts on)"
 msgstr ""
 
 msgid "Remove tag"
@@ -1322,18 +1341,6 @@ msgstr ""
 msgid "Response"
 msgstr ""
 
-msgid "Nextcloud, ownCloud or OpenCloud"
-msgstr ""
-
-msgid "Dropbox"
-msgstr ""
-
-msgid "Seafile"
-msgstr ""
-
-msgid "OneDrive"
-msgstr ""
-
 msgid "Cloud Storage"
 msgstr ""
 
@@ -1341,8 +1348,12 @@ msgid "Cloud storage"
 msgstr ""
 
 msgid ""
-"Upload a large file to Nextcloud, ownCloud, OpenCloud, OneDrive, Dropbox or "
-"Seafile and put a share link in the message instead of an attachment."
+"Connect your cloud storage provider to upload and share large files instead "
+"of an attachment. A cloud icon appears in the compose toolbar once a "
+"provider is added.\n"
+"\n"
+"Supported providers: Nextcloud, ownCloud, OpenCloud, OneDrive, Dropbox and "
+"Seafile."
 msgstr ""
 
 msgid "Add Account…"
@@ -1352,6 +1363,14 @@ msgid "No cloud accounts yet."
 msgstr ""
 
 msgid "Cloud Account"
+msgstr ""
+
+msgid "Remove {name}?"
+msgstr ""
+
+msgid ""
+"Vireo forgets the account and its sign-in. Files already uploaded, and the "
+"links in messages you sent, stay where they are."
 msgstr ""
 
 msgid "Removed {name}"
@@ -1372,7 +1391,13 @@ msgstr ""
 msgid "password-protected"
 msgstr ""
 
+msgid "Offer this account in the composer"
+msgstr ""
+
 msgid "Service"
+msgstr ""
+
+msgid "Nickname (optional)"
 msgstr ""
 
 msgid "Server URL"
@@ -1459,12 +1484,6 @@ msgid ""
 "separately. Needs Microsoft 365 or OneDrive for Business"
 msgstr ""
 
-msgid "Account name, such as Work OneDrive (optional)"
-msgstr ""
-
-msgid "Account name, such as Work Nextcloud (optional)"
-msgstr ""
-
 msgid "User name"
 msgstr ""
 
@@ -1474,16 +1493,10 @@ msgstr ""
 msgid "App password"
 msgstr ""
 
-msgid "Account name, such as Team Seafile (optional)"
-msgstr ""
-
 msgid "E-mail"
 msgstr ""
 
 msgid "Password (leave empty to keep)"
-msgstr ""
-
-msgid "Account name, such as Personal Dropbox (optional)"
 msgstr ""
 
 msgid ""
@@ -2537,6 +2550,12 @@ msgid ""
 "stay folded away behind a button in the panel's header."
 msgstr ""
 
+msgid "Send new messages from"
+msgstr ""
+
+msgid "Replies still answer from the address the original was sent to."
+msgstr ""
+
 msgid "Paste as plain text"
 msgstr ""
 
@@ -2685,8 +2704,11 @@ msgid ""
 msgstr ""
 
 msgid ""
-"Accounts and preferences as one file. Passwords stay in the system keyring "
-"and are never exported."
+"Everything Vireo keeps, as one file: mail and cloud storage accounts, "
+"preferences, filters, tags, the sidebar and window layout, the app icon "
+"choice and the words taught to the spell checker. Passwords and sign-ins "
+"stay in the system keyring and are never exported; OpenPGP keys stay in "
+"GnuPG."
 msgstr ""
 
 msgid "Export settings"
@@ -2741,6 +2763,9 @@ msgid "Shown while hovering"
 msgstr ""
 
 msgid "Always visible"
+msgstr ""
+
+msgid "Account of the current folder"
 msgstr ""
 
 msgid "System language — {language}"
