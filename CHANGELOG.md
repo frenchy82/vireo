@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.27.3-beta.4 — 2026-09-11
+
+The narrow-window sidebar peek is its own panel; the icon rail is never
+touched.
+
+- **Peek panel beside the rail.** The peek used to collapse the account
+  split view, stand a snapshot in for the docked rail and rebuild the one
+  sidebar's rows expanded for the overlay, so the rail's column was covered
+  and redrawn by the panel's content as it slid over (beta.3's pinned
+  header is reverted). A second, always collapsed split view nested in the
+  content slot now floats a second sidebar instance out from the rail's
+  right edge over the panes, with libadwaita's scrim, shadow and swipe.
+  The panel has its own header in the expanded sidebar's layout (Refresh
+  top-left, title, menu top-right). The docked rail keeps its rows, header
+  and width throughout and stays clickable beside the panel. The snapshot,
+  restore-timer and rail-repaint machinery is gone.
+- **Two sidebar instances, one state.** Both receive the same contents,
+  unread counts, busy state and folder rows; every navigation is pushed to
+  both as a silent highlight change (`SidebarInput::MirrorSelection`), so
+  the row clicked in one is highlighted in the other. List-box selection
+  signals are muted while rows are selected programmatically: an input
+  they queue is judged later against a selection that may have moved on,
+  which made two instances oscillate through the app.
+- **Hover peek across both panes.** Leaving the rail arms the one-second
+  fold-back and entering the panel cancels it, so moving the pointer from
+  the rail into the panel keeps it open.
+
 ## 1.27.3-beta.3 — 2026-09-11
 
 The sidebar peek's menu and refresh buttons stay where the rail draws them.

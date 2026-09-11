@@ -19,6 +19,9 @@ msgstr ""
 msgid "Main Menu"
 msgstr "Menu principal"
 
+msgid "Refresh or long-press for Status Bar"
+msgstr "Actualiser ou appuyer longuement pour la barre d'état"
+
 msgid "Expand sidebar"
 msgstr "Déplier la barre latérale"
 
@@ -120,9 +123,6 @@ msgstr "Mots-clés"
 
 msgid "Move To…"
 msgstr ""
-
-msgid "Refresh or long-press for Status Bar"
-msgstr "Actualiser ou appuyer longuement pour la barre d'état"
 
 msgid "Attachments"
 msgstr "Pièces jointes"

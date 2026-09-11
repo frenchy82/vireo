@@ -13,6 +13,9 @@ msgstr ""
 msgid "Main Menu"
 msgstr ""
 
+msgid "Refresh or long-press for Status Bar"
+msgstr ""
+
 msgid "Expand sidebar"
 msgstr ""
 
@@ -113,9 +116,6 @@ msgid "Tags"
 msgstr ""
 
 msgid "Move To…"
-msgstr ""
-
-msgid "Refresh or long-press for Status Bar"
 msgstr ""
 
 msgid "Attachments"
