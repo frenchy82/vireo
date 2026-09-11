@@ -70,6 +70,9 @@ msgstr "Rechercher dans le message (Ctrl+F)"
 msgid "Print Preview (Ctrl+Shift+P)"
 msgstr "Aperçu avant impression (Ctrl+Maj+P)"
 
+msgid "Not Spam"
+msgstr ""
+
 msgid "Mark as Spam"
 msgstr "Marquer comme indésirable"
 
@@ -391,6 +394,10 @@ msgid "Empty"
 msgstr "Vider"
 
 msgid "No Junk folder available for this account"
+msgstr "Aucun dossier Indésirables disponible pour ce compte"
+
+#, fuzzy
+msgid "No Inbox folder available for this account"
 msgstr "Aucun dossier Indésirables disponible pour ce compte"
 
 msgid "No address book available to add contacts"
@@ -772,6 +779,9 @@ msgid "Drag to set the order they appear in the sidebar."
 msgstr ""
 "Faites glisser pour modifier l'ordre d'affichage dans la barre latérale."
 
+msgid "Add Account…"
+msgstr "Ajouter un compte…"
+
 msgid "GNOME Online Accounts"
 msgstr "GNOME Comptes en ligne"
 
@@ -780,17 +790,28 @@ msgstr ""
 "Comptes e-mail issus des Paramètres de GNOME. Activez-en un pour l'utiliser "
 "dans Vireo."
 
-msgid "Add Account"
-msgstr "Ajouter un compte"
-
+#, fuzzy
 msgid ""
 "Label messages with one or more coloured tags. Tags are stored on the mail "
 "server as IMAP keywords, so Thunderbird and other clients show the same "
-"tags. Drag a tag to reorder: the order here is the sidebar's, and the first "
-"nine answer to the 1–9 keys."
+"tags.\n"
+"\n"
+"Drag a tag to reorder: the order here is the sidebar's, and the first nine "
+"answer to the 1–9 keys."
 msgstr ""
+"Attribuez à vos messages une ou plusieurs étiquettes de couleur. Les "
+"étiquettes sont stockées sur le serveur de messagerie sous forme de mots-"
+"clés IMAP ; ainsi, Thunderbird et les autres clients affichent les mêmes "
+"étiquettes."
 
 msgid "Add Tag…"
+msgstr "Ajouter un tag…"
+
+msgid "Look through every mailbox for tags other clients have set"
+msgstr ""
+
+#, fuzzy
+msgid "Find Tags…"
 msgstr "Ajouter un tag…"
 
 msgid "Search filters"
@@ -1215,6 +1236,36 @@ msgstr ", marqué {tag}"
 msgid "Remove filter"
 msgstr "Supprimer le filtre"
 
+#, fuzzy
+msgid "Searching…"
+msgstr "Synchronisation…"
+
+msgid "No New Tags"
+msgstr ""
+
+msgid "No tags were found in your mailboxes that are not already set up here."
+msgstr ""
+
+msgid "Tags Found"
+msgstr ""
+
+msgid ""
+"{n} tags are in use in your mailboxes but not set up here. Import them all, "
+"or choose which to add. Names and colours can be changed afterwards."
+msgstr ""
+
+#, fuzzy
+msgid "Import Selected"
+msgstr "Importer des paramètres"
+
+#, fuzzy
+msgid "Import All"
+msgstr "Importer la clé"
+
+#, fuzzy
+msgid "{n} messages"
+msgstr "Supprimer {n} messages"
+
 msgid ""
 "Press this key on a message to add or remove the tag (with single-key "
 "shortcuts on)"
@@ -1309,7 +1360,8 @@ msgstr "Aucun"
 msgid "Count unread mail"
 msgstr "Compter les messages non lus"
 
-msgid "Include the folder's unread mail in the unread count and the tray icon"
+#, fuzzy
+msgid "Include the folder's unread mail in the tray icon's unread count"
 msgstr ""
 "Inclure les e-mails non lus du dossier dans le compteur global et l'icône de "
 "la zone de notification"
@@ -1462,9 +1514,6 @@ msgid ""
 "Supported providers: Nextcloud, ownCloud, OpenCloud, OneDrive, Dropbox and "
 "Seafile."
 msgstr ""
-
-msgid "Add Account…"
-msgstr "Ajouter un compte…"
 
 msgid "No cloud accounts yet."
 msgstr "Aucun compte cloud pour le moment."
@@ -1971,6 +2020,9 @@ msgstr "Marquer comme lu"
 
 msgid "Star"
 msgstr "Ajouter une étoile"
+
+msgid "Not spam"
+msgstr ""
 
 msgid "Add sender to Contacts"
 msgstr "Ajouter l'expéditeur aux contacts"
@@ -3674,6 +3726,14 @@ msgstr "Impossible de marquer le dossier comme lu : {e}"
 msgid "Could not mark as spam: {e}"
 msgstr "Impossible de marquer comme indésirable : {e}"
 
+#, fuzzy
+msgid "Could not mark as not spam: {e}"
+msgstr "Impossible de marquer comme indésirable : {e}"
+
+#, fuzzy
+msgid "Could not mark {len} messages as not spam: {e}"
+msgstr "Impossible de déplacer {len} messages : {e}"
+
 msgid "Could not move message: {e}"
 msgstr "Impossible de déplacer le message : {e}"
 
@@ -3857,6 +3917,9 @@ msgstr "La boîte de réception unifiée en mode clair"
 msgid "Hyprlab"
 msgstr "Hyprlab"
 
+#~ msgid "Add Account"
+#~ msgstr "Ajouter un compte"
+
 #~ msgid "Show under All Inboxes"
 #~ msgstr "Afficher sous Toutes les boîtes"
 
@@ -3902,16 +3965,6 @@ msgstr "Hyprlab"
 #~ msgstr ""
 #~ "Les comptes et préférences dans un seul fichier. Les mots de passe "
 #~ "restent dans le trousseau de clés du système et ne sont jamais exportés."
-
-#~ msgid ""
-#~ "Label messages with one or more coloured tags. Tags are stored on the "
-#~ "mail server as IMAP keywords, so Thunderbird and other clients show the "
-#~ "same tags."
-#~ msgstr ""
-#~ "Attribuez à vos messages une ou plusieurs étiquettes de couleur. Les "
-#~ "étiquettes sont stockées sur le serveur de messagerie sous forme de mots-"
-#~ "clés IMAP ; ainsi, Thunderbird et les autres clients affichent les mêmes "
-#~ "étiquettes."
 
 #~ msgid "Nextcloud, ownCloud or OpenCloud"
 #~ msgstr "Nextcloud, ownCloud ou OpenCloud"

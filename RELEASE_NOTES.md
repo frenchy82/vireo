@@ -2,6 +2,26 @@
 
 Vireo is a clean, fast, GNOME-native email client built with Rust and libadwaita for Wayland desktops. Privacy-first: no telemetry, remote content blocked by default, and credentials kept in the system keyring.
 
+## What's new in 1.27.0-beta.3
+
+Third preview of 1.27.0. Everything under 1.27.0-beta.2 and 1.27.0-beta.1 below is in it too.
+
+**Find your tags.** Settings, Tags has "Find Tags…". It reads every mailbox on every account for the tags other clients have already set, Thunderbird's built-ins included, and lists the ones not set up here with a proposed name and colour. Import them all, or tick the ones you want. Microsoft 365 accounts offer their categories, colours and all.
+
+**Not Spam.** In Junk, everywhere that offered "Mark as Spam" now offers "Not Spam": the right-click menu, the bulk bar, the row's action palette, the reader toolbar and the spam shortcut. The server is told the message is wanted and it goes back to the Inbox. Reported by [@frenchy82](https://github.com/frenchy82) (#168).
+
+**Sender logos at full size.** Vireo only ever asked a site for its root favicon, so many senders showed a tiny icon scaled up. It now reads the icons the site's home page and web manifest declare and takes the largest. Logos already on disk refresh within a week; delete `~/.local/share/vireo/logos` to see the difference at once.
+
+**Initials, centred.** The letters in the message list's circles, the sidebar's account circles and the reader cards' circles are centred by the ink they draw, so a lone letter no longer drifts and pairs no longer lean. Colours are unchanged.
+
+**Composing in a narrow pane.** When the reader pane is too narrow for the full compose toolbar, the actions fold into a ⋯ menu so Cancel, Send and the window's close button always fit. The Send button's label, Delete Draft and the cloud button also now update as they should while composing.
+
+**Tags in the menu.** The right-click menu keeps its tags behind a "Tags ›" row that opens its own page, so a long list of tags never makes the menu taller than the screen.
+
+**Sidebar.** Collapsing to the icon rail, or expanding back, no longer flashes stretched icons. The unified Inboxes chip counts the inboxes only; folders a filter files into keep their own chips under Filters. Right-clicking a conversation's top row reliably opens its menu.
+
+**Settings.** Add Account…, Add Filter…, Add Tag… and Find Tags… are the same kind of button in the same place on every panel.
+
 ## What's new in 1.27.0-beta.2
 
 Second preview of 1.27.0. Everything under 1.27.0-beta.1 below is in it too.

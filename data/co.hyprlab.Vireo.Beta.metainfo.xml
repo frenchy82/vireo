@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.27.0-beta.3" date="2026-09-11" type="development">
+      <description>
+        <p>Third preview of 1.27.0: a tag finder in Settings that reads every mailbox for tags already in use and imports them; Not Spam in Junk; sender logos at the size the site publishes; initials centred by their ink in the list, the sidebar and the reader; the compose toolbar folds into a menu in a narrow pane; tags in a submenu of the context menu; the icon rail toggle no longer stretches the icons.</p>
+      </description>
+    </release>
     <release version="1.27.0-beta.2" date="2026-09-11" type="development">
       <description>
         <p>Second preview of 1.27.0: the Filters row lists every rule's folder; filtered folders are marked in the account's colour under each account with Edit Filter in the menu; Edit Tag on every tag row; filter and tag editors as pages; per-row unread-chip switches; chips never overflow; a renamed folder follows the selection; All Inboxes is Inboxes.</p>

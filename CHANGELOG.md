@@ -1,5 +1,94 @@
 # Changelog
 
+## 1.27.0-beta.3 — 2026-09-11
+
+Third preview of 1.27.0: a tag finder, "Not Spam", sender logos at
+their real size, initials centred by their ink, and a composer that
+fits a narrow pane.
+
+- **Tag finder** (Settings → Tags → "Find Tags…"). Every account is
+  asked for the keywords in use across all its folders
+  (`MailRequest::FindKeywords` → `WorkerEvent::KeywordsFound`, fanned
+  out and counted in `App::tag_scan`, with a two-minute safety net for
+  an account that never answers). IMAP: EXAMINE per folder reads the
+  mailbox's FLAGS line and a `UID SEARCH KEYWORD` per candidate gives
+  the count (an unused keyword is dropped; `worker::is_system_keyword`
+  leaves out `$Junk`, `$Forwarded`, `$MailFlagBit…` and the like).
+  Microsoft 365: the mailbox's master categories with their names and
+  preset colours (`graph_preset_color`), counts from the cache
+  (`Cache::count_with_keyword`). POP3 has nothing to find; the demo
+  answers with a fixed set. Findings merge by keyword across accounts,
+  known tags are dropped, and each keyword gets a proposed name and
+  colour (`Tag::name_for_keyword` / `color_for_keyword`: Thunderbird's
+  `$label1`–`$label5` become Important, Work, Personal, To Do and Later
+  in Thunderbird's colours; anything else reads as words and takes the
+  next free palette colour). The report (`AccountsInput::TagFindings`,
+  an `adw::MessageDialog` checklist) offers Import All or Import
+  Selected; the button shows a spinner and "Searching…" meanwhile.
+- **Not Spam** (#168). In Junk, the row menu, bulk menu and bar, the row
+  palette, the reader's toolbar button, its folded ⋯ menu and the spam
+  shortcut read "Not Spam": `MailRequest::MarkHam` / `MarkHamMany` set
+  `$NotJunk`, clear `$Junk` (best-effort, as marking spam is) and move
+  the messages back to the Inbox in one round (`mark_ham`); Microsoft
+  365 moves them. `MessageListInput::SetInJunk` beside `SetRestorable`,
+  `RowAction::NotSpam` / `BulkAction::NotSpam`, `RowInit.in_junk` for
+  the palette; the unified views clear the state too. Icon
+  `mail-mark-notjunk-symbolic` joins the bundled set; the demo's Junk
+  folder holds two messages.
+- **Sender logos at the size the site publishes** (`logo::discover`).
+  Only the two root paths were tried, so most senders got the 16–48px
+  favicon.ico. The domain's home page (first 512KB, browser-ish
+  User-Agent) and its web manifest are read for `<link rel="icon">`,
+  `apple-touch-icon` and manifest icons, ranked by claimed size with the
+  root `apple-touch-icon.png` (180) and `favicon.ico` (32); SVG and mask
+  icons are skipped. Decoding still downsizes to 160px for the cache.
+- **Initials centred by their ink** (`ui::initials::InitialsPaintable`).
+  The message list's avatars, the sidebar's account circles and the
+  reader cards' circles are drawn from the ink extents of the laid-out
+  text rather than a label's logical box: a lone letter and a pair both
+  sit exactly in the middle. The list keeps libadwaita's fourteen avatar
+  gradients and its name hash, so every sender keeps their colour; the
+  sidebar's `glyph_picture` (sized to the circle, expanding nothing)
+  replaces the label and its optical-nudge CSS; the reader embeds each
+  circle as a PNG rendered at the screen's scale (`png_data_uri`, cached
+  per initial and tint) with the per-address hue as before.
+- **Compose folds in a narrow pane.** An inline composer (new message,
+  reply, forward) in a narrow reader pushed the window's close button
+  off the canvas. The composer's root is an `adw::BreakpointBin` (360px
+  floor); the full header is measured on first map, and below that
+  width everything but Cancel, Send and the fields chevron folds into a
+  ⋯ menu (`ComposeInput::SetNarrow` / `OverflowMenu`, the OpenPGP
+  toggles ticked when on). The compose header shares the reader
+  toolbar's tighter spacing; the compose window opens 720px wide. Fixed
+  alongside: `Compose::update_with_view` never called `update_view`, so
+  every `#[watch]` in the composer (the Send/Schedule label, Delete
+  Draft, the cloud button) held its init value.
+- **Tags in a submenu.** The row context menu and the reader's folded
+  ⋯ menu put the tag toggles behind a "Tags ›" row
+  (`context_menu::MenuEntry::submenu`: the popover is a `gtk::Stack` of
+  pages with a back row; a page taller than 420px scrolls). The
+  palette's and the reader toolbar's tag menus stay flat.
+- **Sidebar rail toggle without the smear.** The freeze-frame snapshot
+  over a rebuild was a `ContentFit::Fill` picture, stretched by the
+  200ms width animation of a rail toggle. It now keeps the width it was
+  taken at (halign Start, clipped by the overlay) and fades out over the
+  same 200ms during a toggle (`built_collapsed` tells a toggle from an
+  in-place refresh); other rebuilds keep the 80ms lift.
+- **Row context menu in the capture phase.** The list's secondary-button
+  gesture runs in the capture phase and claims the sequence, so no
+  widget inside a row can take the press first; a miss on the row band
+  falls back to picking the row under the pointer.
+- **Inboxes chip.** The unified Inboxes chip counts the inboxes alone
+  (`App::inboxes_unread`); a filter destination has its own row and chip
+  under Filters. The rule's "Count unread mail" switch keeps feeding the
+  tray icon and the Background Apps status, and says so.
+- **Settings.** Add Account… (no longer a pill at the foot of the list),
+  Add Filter…, Add Tag… and Find Tags… are regular 130px buttons at
+  their group's end, stacked where a group has two. The Tags description
+  breaks before "Drag a tag to reorder".
+- Showcase hooks: `VIREO_SHOWCASE_FIND_TAGS`, `VIREO_SHOWCASE_ROW_MENU` +
+  `VIREO_SHOWCASE_MENU=main|<submenu>`.
+
 ## 1.27.0-beta.2 — 2026-09-11
 
 Second preview of 1.27.0: filters and tags settle into the sidebar and

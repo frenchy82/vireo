@@ -64,6 +64,9 @@ msgstr ""
 msgid "Print Preview (Ctrl+Shift+P)"
 msgstr ""
 
+msgid "Not Spam"
+msgstr ""
+
 msgid "Mark as Spam"
 msgstr ""
 
@@ -365,6 +368,9 @@ msgid "Empty"
 msgstr ""
 
 msgid "No Junk folder available for this account"
+msgstr ""
+
+msgid "No Inbox folder available for this account"
 msgstr ""
 
 msgid "No address book available to add contacts"
@@ -722,23 +728,31 @@ msgstr ""
 msgid "Drag to set the order they appear in the sidebar."
 msgstr ""
 
+msgid "Add Account…"
+msgstr ""
+
 msgid "GNOME Online Accounts"
 msgstr ""
 
 msgid "Mail accounts from GNOME Settings. Toggle one on to use it in Vireo."
 msgstr ""
 
-msgid "Add Account"
-msgstr ""
-
 msgid ""
 "Label messages with one or more coloured tags. Tags are stored on the mail "
 "server as IMAP keywords, so Thunderbird and other clients show the same "
-"tags. Drag a tag to reorder: the order here is the sidebar's, and the first "
-"nine answer to the 1–9 keys."
+"tags.\n"
+"\n"
+"Drag a tag to reorder: the order here is the sidebar's, and the first nine "
+"answer to the 1–9 keys."
 msgstr ""
 
 msgid "Add Tag…"
+msgstr ""
+
+msgid "Look through every mailbox for tags other clients have set"
+msgstr ""
+
+msgid "Find Tags…"
 msgstr ""
 
 msgid "Search filters"
@@ -1121,6 +1135,32 @@ msgstr ""
 msgid "Remove filter"
 msgstr ""
 
+msgid "Searching…"
+msgstr ""
+
+msgid "No New Tags"
+msgstr ""
+
+msgid "No tags were found in your mailboxes that are not already set up here."
+msgstr ""
+
+msgid "Tags Found"
+msgstr ""
+
+msgid ""
+"{n} tags are in use in your mailboxes but not set up here. Import them all, "
+"or choose which to add. Names and colours can be changed afterwards."
+msgstr ""
+
+msgid "Import Selected"
+msgstr ""
+
+msgid "Import All"
+msgstr ""
+
+msgid "{n} messages"
+msgstr ""
+
 msgid ""
 "Press this key on a message to add or remove the tag (with single-key "
 "shortcuts on)"
@@ -1210,7 +1250,7 @@ msgstr ""
 msgid "Count unread mail"
 msgstr ""
 
-msgid "Include the folder's unread mail in the unread count and the tray icon"
+msgid "Include the folder's unread mail in the tray icon's unread count"
 msgstr ""
 
 msgid "Thumbnail size"
@@ -1357,9 +1397,6 @@ msgid ""
 "\n"
 "Supported providers: Nextcloud, ownCloud, OpenCloud, OneDrive, Dropbox and "
 "Seafile."
-msgstr ""
-
-msgid "Add Account…"
 msgstr ""
 
 msgid "No cloud accounts yet."
@@ -1790,6 +1827,9 @@ msgid "Mark as read"
 msgstr ""
 
 msgid "Star"
+msgstr ""
+
+msgid "Not spam"
 msgstr ""
 
 msgid "Add sender to Contacts"
@@ -3278,6 +3318,12 @@ msgid "Could not mark folder read: {e}"
 msgstr ""
 
 msgid "Could not mark as spam: {e}"
+msgstr ""
+
+msgid "Could not mark as not spam: {e}"
+msgstr ""
+
+msgid "Could not mark {len} messages as not spam: {e}"
 msgstr ""
 
 msgid "Could not move message: {e}"
