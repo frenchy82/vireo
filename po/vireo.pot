@@ -91,6 +91,9 @@ msgstr ""
 msgid "Settings"
 msgstr ""
 
+msgid "Show Accounts"
+msgstr ""
+
 msgid "Print Preview…"
 msgstr ""
 
@@ -513,6 +516,9 @@ msgid "Preview it as a PDF first"
 msgstr ""
 
 msgid "Reveal the status bar (also: long-press Refresh)"
+msgstr ""
+
+msgid "Show or hide the accounts in the sidebar"
 msgstr ""
 
 msgid "Console mode (when enabled in Settings)"
@@ -1786,16 +1792,16 @@ msgstr ""
 msgid "Mark as read"
 msgstr ""
 
-msgid "Mark as unread"
-msgstr ""
-
-msgid "Remove star"
-msgstr ""
-
 msgid "Star"
 msgstr ""
 
 msgid "Add sender to Contacts"
+msgstr ""
+
+msgid "Mark as unread"
+msgstr ""
+
+msgid "Remove star"
 msgstr ""
 
 msgid "Show conversation"
@@ -2308,43 +2314,12 @@ msgstr ""
 msgid "The view shown first when Settings is opened from the menu."
 msgstr ""
 
-msgid "All Inboxes"
+msgid "Accounts in the sidebar"
 msgstr ""
 
 msgid ""
-"A unified inbox combining every account, at the top of the sidebar. Only "
-"shown with more than one account."
-msgstr ""
-
-msgid "All Inboxes unread count"
-msgstr ""
-
-msgid ""
-"Show the combined unread chip next to All Inboxes while its per-account list "
-"is folded up."
-msgstr ""
-
-msgid "Filtered Folders section"
-msgstr ""
-
-msgid ""
-"List the folders your filter rules file into in a collapsible section. Each "
-"rule chooses whether its folder appears there; this switch hides the section "
-"altogether."
-msgstr ""
-
-msgid "Filtered Folders placement"
-msgstr ""
-
-msgid ""
-"Inside All Inboxes, folding away with it, or in the scrolling sidebar above "
-"or below the accounts."
-msgstr ""
-
-msgid "Tags placement"
-msgstr ""
-
-msgid "Where the Tags section sits, with the same choices."
+"Each account's own section: its folders, filtered folders and tags. Off "
+"leaves the unified section alone. Also in the main menu, and Ctrl+Shift+A."
 msgstr ""
 
 msgid "Chevron placement"
@@ -2377,6 +2352,139 @@ msgid ""
 "Whenever the sidebar is collapsed to its icon rail, hovering it floats the "
 "full sidebar out over the panes; it folds back a moment after the pointer "
 "leaves."
+msgstr ""
+
+msgid "Remember the sidebar layout"
+msgstr ""
+
+msgid ""
+"Reopen with the accounts, folders and sections as you left them. Off starts "
+"every launch with everything folded up."
+msgstr ""
+
+msgid "Remember icon rail state"
+msgstr ""
+
+msgid ""
+"Reopen with icon rail in the last used state. Off starts every launch with "
+"the full sidebar."
+msgstr ""
+
+msgid "Unified"
+msgstr ""
+
+msgid ""
+"The section at the top of the sidebar that combines every account. Only "
+"shown with more than one account."
+msgstr ""
+
+msgid "All Inboxes"
+msgstr ""
+
+msgid ""
+"A unified inbox combining every account, at the top of the sidebar. Only "
+"shown with more than one account."
+msgstr ""
+
+msgid "All Inboxes unread count"
+msgstr ""
+
+msgid ""
+"Show the combined unread chip next to All Inboxes while its per-account list "
+"is folded up."
+msgstr ""
+
+msgid "Starred"
+msgstr ""
+
+msgid ""
+"Every account's starred folder as one list, opening to each account's own."
+msgstr ""
+
+msgid "Every account's sent mail as one list, opening to each account's own."
+msgstr ""
+
+msgid "Every account's drafts as one list, opening to each account's own."
+msgstr ""
+
+msgid "Filtered Folders section"
+msgstr ""
+
+msgid ""
+"List the folders your filter rules file into in a collapsible section. Each "
+"rule chooses whether its folder appears there; this switch hides the section "
+"altogether."
+msgstr ""
+
+msgid ""
+"The tags, each showing every account's mail with it. Each account keeps its "
+"own Tags section either way."
+msgstr ""
+
+msgid "Filtered Folders placement"
+msgstr ""
+
+msgid ""
+"In the unified section, as a row like All Inboxes whose caret opens the "
+"folders; or above or below the accounts as a heading with its own list."
+msgstr ""
+
+msgid "Tags placement"
+msgstr ""
+
+msgid ""
+"The same choices for the Tags section: a unified row, or a heading above or "
+"below the accounts."
+msgstr ""
+
+msgid "Icon rail"
+msgstr ""
+
+msgid "The sidebar collapsed to icons, by its button or in a narrow window."
+msgstr ""
+
+msgid "Unread dots instead of counts"
+msgstr ""
+
+msgid ""
+"Mark folders and accounts that have unread mail with a dot in the accent "
+"colour rather than the number of messages. The count stays in the tooltip."
+msgstr ""
+
+msgid "Fold up expanded items"
+msgstr ""
+
+msgid ""
+"When the sidebar collapses to the icon rail, the items switched on below "
+"start folded up. A long-press in the rail still expands or collapses any of "
+"them, and the full sidebar comes back exactly as you left it."
+msgstr ""
+
+msgid "All accounts"
+msgstr ""
+
+msgid "Every account's folder list."
+msgstr ""
+
+msgid "The account list under All Inboxes."
+msgstr ""
+
+msgid "The account list under the unified Starred row."
+msgstr ""
+
+msgid "The account list under the unified Sent row."
+msgstr ""
+
+msgid "The account list under the unified Drafts row."
+msgstr ""
+
+msgid "Filtered Folders"
+msgstr ""
+
+msgid "The folders under the Filtered Folders row."
+msgstr ""
+
+msgid "The tags under the Tags row."
 msgstr ""
 
 msgid "Sender avatars"
@@ -2723,7 +2831,7 @@ msgid ""
 "backup carries."
 msgstr ""
 
-msgid "Inside All Inboxes"
+msgid "In the unified section"
 msgstr ""
 
 msgid "Above the accounts"
@@ -2854,6 +2962,9 @@ msgstr ""
 msgid "Insert"
 msgstr ""
 
+msgid "Folder"
+msgstr ""
+
 msgid "Add account"
 msgstr ""
 
@@ -2863,22 +2974,19 @@ msgstr ""
 msgid "No accounts yet"
 msgstr ""
 
-msgid "Show each inbox"
-msgstr ""
-
-msgid "Refresh"
-msgstr ""
-
-msgid "Account Settings…"
-msgstr ""
-
 msgid "Outbox"
 msgstr ""
 
 msgid "Mark Inbox as Read"
 msgstr ""
 
+msgid "Refresh"
+msgstr ""
+
 msgid "New Folder…"
+msgstr ""
+
+msgid "Account Settings…"
 msgstr ""
 
 msgid "Remove Account…"
@@ -2896,7 +3004,19 @@ msgstr ""
 msgid "Add Folder"
 msgstr ""
 
-msgid "Filtered Folders"
+msgid "Show each inbox"
+msgstr ""
+
+msgid "Show each account"
+msgstr ""
+
+msgid "Show each folder"
+msgstr ""
+
+msgid "Show each tag"
+msgstr ""
+
+msgid "Long-press to expand or collapse"
 msgstr ""
 
 msgid "Rename Folder…"

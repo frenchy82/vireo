@@ -2,6 +2,24 @@
 
 Vireo is a clean, fast, GNOME-native email client built with Rust and libadwaita for Wayland desktops. Privacy-first: no telemetry, remote content blocked by default, and credentials kept in the system keyring.
 
+## What's new in 1.27.0-beta.1
+
+A preview of 1.27.0. Everything here is new since 1.26.0.
+
+**Previews in the right charset.** The preview line under a subject read every message as UTF-8, so mail sent in a Central European charset showed a row of replacement characters even though the message itself was fine. The preview now reads the charset the message declares, and rows already showing replacement characters clean themselves up. Reported by [@7system7](https://github.com/7system7) (#159).
+
+**The unified section.** All Inboxes has company: Starred, Sent and Drafts rows, each combining that folder across every account. Click a row for the combined list, or open its caret for each account's own folder. Filtered Folders and Tags placed in the unified section are the same kind of row now, and their headers open every filtered folder combined, and every tagged message. Placed above or below the accounts, they keep the heading style they had. Settings, Sidebar, Unified has a switch for each row.
+
+**Every account has its own Filtered Folders and Tags.** Under each account's Folders heading: every folder its rules file into, and every tag scoped to that account. They are there whatever the unified section shows.
+
+**Only the unified section, if you like.** "Accounts in the sidebar" (Settings, Sidebar; also "Show Accounts" in the main menu, or Ctrl+Shift+A) hides the account sections altogether.
+
+**The sidebar remembers itself.** Which accounts, folders and sections are open comes back after a restart. "Remember the sidebar layout" turns that off, in which case every launch starts with everything folded up; "Remember icon rail state" decides separately whether the sidebar reopens as the icon rail.
+
+**The icon rail.** Unread counts can be a dot in the accent colour instead of a number. "Fold up expanded items" makes the items you tick start folded whenever the sidebar collapses to the rail; a long-press in the rail still expands or collapses any of them, and the full sidebar comes back exactly as you left it. The rail has no chevron buttons any more: long-press an icon instead (the full sidebar keeps its chevrons and takes the long-press too). Two headings that sat slightly off-centre in the rail are centred.
+
+**Faster.** Switching folders, including into the combined views, now paints in tens of milliseconds rather than several hundred, whatever the size of the mailbox, and Settings opens in tens of milliseconds rather than a second or more (with many accounts, several seconds). Sent folders no longer show an unread chip, tag rows line up with the filtered folder rows, and the Settings window switches sections without a fade.
+
 ## What's new in 1.26.1-beta.1
 
 Catch-up with stable 1.26.0. Everything listed under 1.26.0 below, on the beta channel.

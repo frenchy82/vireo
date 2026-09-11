@@ -1,5 +1,112 @@
 # Changelog
 
+## 1.27.0-beta.1 — 2026-09-10
+
+A preview of 1.27.0: the unified section grows into its own thing, the
+sidebar remembers itself, the message list and the Settings window open
+in tens of milliseconds, and list previews read the charset they were
+sent in (#159).
+
+- **List previews in the right charset** (#159, @7system7). The preview
+  line under a subject read the first part's bytes as UTF-8, so an
+  `iso-8859-2` body showed a replacement character per accented letter
+  while the reader was fine. The summary fetch now asks for
+  `BODY.PEEK[1.MIME]` alongside the slice; `preview_from_part` works on
+  bytes, transfer-decodes first and reads the text in the declared
+  charset through mail-parser's table (`decode_text`), UTF-8 and ASCII
+  directly. Parts inside a nested multipart use their own Content-Type
+  (folded headers unfolded, `mime_header`). A slice cut mid-character
+  drops the fragment; undeclared 8-bit text falls back to Windows-1252.
+  A first part that is a file (photo mail) yields an empty preview and
+  hands off to the `BODY[TEXT]` retry (`retry_missing_previews`, now
+  shared), which tolerates a MIME preamble; cached rows still holding
+  replacement characters are re-read up to 12 per folder load
+  (`redecode_garbled_previews`).
+- **Unified section.** Starred, Sent and Drafts rows join All Inboxes,
+  each built by one builder (`UnifiedRow`, `build_unified_row`): the
+  header opens the merged view, the caret (or a long-press) opens the
+  accounts' own folders of that kind. The unified view merges a set of
+  (account, folder) slices (`UnifiedView::{Kind, Filtered}`,
+  `unified_slices`) rather than one folder per account, carried through
+  load, refresh, mark-read, index and background-sync paths. Filtered
+  Folders and Tags placed "In the unified section" are unified rows too;
+  their headers open every rule's folder merged and every tagged message
+  (`tag_view` keyword `None`). "Above" and "Below the accounts" keep the
+  heading style. Sent wears no unread chip anywhere. The section heads
+  the scrolling sidebar rather than the pinned area (it can stand taller
+  than a short window), and its rows stack with no gap (`.unified-item`).
+- **Per-account Filtered Folders and Tags** under each account's Folders
+  heading, whatever the unified section shows: every rule's destination
+  (`account_filtered_folders`) and every tag scoped to that account
+  (`TagSelected { account }`; the cache's keyword query was already
+  per-account). Section widgets are keyed by `Slot::{Unified,
+  Account(id)}`.
+- **Settings → Sidebar** is three groups. "Sidebar": "Accounts in the
+  sidebar" (`show_accounts`, also the main menu's "Show Accounts" check
+  item, a stateful `app.show-accounts` action, and Ctrl+Shift+A), chevron
+  placement, Attachments/Contacts rows, hover-expand, "Remember the
+  sidebar layout" (`remember_sidebar`; off starts every launch with every
+  account and section folded, accounts folded as they arrive in
+  `SetAccount`) and "Remember icon rail state" (`remember_rail`).
+  "Unified": a switch per row (`unified_kinds`, `unified_tags`) plus the
+  unread-count switch and the two placement combos. "Icon rail": unread
+  dots (`rail_dots`, a `.rail-dots` style on the rail's containers) and
+  "Fold up expanded items" (`RailFold { enabled, accounts, all_inboxes,
+  starred, sent, drafts, filtered, tags }`), an expander row whose enable
+  switch is the master. Everything defaults to on.
+- **Sidebar layout persisted.** `sidebar.toml` gains `unified_expanded`,
+  `filtered_expanded`, `tags_expanded`, `starred_expanded`,
+  `sent_expanded`, `drafts_expanded`, `filtered_expanded_accounts` and
+  `tags_expanded_accounts`, reported by `SidebarOutput::SectionsOpen` and
+  the per-account toggles.
+- **Icon rail.** The Filtered Folders and Tags headings sat 2px left of
+  every other rail item (a padding rule meant for the full sidebar);
+  fixed with a rail-scoped rule. "Fold up expanded items" is a view of
+  the rail, not a change to what is saved: while collapsed, ticked items
+  start folded; anything opened or folded in the rail — a long-press on a
+  unified row, a click on an account avatar — lands in the rail's own
+  `rail_open`/`rail_open_accounts` states, cleared whenever the sidebar
+  changes width, so the full sidebar comes back exactly as it was left.
+  The rail carries no chevron buttons any more; the tooltip says
+  "Long-press to expand or collapse", and the long-press works in the
+  full sidebar too, alongside the chevrons.
+- **Tag rows** indent like the Filtered Folders rows (the same leaf
+  expander slot) and use regular weight.
+- **Message list speed.** Measured with a 15,000-message demo mailbox
+  (`VIREO_DEMO_BULK`), a switch into a unified view took 300–600ms: 200
+  row widgets built at 1.5ms each, the previous 200 destroyed first, two
+  or three times per switch. Now: rebuild requests coalesce
+  (`queue_rebuild`, one rebuild per main-loop pass ahead of GTK's
+  layout); the first 20 rows build synchronously and the rest in idle
+  chunks (`fill_rows`, `row_send` guards indices, `flush_rows` before
+  structural edits); a page switch hands the pane a fresh list box and
+  retires the old rows at idle (`discard_rows`, `wire_list`); the row's
+  eleven action-palette buttons build on first open (`build_palette`,
+  0.9ms per row from 1.5); "load more" appends when the existing rows are
+  unchanged (`row_sigs`). An arriving folder list identical to the held
+  one no longer re-threads or re-emits; a unified view seeds missing
+  slices from the on-disk index when it opens. Warm switch ≈55ms, cold
+  ≈40ms. `VIREO_SHOWCASE_UNIFIED=sent|starred|drafts|filtered|tags`
+  drives the rows in the showcase; timings log at debug level.
+- **Settings window speed.** Opening took about a second (reportedly
+  several with eight or more accounts): every account's passwords were
+  read from the keyring first, the icon gallery decoded the catalogue,
+  the dictionary list read directories, the OpenPGP page ran gpg, the
+  signature editor's WebKit view was created, and the stack measured
+  every page. Passwords load when an account's editor opens, off the
+  main thread (`AccountSecrets`, with a sync fallback at Save); the
+  gallery (`app_icon::texture` now cached), dictionaries and gpg probe
+  run after the first paint at low priority; the signature editor and
+  the editor page mount on first use; the stacks are non-homogeneous and
+  unshown pages join after the first paint; the window is built hidden
+  1.5 s after startup and kept (`set_hide_on_close`), the accounts panel
+  rebuilt on reopen only when its inputs changed (`accounts_seed`). First
+  open ≈170ms, reopen ≈70ms. The settings and account section stacks
+  switch without a crossfade.
+- **Showcase hooks**: `VIREO_SHOWCASE_SETTINGS_REOPEN`, `VIREO_SHOWCASE_RAIL`,
+  `VIREO_SHOWCASE_TOGGLE`; `FolderKind` derives `Hash`, `Message`
+  derives `PartialEq`.
+
 ## 1.26.1-beta.1 — 2026-09-10
 
 Catch-up with stable 1.26.0: the beta channel carries exactly the 1.26.0

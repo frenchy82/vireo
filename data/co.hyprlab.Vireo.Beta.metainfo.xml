@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.27.0-beta.1" date="2026-09-10" type="development">
+      <description>
+        <p>Preview of 1.27.0: unified Starred, Sent, Drafts, Filtered Folders and Tags rows with combined views; per-account filtered folders and tags; a remembered sidebar layout; icon-rail dots and fold-up options; previews read their charset (#159); folder switches and Settings open far faster.</p>
+      </description>
+    </release>
     <release version="1.26.1-beta.1" date="2026-09-10" type="development">
       <description>
         <p>Catch-up with stable 1.26.0: a default sender for new messages, number keys for tags, the services' own marks throughout Settings and the wizard, the Cloud Storage panel reworked, the Settings window reopening on the last category, a fuller settings backup, French updated.</p>
