@@ -67,7 +67,7 @@ pub struct PrefInit {
     pub show_attachments: bool,
     pub show_contacts: bool,
     pub show_unified: bool,
-    pub unified_chip: bool,
+    pub unified_chips: crate::config::UnifiedChips,
     pub unified_filtered: bool,
     pub unified_kinds: crate::config::UnifiedKinds,
     pub unified_tags: bool,
@@ -202,6 +202,8 @@ pub struct Preferences {
     /// The unified Starred / Sent / Drafts switches, kept whole so each
     /// toggle can hand the app the full set.
     unified_kinds: crate::config::UnifiedKinds,
+    /// The unified rows' unread-chip switches, likewise kept whole.
+    unified_chips: crate::config::UnifiedChips,
     /// Mirrors the "Accounts in the sidebar" switch, which the main menu
     /// can flip too.
     show_accounts: bool,
@@ -332,11 +334,16 @@ pub enum PrefInput {
     ToggleAttachmentsRow(bool),
     ToggleContactsRow(bool),
     ToggleShowUnified(bool),
-    ToggleUnifiedChip(bool),
+    ToggleUnifiedChipAllInboxes(bool),
+    ToggleUnifiedChipStarred(bool),
+    ToggleUnifiedChipDrafts(bool),
+    ToggleUnifiedChipArchive(bool),
+    ToggleUnifiedChipFiltered(bool),
     ToggleUnifiedFiltered(bool),
     ToggleUnifiedStarred(bool),
     ToggleUnifiedSent(bool),
     ToggleUnifiedDrafts(bool),
+    ToggleUnifiedArchive(bool),
     ToggleUnifiedTags(bool),
     ToggleShowAccounts(bool),
     /// The main menu flipped "Show Accounts": the switch follows.
@@ -354,6 +361,7 @@ pub enum PrefInput {
     ToggleRailFoldStarred(bool),
     ToggleRailFoldSent(bool),
     ToggleRailFoldDrafts(bool),
+    ToggleRailFoldArchive(bool),
     ToggleRailFoldFiltered(bool),
     ToggleRailFoldTags(bool),
     ChangePreviewLines(u32),
@@ -388,9 +396,10 @@ pub enum PrefInput {
     SelectPage(String),
     /// Select a category by id from outside (the app's showcase hook).
     ShowPageById(String),
-    /// The accounts editor subpage opened/closed — hide/show the shared
-    /// header so the editor's own header takes over the window.
-    EditorOpen(bool),
+    /// An accounts-panel editor subpage (account, filter or tag) opened on
+    /// the named settings page, or closed — hide/show the shared header so
+    /// the editor's own header takes over the window.
+    EditorOpen(Option<&'static str>),
     /// The Cloud Storage page's account editor is up (or gone).
     CloudEditorOpen(bool),
 }
@@ -431,7 +440,7 @@ pub enum PrefOutput {
     SetAttachmentsRow(bool),
     SetContactsRow(bool),
     SetShowUnified(bool),
-    SetUnifiedChip(bool),
+    SetUnifiedChips(crate::config::UnifiedChips),
     SetUnifiedFiltered(bool),
     SetUnifiedKinds(crate::config::UnifiedKinds),
     SetUnifiedTags(bool),
@@ -487,11 +496,21 @@ impl Preferences {
     /// or stay. Staying puts the selection back on Mail Accounts.
     fn ask_to_leave_editor(&self, id: &str, sender: &ComponentSender<Self>) {
         let parent = relm4::main_application().active_window();
-        let dialog = adw::MessageDialog::new(
-            parent.as_ref(),
-            Some(&i18n("Save the account?")),
-            Some(&i18n("The account editor is open. Save what you changed, or discard it, before moving on.")),
-        );
+        let (heading, body) = match self.editor_page {
+            "filters" => (
+                i18n("Save the filter?"),
+                i18n("The filter editor is open. Save what you changed, or discard it, before moving on."),
+            ),
+            "tags" => (
+                i18n("Save the tag?"),
+                i18n("The tag editor is open. Save what you changed, or discard it, before moving on."),
+            ),
+            _ => (
+                i18n("Save the account?"),
+                i18n("The account editor is open. Save what you changed, or discard it, before moving on."),
+            ),
+        };
+        let dialog = adw::MessageDialog::new(parent.as_ref(), Some(&heading), Some(&body));
         dialog.add_response("cancel", &i18n("Cancel"));
         dialog.add_response("discard", &i18n("Discard"));
         dialog.add_response("save", &i18n("Save"));
@@ -513,7 +532,7 @@ impl Preferences {
                             let _ = c.send(crate::ui::cloud_accounts::CloudAccountsInput::SaveClicked);
                         }
                     } else {
-                        let _ = accounts.send(crate::ui::accounts::AccountsInput::Save);
+                        let _ = accounts.send(crate::ui::accounts::AccountsInput::SaveOpenPage);
                     }
                     s.input(PrefInput::ShowPageById(id.clone()));
                 }
@@ -777,7 +796,7 @@ impl Component for Preferences {
                                     #[name = "chevron_side_row"]
                                     adw::ComboRow {
                                         set_title: &i18n("Chevron placement"),
-                                        set_subtitle: &i18n("Which side of All Inboxes and the account rows \
+                                        set_subtitle: &i18n("Which side of Inboxes and the account rows \
                                                        their expand/collapse chevrons sit on."),
                                         connect_selected_notify[sender] => move |row| {
                                             sender.input(PrefInput::ChangeChevronSide(row.selected()));
@@ -848,24 +867,12 @@ impl Component for Preferences {
 
                                     #[name = "show_unified_row"]
                                     adw::SwitchRow {
-                                        set_title: &i18n("All Inboxes"),
+                                        set_title: &i18n("Inboxes"),
                                         set_subtitle: &i18n("A unified inbox combining every account, at the top \
                                                        of the sidebar. Only shown with more than one \
                                                        account."),
                                         connect_active_notify[sender] => move |row| {
                                             sender.input(PrefInput::ToggleShowUnified(row.is_active()));
-                                        },
-                                    },
-
-                                    #[name = "unified_chip_row"]
-                                    adw::SwitchRow {
-                                        #[watch]
-                                        set_sensitive: model.show_unified,
-                                        set_title: &i18n("All Inboxes unread count"),
-                                        set_subtitle: &i18n("Show the combined unread chip next to All Inboxes \
-                                                       while its per-account list is folded up."),
-                                        connect_active_notify[sender] => move |row| {
-                                            sender.input(PrefInput::ToggleUnifiedChip(row.is_active()));
                                         },
                                     },
 
@@ -896,13 +903,20 @@ impl Component for Preferences {
                                         },
                                     },
 
+                                    #[name = "unified_archive_row"]
+                                    adw::SwitchRow {
+                                        set_title: &i18n("Archive"),
+                                        set_subtitle: &i18n("Every account's archive as one list, opening to each account's own."),
+                                        connect_active_notify[sender] => move |row| {
+                                            sender.input(PrefInput::ToggleUnifiedArchive(row.is_active()));
+                                        },
+                                    },
+
                                     #[name = "unified_filtered_row"]
                                     adw::SwitchRow {
-                                        set_title: &i18n("Filtered Folders section"),
-                                        set_subtitle: &i18n("List the folders your filter rules file into in a \
-                                                       collapsible section. Each rule chooses whether its \
-                                                       folder appears there; this switch hides the section \
-                                                       altogether."),
+                                        set_title: &i18n("Filters"),
+                                        set_subtitle: &i18n("List every folder your filter rules file into in a \
+                                                       collapsible section of the unified view."),
                                         connect_active_notify[sender] => move |row| {
                                             sender.input(PrefInput::ToggleUnifiedFiltered(row.is_active()));
                                         },
@@ -918,10 +932,55 @@ impl Component for Preferences {
                                         },
                                     },
 
+                                    #[name = "unified_chips_row"]
+                                    adw::ExpanderRow {
+                                        set_title: &i18n("Unread counts"),
+                                        set_subtitle: &i18n("Which unified rows show their combined unread \
+                                                       chip while folded up. Expanded, the rows beneath \
+                                                       carry the counts. Sent never shows one."),
+                                        set_expanded: true,
+
+                                        #[name = "unified_chip_all_inboxes_row"]
+                                        add_row = &adw::SwitchRow {
+                                            set_title: &i18n("Inboxes"),
+                                            connect_active_notify[sender] => move |row| {
+                                                sender.input(PrefInput::ToggleUnifiedChipAllInboxes(row.is_active()));
+                                            },
+                                        },
+                                        #[name = "unified_chip_starred_row"]
+                                        add_row = &adw::SwitchRow {
+                                            set_title: &i18n("Starred"),
+                                            connect_active_notify[sender] => move |row| {
+                                                sender.input(PrefInput::ToggleUnifiedChipStarred(row.is_active()));
+                                            },
+                                        },
+                                        #[name = "unified_chip_drafts_row"]
+                                        add_row = &adw::SwitchRow {
+                                            set_title: &i18n("Drafts"),
+                                            connect_active_notify[sender] => move |row| {
+                                                sender.input(PrefInput::ToggleUnifiedChipDrafts(row.is_active()));
+                                            },
+                                        },
+                                        #[name = "unified_chip_archive_row"]
+                                        add_row = &adw::SwitchRow {
+                                            set_title: &i18n("Archive"),
+                                            connect_active_notify[sender] => move |row| {
+                                                sender.input(PrefInput::ToggleUnifiedChipArchive(row.is_active()));
+                                            },
+                                        },
+                                        #[name = "unified_chip_filtered_row"]
+                                        add_row = &adw::SwitchRow {
+                                            set_title: &i18n("Filters"),
+                                            connect_active_notify[sender] => move |row| {
+                                                sender.input(PrefInput::ToggleUnifiedChipFiltered(row.is_active()));
+                                            },
+                                        },
+                                    },
+
                                     #[name = "filtered_placement_row"]
                                     adw::ComboRow {
-                                        set_title: &i18n("Filtered Folders placement"),
-                                        set_subtitle: &i18n("In the unified section, as a row like All Inboxes \
+                                        set_title: &i18n("Filters placement"),
+                                        set_subtitle: &i18n("In the unified section, as a row like Inboxes \
                                                        whose caret opens the folders; or above or below \
                                                        the accounts as a heading with its own list."),
                                         connect_selected_notify[sender] => move |row| {
@@ -981,8 +1040,8 @@ impl Component for Preferences {
                                         },
                                         #[name = "rail_fold_all_inboxes_row"]
                                         add_row = &adw::SwitchRow {
-                                            set_title: &i18n("All Inboxes"),
-                                            set_subtitle: &i18n("The account list under All Inboxes."),
+                                            set_title: &i18n("Inboxes"),
+                                            set_subtitle: &i18n("The account list under Inboxes."),
                                             connect_active_notify[sender] => move |row| {
                                                 sender.input(PrefInput::ToggleRailFoldAllInboxes(row.is_active()));
                                             },
@@ -1011,10 +1070,18 @@ impl Component for Preferences {
                                                 sender.input(PrefInput::ToggleRailFoldDrafts(row.is_active()));
                                             },
                                         },
+                                        #[name = "rail_fold_archive_row"]
+                                        add_row = &adw::SwitchRow {
+                                            set_title: &i18n("Archive"),
+                                            set_subtitle: &i18n("The account list under the unified Archive row."),
+                                            connect_active_notify[sender] => move |row| {
+                                                sender.input(PrefInput::ToggleRailFoldArchive(row.is_active()));
+                                            },
+                                        },
                                         #[name = "rail_fold_filtered_row"]
                                         add_row = &adw::SwitchRow {
-                                            set_title: &i18n("Filtered Folders"),
-                                            set_subtitle: &i18n("The folders under the Filtered Folders row."),
+                                            set_title: &i18n("Filters"),
+                                            set_subtitle: &i18n("The folders under the Filters row."),
                                             connect_active_notify[sender] => move |row| {
                                                 sender.input(PrefInput::ToggleRailFoldFiltered(row.is_active()));
                                             },
@@ -1593,6 +1660,7 @@ impl Component for Preferences {
             notifications: init.notifications,
             show_unified: init.show_unified,
             unified_kinds: init.unified_kinds,
+            unified_chips: init.unified_chips,
             show_accounts: init.show_accounts,
             rail_fold: init.rail_fold,
             swipe_enabled: init.swipe_enabled,
@@ -1679,11 +1747,16 @@ impl Component for Preferences {
         widgets.show_attachments_row.set_active(init.show_attachments);
         widgets.show_contacts_row.set_active(init.show_contacts);
         widgets.show_unified_row.set_active(init.show_unified);
-        widgets.unified_chip_row.set_active(init.unified_chip);
+        widgets.unified_chip_all_inboxes_row.set_active(init.unified_chips.all_inboxes);
+        widgets.unified_chip_starred_row.set_active(init.unified_chips.starred);
+        widgets.unified_chip_drafts_row.set_active(init.unified_chips.drafts);
+        widgets.unified_chip_archive_row.set_active(init.unified_chips.archive);
+        widgets.unified_chip_filtered_row.set_active(init.unified_chips.filtered);
         widgets.unified_filtered_row.set_active(init.unified_filtered);
         widgets.unified_starred_row.set_active(init.unified_kinds.starred);
         widgets.unified_sent_row.set_active(init.unified_kinds.sent);
         widgets.unified_drafts_row.set_active(init.unified_kinds.drafts);
+        widgets.unified_archive_row.set_active(init.unified_kinds.archive);
         widgets.unified_tags_row.set_active(init.unified_tags);
         for (row, placement) in [
             (&widgets.filtered_placement_row, init.filtered_placement),
@@ -1708,6 +1781,7 @@ impl Component for Preferences {
         widgets.rail_fold_starred_row.set_active(init.rail_fold.starred);
         widgets.rail_fold_sent_row.set_active(init.rail_fold.sent);
         widgets.rail_fold_drafts_row.set_active(init.rail_fold.drafts);
+        widgets.rail_fold_archive_row.set_active(init.rail_fold.archive);
         widgets.rail_fold_filtered_row.set_active(init.rail_fold.filtered);
         widgets.rail_fold_tags_row.set_active(init.rail_fold.tags);
         let preview_labels_owned = [i18n("Off"), i18n("1 line"), i18n("2 lines"), i18n("3 lines")];
@@ -2219,8 +2293,25 @@ impl Component for Preferences {
                 self.show_unified = on;
                 let _ = sender.output(PrefOutput::SetShowUnified(on));
             }
-            PrefInput::ToggleUnifiedChip(on) => {
-                let _ = sender.output(PrefOutput::SetUnifiedChip(on));
+            PrefInput::ToggleUnifiedChipAllInboxes(on) => {
+                self.unified_chips.all_inboxes = on;
+                let _ = sender.output(PrefOutput::SetUnifiedChips(self.unified_chips));
+            }
+            PrefInput::ToggleUnifiedChipStarred(on) => {
+                self.unified_chips.starred = on;
+                let _ = sender.output(PrefOutput::SetUnifiedChips(self.unified_chips));
+            }
+            PrefInput::ToggleUnifiedChipDrafts(on) => {
+                self.unified_chips.drafts = on;
+                let _ = sender.output(PrefOutput::SetUnifiedChips(self.unified_chips));
+            }
+            PrefInput::ToggleUnifiedChipArchive(on) => {
+                self.unified_chips.archive = on;
+                let _ = sender.output(PrefOutput::SetUnifiedChips(self.unified_chips));
+            }
+            PrefInput::ToggleUnifiedChipFiltered(on) => {
+                self.unified_chips.filtered = on;
+                let _ = sender.output(PrefOutput::SetUnifiedChips(self.unified_chips));
             }
             PrefInput::ToggleUnifiedFiltered(on) => {
                 let _ = sender.output(PrefOutput::SetUnifiedFiltered(on));
@@ -2235,6 +2326,10 @@ impl Component for Preferences {
             }
             PrefInput::ToggleUnifiedDrafts(on) => {
                 self.unified_kinds.drafts = on;
+                let _ = sender.output(PrefOutput::SetUnifiedKinds(self.unified_kinds));
+            }
+            PrefInput::ToggleUnifiedArchive(on) => {
+                self.unified_kinds.archive = on;
                 let _ = sender.output(PrefOutput::SetUnifiedKinds(self.unified_kinds));
             }
             PrefInput::ToggleUnifiedTags(on) => {
@@ -2302,6 +2397,10 @@ impl Component for Preferences {
             }
             PrefInput::ToggleRailFoldDrafts(on) => {
                 self.rail_fold.drafts = on;
+                let _ = sender.output(PrefOutput::SetRailFold(self.rail_fold));
+            }
+            PrefInput::ToggleRailFoldArchive(on) => {
+                self.rail_fold.archive = on;
                 let _ = sender.output(PrefOutput::SetRailFold(self.rail_fold));
             }
             PrefInput::ToggleRailFoldFiltered(on) => {
@@ -2387,11 +2486,11 @@ impl Component for Preferences {
                 }
             }
             PrefInput::ShowPageById(id) => self.select_row(&id),
-            PrefInput::EditorOpen(open) => {
-                self.editor_open = open;
-                self.editor_page = "accounts";
+            PrefInput::EditorOpen(page) => {
+                self.editor_open = page.is_some();
+                self.editor_page = page.unwrap_or("accounts");
                 if let Some(header) = &self.host_header {
-                    header.set_visible(!open);
+                    header.set_visible(page.is_none());
                 }
             }
             PrefInput::CloudEditorOpen(open) => {

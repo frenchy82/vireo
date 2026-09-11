@@ -905,14 +905,18 @@ struct PrivacyFile {
     /// (it only ever appears with more than one enabled account).
     #[serde(default = "default_show_unified")]
     show_unified: bool,
-    /// Whether the "All Inboxes" row wears its total-unread chip while its
-    /// per-account sub-list is collapsed (expanded, the sub-list carries the
-    /// counts granularly and the total is never shown).
+    /// The old single switch for All Inboxes' unread chip, kept so a file
+    /// written before `unified_chips` still reads as it was set.
     #[serde(default = "default_unified_chip")]
     unified_chip: bool,
-    /// Whether All Inboxes lists the folders that filter rules file into (for
-    /// rules whose "Show under All Inboxes" switch is on) in a collapsible
-    /// section of its own. Off hides that section whatever the rules say.
+    /// Which unified rows wear their total-unread chip while folded up
+    /// (expanded, the rows beneath carry the counts and the total is never
+    /// shown). One switch per row: All Inboxes, Starred, Drafts, Archive,
+    /// Filtered Folders. Sent never counts.
+    #[serde(default)]
+    unified_chips: UnifiedChips,
+    /// Whether the unified section lists the folders that filter rules file
+    /// into, in a Filtered Folders section of its own. Off hides the section.
     #[serde(default = "default_unified_filtered")]
     unified_filtered: bool,
     /// The unified section's Starred / Sent / Drafts rows, one switch each
@@ -1064,6 +1068,7 @@ impl Default for PrivacyFile {
             show_remote_banner: default_show_remote_banner(),
             show_unified: default_show_unified(),
             unified_chip: default_unified_chip(),
+            unified_chips: UnifiedChips::default(),
             unified_filtered: default_unified_filtered(),
             unified_kinds: UnifiedKinds::default(),
             unified_tags: true,
@@ -1242,8 +1247,13 @@ pub fn load_show_unified() -> bool {
     load_privacy().show_unified
 }
 
-pub fn load_unified_chip() -> bool {
-    load_privacy().unified_chip
+/// The unified rows' unread-chip switches. A file from before the
+/// per-row switches carried one switch, for All Inboxes; it still counts.
+pub fn load_unified_chips() -> UnifiedChips {
+    let p = load_privacy();
+    let mut chips = p.unified_chips;
+    chips.all_inboxes = chips.all_inboxes && p.unified_chip;
+    chips
 }
 
 pub fn load_unified_filtered() -> bool {
@@ -1273,19 +1283,59 @@ pub struct UnifiedKinds {
     pub sent: bool,
     #[serde(default = "default_on")]
     pub drafts: bool,
+    #[serde(default = "default_on")]
+    pub archive: bool,
 }
 
 impl Default for UnifiedKinds {
     fn default() -> Self {
-        UnifiedKinds { starred: true, sent: true, drafts: true }
+        UnifiedKinds { starred: true, sent: true, drafts: true, archive: true }
+    }
+}
+
+/// Which unified rows show their total-unread chip while folded up
+/// (Settings → Sidebar → Unified → Unread counts). All on until switched
+/// off; Sent has no chip anywhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnifiedChips {
+    #[serde(default = "default_on")]
+    pub all_inboxes: bool,
+    #[serde(default = "default_on")]
+    pub starred: bool,
+    #[serde(default = "default_on")]
+    pub drafts: bool,
+    #[serde(default = "default_on")]
+    pub archive: bool,
+    #[serde(default = "default_on")]
+    pub filtered: bool,
+}
+
+impl Default for UnifiedChips {
+    fn default() -> Self {
+        UnifiedChips { all_inboxes: true, starred: true, drafts: true, archive: true, filtered: true }
+    }
+}
+
+impl UnifiedChips {
+    /// Whether the row for `kind` shows its chip (Sent never does).
+    pub fn has(self, kind: crate::models::FolderKind) -> bool {
+        use crate::models::FolderKind::*;
+        match kind {
+            Inbox => self.all_inboxes,
+            Starred => self.starred,
+            Drafts => self.drafts,
+            Archive => self.archive,
+            _ => false,
+        }
     }
 }
 
 impl UnifiedKinds {
-    pub const NONE: UnifiedKinds = UnifiedKinds { starred: false, sent: false, drafts: false };
+    pub const NONE: UnifiedKinds =
+        UnifiedKinds { starred: false, sent: false, drafts: false, archive: false };
 
     pub fn any(self) -> bool {
-        self.starred || self.sent || self.drafts
+        self.starred || self.sent || self.drafts || self.archive
     }
 
     /// Whether the row for `kind` is on (only Starred, Sent and Drafts have
@@ -1296,6 +1346,7 @@ impl UnifiedKinds {
             Starred => self.starred,
             Sent => self.sent,
             Drafts => self.drafts,
+            Archive => self.archive,
             _ => false,
         }
     }
@@ -1303,7 +1354,7 @@ impl UnifiedKinds {
     /// The kinds with a row, in sidebar order.
     pub fn listed(self) -> Vec<crate::models::FolderKind> {
         use crate::models::FolderKind::*;
-        [Starred, Sent, Drafts].into_iter().filter(|k| self.has(*k)).collect()
+        [Starred, Sent, Drafts, Archive].into_iter().filter(|k| self.has(*k)).collect()
     }
 }
 
@@ -1380,12 +1431,6 @@ pub struct FilterRule {
     /// destinations never count, whatever this says.
     #[serde(default = "count_unread_default")]
     pub count_unread: bool,
-    /// Whether the destination folder is listed under All Inboxes, in its
-    /// collapsible "Filtered Folders" section, so filed mail is a click away
-    /// from the unified view. Off by default: a rule opts its folder in.
-    /// Settings → Sidebar can switch the whole section off regardless.
-    #[serde(default)]
-    pub show_in_unified: bool,
 }
 
 fn count_unread_default() -> bool {
@@ -1805,6 +1850,8 @@ pub struct RailFold {
     pub sent: bool,
     #[serde(default = "default_on")]
     pub drafts: bool,
+    #[serde(default = "default_on")]
+    pub archive: bool,
     /// The Filtered Folders section.
     #[serde(default = "default_on")]
     pub filtered: bool,
@@ -1826,6 +1873,7 @@ impl Default for RailFold {
             starred: true,
             sent: true,
             drafts: true,
+            archive: true,
             filtered: true,
             tags: true,
         }
@@ -1848,6 +1896,7 @@ impl RailFold {
                 Starred => self.starred,
                 Sent => self.sent,
                 Drafts => self.drafts,
+                Archive => self.archive,
                 _ => false,
             }
     }
@@ -1963,7 +2012,7 @@ pub fn save_privacy(
     rail_fold: RailFold,
     app_theme: AppTheme,
     show_unified: bool,
-    unified_chip: bool,
+    unified_chips: UnifiedChips,
     unified_filtered: bool,
     unified_kinds: UnifiedKinds,
     unified_tags: bool,
@@ -2037,7 +2086,8 @@ pub fn save_privacy(
         rail_fold,
         app_theme,
         show_unified,
-        unified_chip,
+        unified_chip: unified_chips.all_inboxes,
+        unified_chips,
         unified_filtered,
         unified_kinds,
         unified_tags,
@@ -2095,6 +2145,8 @@ struct SidebarFile {
     sent_expanded: bool,
     #[serde(default)]
     drafts_expanded: bool,
+    #[serde(default)]
+    archive_expanded: bool,
     /// Account emails whose own Filtered Folders / Tags sections are open
     /// (closed by default, like their custom folders).
     #[serde(default)]
@@ -2130,6 +2182,7 @@ pub struct SidebarState {
     pub starred_expanded: bool,
     pub sent_expanded: bool,
     pub drafts_expanded: bool,
+    pub archive_expanded: bool,
     /// Account emails whose own Filtered Folders / Tags sections are open.
     pub filtered_expanded_accounts: Vec<String>,
     pub tags_expanded_accounts: Vec<String>,
@@ -2155,6 +2208,7 @@ pub fn load_sidebar_state() -> SidebarState {
             starred_expanded: s.starred_expanded,
             sent_expanded: s.sent_expanded,
             drafts_expanded: s.drafts_expanded,
+            archive_expanded: s.archive_expanded,
             filtered_expanded_accounts: s.filtered_expanded_accounts,
             tags_expanded_accounts: s.tags_expanded_accounts,
         })
@@ -2180,6 +2234,7 @@ pub fn save_sidebar_state(state: &SidebarState) {
         starred_expanded: state.starred_expanded,
         sent_expanded: state.sent_expanded,
         drafts_expanded: state.drafts_expanded,
+        archive_expanded: state.archive_expanded,
         filtered_expanded_accounts: state.filtered_expanded_accounts.clone(),
         tags_expanded_accounts: state.tags_expanded_accounts.clone(),
     };
@@ -2667,7 +2722,6 @@ mod filter_tests {
             dest_path: "Archive".into(),
             tag: String::new(),
             count_unread: true,
-            show_in_unified: false,
         }
     }
 

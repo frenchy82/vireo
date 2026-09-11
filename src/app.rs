@@ -312,6 +312,7 @@ pub struct AppModel {
     starred_expanded: bool,
     sent_expanded: bool,
     drafts_expanded: bool,
+    archive_expanded: bool,
     /// Account emails whose own Filtered Folders / Tags sections are open.
     filtered_expanded_accounts: Vec<String>,
     tags_expanded_accounts: Vec<String>,
@@ -429,7 +430,7 @@ pub struct AppModel {
     /// Whether the sidebar offers the unified "All Inboxes" section at all.
     show_unified_pref: bool,
     /// Whether the collapsed "All Inboxes" row wears its total-unread chip.
-    unified_chip: bool,
+    unified_chips: config::UnifiedChips,
     /// Whether All Inboxes lists the folders that opted-in filter rules file
     /// into, in its "Filtered Folders" section (Settings → Sidebar).
     unified_filtered: bool,
@@ -460,6 +461,14 @@ pub struct AppModel {
     /// `selected`, never with: the account it is scoped to (`None` spans
     /// every account) and the keyword (`None` for every tag at once).
     tag_view: Option<(Option<u32>, Option<String>)>,
+    /// Each tag view's last result, by (scope, keyword): shown the moment
+    /// the view opens, while a fresh read of the index runs off the main
+    /// thread and replaces it only if it differs.
+    tag_view_cache: HashMap<(Option<u32>, Option<String>), Vec<Message>>,
+    /// A read of the index for the open tag view is in flight; one more
+    /// asked for meanwhile runs when it lands.
+    tag_view_loading: bool,
+    tag_view_dirty: bool,
     /// The tag colours as `.tag-<keyword>` classes, app-wide (the list's
     /// chips, the sidebar's rows, the menus' swatches).
     tag_provider: gtk::CssProvider,
@@ -786,7 +795,7 @@ pub enum AppMsg {
     SetAttachmentsRow(bool),
     SetContactsRow(bool),
     SetShowUnified(bool),
-    SetUnifiedChip(bool),
+    SetUnifiedChips(config::UnifiedChips),
     SetUnifiedFiltered(bool),
     /// The unified section's Starred / Sent / Drafts rows.
     SetUnifiedKinds(config::UnifiedKinds),
@@ -824,9 +833,13 @@ pub enum AppMsg {
         starred: bool,
         sent: bool,
         drafts: bool,
+        archive: bool,
     },
     /// Preference: the icon rail shows unread dots rather than counts.
     SetRailDots(bool),
+    /// A tag view's rows, read from the index off the main thread: the
+    /// view they answer and, per message, its account and folder path.
+    TagViewLoaded { key: (Option<u32>, Option<String>), rows: Vec<(u32, String, Message)> },
     /// Preference: which sections the icon rail folds up on collapse.
     SetRailFold(config::RailFold),
     /// Preference: the app chrome's theme (follow system / light / dark).
@@ -976,7 +989,7 @@ pub enum AppMsg {
     OpenPreferences,
     ClosePreferences,
     /// The accounts editor subpage opened/closed in the settings window.
-    SettingsEditorOpen(bool),
+    SettingsEditorOpen(Option<&'static str>),
     /// The "settings window opens to" preference changed (true = Accounts).
     SetSettingsOpenAccounts(bool),
     // Worker events (each carries the account it came from)
@@ -1685,6 +1698,7 @@ impl SimpleComponent for AppModel {
         let starred_expanded = sidebar_state.starred_expanded;
         let sent_expanded = sidebar_state.sent_expanded;
         let drafts_expanded = sidebar_state.drafts_expanded;
+        let archive_expanded = sidebar_state.archive_expanded;
 
         // Load accounts, then reconcile against GNOME Online Accounts: drop any
         // imported account GOA no longer has, pause any whose Mail service is
@@ -1738,6 +1752,7 @@ impl SimpleComponent for AppModel {
                 starred_expanded,
                 sent_expanded,
                 drafts_expanded,
+                archive_expanded,
                 show_attachments,
                 show_contacts,
             })
@@ -1771,9 +1786,23 @@ impl SimpleComponent for AppModel {
                 SidebarOutput::ToggleCollapse(id) => AppMsg::ToggleCollapse(id),
                 SidebarOutput::ToggleCustomFolders(id) => AppMsg::ToggleCustomFolders(id),
                 SidebarOutput::CollapsedChanged(collapsed) => AppMsg::SidebarCollapsed(collapsed),
-                SidebarOutput::SectionsOpen { all_inboxes, filtered, tags, starred, sent, drafts } => {
-                    AppMsg::SidebarSectionsOpen { all_inboxes, filtered, tags, starred, sent, drafts }
-                }
+                SidebarOutput::SectionsOpen {
+                    all_inboxes,
+                    filtered,
+                    tags,
+                    starred,
+                    sent,
+                    drafts,
+                    archive,
+                } => AppMsg::SidebarSectionsOpen {
+                    all_inboxes,
+                    filtered,
+                    tags,
+                    starred,
+                    sent,
+                    drafts,
+                    archive,
+                },
                 SidebarOutput::FolderNodeCollapsed { account_id, path, collapsed } => {
                     AppMsg::FolderNodeCollapsed { account_id, path, collapsed }
                 }
@@ -2074,6 +2103,7 @@ impl SimpleComponent for AppModel {
             starred_expanded,
             sent_expanded,
             drafts_expanded,
+            archive_expanded,
             filtered_expanded_accounts,
             tags_expanded_accounts,
             rail_dots: config::load_rail_dots(),
@@ -2127,7 +2157,7 @@ impl SimpleComponent for AppModel {
             thread_newest_first: config::load_thread_newest_first(),
             always_show_recipients: config::load_always_show_recipients(),
             show_unified_pref: config::load_show_unified(),
-            unified_chip: config::load_unified_chip(),
+            unified_chips: config::load_unified_chips(),
             unified_filtered: config::load_unified_filtered(),
             filtered_placement: config::load_filtered_placement(),
             tags_placement: config::load_tags_placement(),
@@ -2150,6 +2180,9 @@ impl SimpleComponent for AppModel {
                 if tags.is_empty() && demo_data { demo_tags() } else { tags }
             },
             tag_view: None,
+            tag_view_cache: HashMap::new(),
+            tag_view_loading: false,
+            tag_view_dirty: false,
             tag_provider: gtk::CssProvider::new(),
             cache: crate::cache::Cache::open().ok(),
             filter_moved: Default::default(),
@@ -3018,6 +3051,7 @@ impl SimpleComponent for AppModel {
                     let pick = move || match which.as_str() {
                         "starred" => SidebarInput::UnifiedKindRowSelected(FolderKind::Starred),
                         "drafts" => SidebarInput::UnifiedKindRowSelected(FolderKind::Drafts),
+                        "archive" => SidebarInput::UnifiedKindRowSelected(FolderKind::Archive),
                         "filtered" => SidebarInput::UnifiedFilteredSelected,
                         "tags" => SidebarInput::UnifiedTagsSelected,
                         _ => SidebarInput::UnifiedKindRowSelected(FolderKind::Sent),
@@ -3050,6 +3084,7 @@ impl SimpleComponent for AppModel {
                     let kind = match which.as_str() {
                         "sent" => FolderKind::Sent,
                         "drafts" => FolderKind::Drafts,
+                        "archive" => FolderKind::Archive,
                         _ => FolderKind::Starred,
                     };
                     let sb = model.sidebar.sender().clone();
@@ -3701,8 +3736,16 @@ impl SimpleComponent for AppModel {
                 }
             }
 
-            AppMsg::SidebarSectionsOpen { all_inboxes, filtered, tags, starred, sent, drafts } => {
-                let now = (all_inboxes, filtered, tags, starred, sent, drafts);
+            AppMsg::SidebarSectionsOpen {
+                all_inboxes,
+                filtered,
+                tags,
+                starred,
+                sent,
+                drafts,
+                archive,
+            } => {
+                let now = (all_inboxes, filtered, tags, starred, sent, drafts, archive);
                 let was = (
                     self.unified_expanded,
                     self.filtered_expanded,
@@ -3710,6 +3753,7 @@ impl SimpleComponent for AppModel {
                     self.starred_expanded,
                     self.sent_expanded,
                     self.drafts_expanded,
+                    self.archive_expanded,
                 );
                 if now != was {
                     self.unified_expanded = all_inboxes;
@@ -3718,6 +3762,7 @@ impl SimpleComponent for AppModel {
                     self.starred_expanded = starred;
                     self.sent_expanded = sent;
                     self.drafts_expanded = drafts;
+                    self.archive_expanded = archive;
                     self.save_sidebar_state();
                 }
             }
@@ -3780,6 +3825,36 @@ impl SimpleComponent for AppModel {
                         .collect();
                     for (account_id, folder_id, path) in reqs {
                         self.send_to(account_id, MailRequest::LoadMessages { folder_id, path });
+                    }
+                }
+                CtxAction::EditFilter { account_id, path } => {
+                    // The first rule filing into this folder, in the
+                    // Filters page's editor.
+                    let email = self.email_of(account_id);
+                    let index = email.and_then(|email| {
+                        self.filters.iter().position(|r| {
+                            r.account_email.eq_ignore_ascii_case(&email) && r.dest_path == path
+                        })
+                    });
+                    if let Some(i) = index {
+                        self.open_settings_window(&sender, true, false);
+                        if let Some(p) = &self.prefs {
+                            p.emit(PrefInput::ShowPageById("filters".to_string()));
+                        }
+                        if let Some(acc) = &self.accounts_win {
+                            acc.emit(crate::ui::accounts::AccountsInput::EditFilter(i));
+                        }
+                    }
+                }
+                CtxAction::EditTag(keyword) => {
+                    if let Some(i) = self.tags.iter().position(|t| t.keyword == keyword) {
+                        self.open_settings_window(&sender, true, false);
+                        if let Some(p) = &self.prefs {
+                            p.emit(PrefInput::ShowPageById("tags".to_string()));
+                        }
+                        if let Some(acc) = &self.accounts_win {
+                            acc.emit(crate::ui::accounts::AccountsInput::EditTag(i));
+                        }
                     }
                 }
                 CtxAction::OpenAccountSettings(account_id) => {
@@ -4897,9 +4972,9 @@ impl SimpleComponent for AppModel {
                 }
             }
 
-            AppMsg::SetUnifiedChip(show) => {
-                if self.unified_chip != show {
-                    self.unified_chip = show;
+            AppMsg::SetUnifiedChips(chips) => {
+                if self.unified_chips != chips {
+                    self.unified_chips = chips;
                     self.save_settings();
                     self.rebuild_sidebar();
                 }
@@ -5665,6 +5740,9 @@ impl SimpleComponent for AppModel {
             AppMsg::SetTags(tags) => {
                 config::save_tags(&tags);
                 self.tags = tags;
+                // The unified Tags view spans every tag: what it holds is
+                // stale once the set changes.
+                self.tag_view_cache.retain(|(_, kw), _| kw.is_some());
                 self.refresh_tag_css();
                 self.message_list.emit(MessageListInput::SetTags(self.tags.clone()));
                 self.message_view.emit(MessageViewInput::SetTags(self.tags.clone()));
@@ -5698,8 +5776,24 @@ impl SimpleComponent for AppModel {
                 self.message_list.emit(MessageListInput::ResetPaging);
                 self.message_list.emit(MessageListInput::SetShowRecipient(false));
                 self.message_list.emit(MessageListInput::SetRestorable(false));
-                self.emit_tag_view();
+                self.show_tag_view();
+                self.refresh_tag_view(&sender);
                 self.push_index_complete();
+            }
+
+            AppMsg::TagViewLoaded { key, rows } => {
+                self.tag_view_loading = false;
+                let out = self.assemble_tag_view(&key, rows);
+                let changed = self.tag_view_cache.get(&key) != Some(&out);
+                if changed {
+                    self.tag_view_cache.insert(key.clone(), out.clone());
+                }
+                if self.tag_view.as_ref() == Some(&key) && changed {
+                    self.message_list.emit(MessageListInput::SetMessages { messages: out });
+                }
+                if std::mem::take(&mut self.tag_view_dirty) {
+                    self.refresh_tag_view(&sender);
+                }
             }
 
             AppMsg::SetTag { message, keyword, add } => {
@@ -6340,8 +6434,9 @@ impl SimpleComponent for AppModel {
                             .emit(MessageListInput::SetMessages { messages });
                     }
                 } else if self.tag_view.is_some() {
-                    // The index just took this folder's flags: re-read the tag.
-                    self.emit_tag_view();
+                    // The index just took this folder's flags: re-read the
+                    // tag, off the main thread.
+                    self.refresh_tag_view(&sender);
                 }
                 // The reader's message was removed by this sync (deleted/moved on
                 // another device). Clear it right away so nothing stale lingers, then
@@ -6983,7 +7078,7 @@ impl AppModel {
             self.rail_fold,
             self.app_theme,
             self.show_unified_pref,
-            self.unified_chip,
+            self.unified_chips,
             self.unified_filtered,
             self.unified_kinds,
             self.unified_tags,
@@ -7665,6 +7760,7 @@ impl AppModel {
             starred_expanded: self.starred_expanded,
             sent_expanded: self.sent_expanded,
             drafts_expanded: self.drafts_expanded,
+            archive_expanded: self.archive_expanded,
             filtered_expanded_accounts: self.filtered_expanded_accounts.clone(),
             tags_expanded_accounts: self.tags_expanded_accounts.clone(),
         });
@@ -8193,7 +8289,7 @@ impl AppModel {
             unified_kinds,
             unified_tags: self.unified_tags,
             show_accounts: self.show_accounts,
-            unified_chip: self.unified_chip,
+            unified_chips: self.unified_chips,
             chevrons_left: self.chevrons_left,
             rail_dots: self.rail_dots,
             rail_fold: self.rail_fold,
@@ -9982,8 +10078,46 @@ impl AppModel {
             }
             self.save_sidebar_state();
         }
+        // The open folder follows its rename (or its parent's): the
+        // selection used to keep the old path, and every auto-fetch asked
+        // the server for a mailbox that no longer existed.
+        let followed = self.selected.as_ref().and_then(|s| {
+            if s.account_id != account_id {
+                return None;
+            }
+            if s.path == path {
+                Some(new_path.clone())
+            } else {
+                s.path.strip_prefix(&old_prefix).map(|rest| format!("{new_prefix}{rest}"))
+            }
+        });
+        if let Some(moved) = followed {
+            let id = self
+                .folders
+                .get(&account_id)
+                .and_then(|fs| fs.iter().find(|f| f.path == moved))
+                .map(|f| f.id);
+            if let (Some(sel), Some(id)) = (self.selected.as_mut(), id) {
+                sel.path = moved.clone();
+                sel.folder_id = id;
+            }
+        }
         self.rebuild_sidebar();
+        if let Some(sel) = self.selected.clone().filter(|s| s.account_id == account_id) {
+            self.sidebar.emit(SidebarInput::SelectFolderRow {
+                account_id,
+                path: sel.path.clone(),
+            });
+        }
         self.send_to(account_id, MailRequest::RenameFolder { old_path: path, new_path });
+        // The worker runs requests in order: the reload queues behind the
+        // RENAME and refills the cleared view from the folder's new name.
+        if let Some(sel) = self.selected.clone().filter(|s| s.account_id == account_id) {
+            self.send_to(account_id, MailRequest::LoadMessages {
+                folder_id: sel.folder_id,
+                path: sel.path,
+            });
+        }
     }
 
     /// The account's hierarchy delimiter, inferred from its folder paths (the
@@ -10413,37 +10547,96 @@ impl AppModel {
         self.message_list.emit(MessageListInput::SetMessages { messages: merged });
     }
 
-    /// The tag view (#71): every cached message of every account carrying
-    /// the open tag, newest first. Trash and Junk keep their tags but stay
-    /// out; Gmail's per-label copies of one message collapse to one row,
-    /// the inbox copy where there is one (its actions land where expected).
-    fn emit_tag_view(&self) {
-        let Some((scope, kw)) = self.tag_view.clone() else { return };
-        let in_scope = |account_id: u32| scope.map_or(true, |id| id == account_id);
-        // One keyword, or — the unified Tags row — every configured tag.
-        let keywords: Vec<String> = match kw {
-            Some(k) => vec![k],
+    /// The keywords a tag view answers: one, or — the unified Tags row —
+    /// every configured tag.
+    fn tag_view_keywords(&self, kw: &Option<String>) -> Vec<String> {
+        match kw {
+            Some(k) => vec![k.clone()],
             None => self.tags.iter().map(|t| t.keyword.clone()).collect(),
-        };
-        let mut out: Vec<Message> = Vec::new();
-        let mut seen_rows: std::collections::HashSet<(u32, u32, u32)> =
-            std::collections::HashSet::new();
-        if let Some(cache) = self.cache.as_ref() {
-            for account in self.accounts.iter().filter(|a| in_scope(a.id)) {
-                let Some(folders) = self.folders.get(&account.id) else { continue };
-                for kw in &keywords {
-                    for (path, mut m) in cache.messages_with_keyword(account.id, kw) {
-                        let Some(f) = folders.iter().find(|f| f.path == path) else { continue };
-                        if matches!(f.kind, FolderKind::Trash | FolderKind::Junk) {
-                            continue;
-                        }
-                        m.folder_id = f.id;
-                        // A message with several tags answers several keywords.
-                        if seen_rows.insert((m.account_id, m.folder_id, m.uid)) {
-                            out.push(m);
+        }
+    }
+
+    /// Show the open tag view from its last result at once (an empty
+    /// loading list if it never ran); [`refresh_tag_view`] brings it up to
+    /// date behind.
+    fn show_tag_view(&self) {
+        let Some(key) = self.tag_view.as_ref() else { return };
+        match self.tag_view_cache.get(key) {
+            Some(cached) => {
+                self.message_list.emit(MessageListInput::SetMessages { messages: cached.clone() })
+            }
+            None => self.message_list.emit(MessageListInput::SetLoading),
+        }
+    }
+
+    /// Read the open tag view's rows from the on-disk index off the main
+    /// thread (reading tens of thousands of rows per account is what made
+    /// a tag click pause), answering with [`AppMsg::TagViewLoaded`]. The
+    /// demo's mail never reaches the database, so its view is assembled
+    /// here from the folders loaded so far.
+    fn refresh_tag_view(&mut self, sender: &ComponentSender<Self>) {
+        let Some(key) = self.tag_view.clone() else { return };
+        if demo_mode() && self.config.is_empty() {
+            let out = self.assemble_tag_view(&key, Vec::new());
+            self.tag_view_cache.insert(key, out.clone());
+            self.message_list.emit(MessageListInput::SetMessages { messages: out });
+            return;
+        }
+        if self.tag_view_loading {
+            self.tag_view_dirty = true;
+            return;
+        }
+        self.tag_view_loading = true;
+        let (scope, kw) = key.clone();
+        let keywords = self.tag_view_keywords(&kw);
+        let accounts: Vec<u32> = self
+            .accounts
+            .iter()
+            .map(|a| a.id)
+            .filter(|id| scope.map_or(true, |s| s == *id))
+            .collect();
+        let s = sender.clone();
+        std::thread::spawn(move || {
+            let mut rows: Vec<(u32, String, Message)> = Vec::new();
+            if let Ok(cache) = crate::cache::Cache::open() {
+                for account_id in accounts {
+                    for kw in &keywords {
+                        for (path, m) in cache.messages_with_keyword(account_id, kw) {
+                            rows.push((account_id, path, m));
                         }
                     }
                 }
+            }
+            s.input(AppMsg::TagViewLoaded { key, rows });
+        });
+    }
+
+    /// The tag view (#71) from its rows: every message of every account in
+    /// scope carrying the tag, newest first. Trash and Junk keep their tags
+    /// but stay out; Gmail's per-label copies of one message collapse to one
+    /// row, the inbox copy where there is one (its actions land where
+    /// expected).
+    fn assemble_tag_view(
+        &self,
+        key: &(Option<u32>, Option<String>),
+        rows: Vec<(u32, String, Message)>,
+    ) -> Vec<Message> {
+        let (scope, kw) = key;
+        let in_scope = |account_id: u32| scope.map_or(true, |id| id == account_id);
+        let keywords = self.tag_view_keywords(kw);
+        let mut out: Vec<Message> = Vec::new();
+        let mut seen_rows: std::collections::HashSet<(u32, u32, u32)> =
+            std::collections::HashSet::new();
+        for (account_id, path, mut m) in rows {
+            let Some(folders) = self.folders.get(&account_id) else { continue };
+            let Some(f) = folders.iter().find(|f| f.path == path) else { continue };
+            if matches!(f.kind, FolderKind::Trash | FolderKind::Junk) {
+                continue;
+            }
+            m.folder_id = f.id;
+            // A message with several tags answers several keywords.
+            if seen_rows.insert((m.account_id, m.folder_id, m.uid)) {
+                out.push(m);
             }
         }
         // The demo's mail never reaches the database, so its tag view reads
@@ -10474,7 +10667,7 @@ impl AppModel {
         });
         let mut seen: std::collections::HashSet<(u32, String)> = std::collections::HashSet::new();
         out.retain(|m| m.message_id.is_empty() || seen.insert((m.account_id, m.message_id.clone())));
-        self.message_list.emit(MessageListInput::SetMessages { messages: out });
+        out
     }
 
     /// Fold an account's locally-kept tags (POP3, keyword-less servers) into
@@ -10563,7 +10756,7 @@ impl AppModel {
         if self.unified {
             self.emit_unified();
         } else if self.tag_view.is_some() {
-            self.emit_tag_view();
+            self.show_tag_view();
         } else if let Some(sel) = self.selected.as_ref() {
             if let Some(msgs) = self.message_cache.get(&(sel.account_id, sel.folder_id)) {
                 self.message_list.emit(MessageListInput::SetMessages { messages: msgs.clone() });
@@ -10680,7 +10873,7 @@ impl AppModel {
             show_attachments: self.show_attachments,
             show_contacts: self.show_contacts,
             show_unified: self.show_unified_pref,
-            unified_chip: self.unified_chip,
+            unified_chips: self.unified_chips,
             unified_filtered: self.unified_filtered,
             unified_kinds: self.unified_kinds,
             unified_tags: self.unified_tags,
@@ -10775,7 +10968,7 @@ impl AppModel {
                 PrefOutput::SetAttachmentsRow(show) => AppMsg::SetAttachmentsRow(show),
                 PrefOutput::SetContactsRow(show) => AppMsg::SetContactsRow(show),
                 PrefOutput::SetShowUnified(show) => AppMsg::SetShowUnified(show),
-                PrefOutput::SetUnifiedChip(show) => AppMsg::SetUnifiedChip(show),
+                PrefOutput::SetUnifiedChips(chips) => AppMsg::SetUnifiedChips(chips),
                 PrefOutput::SetUnifiedFiltered(show) => AppMsg::SetUnifiedFiltered(show),
                 PrefOutput::SetUnifiedKinds(kinds) => AppMsg::SetUnifiedKinds(kinds),
                 PrefOutput::SetUnifiedTags(show) => AppMsg::SetUnifiedTags(show),
@@ -10953,7 +11146,7 @@ impl AppModel {
                 self.accounts_win = Some(accounts);
             }
             if let Some(p) = &self.prefs {
-                p.emit(PrefInput::EditorOpen(false));
+                p.emit(PrefInput::EditorOpen(None));
                 p.emit(PrefInput::ShowPageById(page));
             }
         } else if on_accounts {
@@ -11760,11 +11953,10 @@ impl AppModel {
         out
     }
 
-    /// The folders listed in All Inboxes' "Filtered Folders" section: the
-    /// destination of every rule whose "Show under All Inboxes" switch is
-    /// on, in account order then rule order, without repeats; nothing when
-    /// Settings → Sidebar has the section off. An inbox destination is
-    /// already an All Inboxes row and is skipped.
+    /// The folders the unified "Filtered Folders" section lists: the
+    /// destination of every rule, in account order then rule order, without
+    /// repeats; nothing when Settings → Sidebar has the section off. An
+    /// inbox destination is already an All Inboxes row and is skipped.
     fn unified_folder_refs(&self) -> Vec<UnifiedFolderRef> {
         let mut out: Vec<UnifiedFolderRef> = Vec::new();
         if !self.unified_filtered {
@@ -11773,9 +11965,7 @@ impl AppModel {
         for email in self.ordered_emails() {
             let Some(account) = self.accounts.iter().find(|a| a.email == email) else { continue };
             let Some(folders) = self.folders.get(&account.id) else { continue };
-            let rules = self.filters.iter().filter(|r| {
-                r.show_in_unified && r.account_email.eq_ignore_ascii_case(&email)
-            });
+            let rules = self.filters.iter().filter(|r| r.account_email.eq_ignore_ascii_case(&email));
             for r in rules {
                 let Some(f) = folders.iter().find(|f| f.path == r.dest_path) else { continue };
                 if f.kind == FolderKind::Inbox
@@ -12365,7 +12555,6 @@ fn demo_filters() -> Vec<config::FilterRule> {
         dest_path: dest.into(),
         tag: String::new(),
         count_unread: true,
-        show_in_unified: true,
     };
     vec![
         mk("jason@vireo.hyprlab.co", FilterField::FromAddress, FilterMatch::EndsWith, "substack.com", "Newsletters"),

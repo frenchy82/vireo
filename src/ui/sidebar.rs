@@ -91,7 +91,7 @@ enum UnifiedRow {
 fn row_title(row: UnifiedRow) -> String {
     match row {
         UnifiedRow::Kind(kind) => kind_label(kind),
-        UnifiedRow::Filtered => i18n("Filtered Folders"),
+        UnifiedRow::Filtered => i18n("Filters"),
         UnifiedRow::Tags => i18n("Tags"),
     }
 }
@@ -133,10 +133,11 @@ fn chevron_icon(open: bool) -> &'static str {
 /// What a unified row is called.
 fn kind_label(kind: FolderKind) -> String {
     match kind {
-        FolderKind::Inbox => i18n("All Inboxes"),
+        FolderKind::Inbox => i18n("Inboxes"),
         FolderKind::Starred => i18n("Starred"),
         FolderKind::Sent => i18n("Sent"),
         FolderKind::Drafts => i18n("Drafts"),
+        FolderKind::Archive => i18n("Archive"),
         _ => i18n("Folder"),
     }
 }
@@ -176,6 +177,7 @@ pub struct SidebarInit {
     pub starred_expanded: bool,
     pub sent_expanded: bool,
     pub drafts_expanded: bool,
+    pub archive_expanded: bool,
     /// Whether the "Attachments" row is shown.
     pub show_attachments: bool,
     /// Whether the "Contacts" row is shown.
@@ -222,7 +224,7 @@ pub struct Sidebar {
     show_unified: bool,
     /// Whether the collapsed-up "All Inboxes" row wears its total-unread chip
     /// (while expanded, the per-inbox sub-list carries the counts instead).
-    show_unified_chip: bool,
+    unified_chips: crate::config::UnifiedChips,
     /// Whether the disclosure chevrons LEAD their rows (Settings: Chevron
     /// placement). Off restores the classic trailing position.
     chevrons_left: bool,
@@ -349,7 +351,7 @@ pub enum SidebarInput {
         unified_tags: bool,
         /// Whether the account sections are shown at all.
         show_accounts: bool,
-        unified_chip: bool,
+        unified_chips: crate::config::UnifiedChips,
         chevrons_left: bool,
         rail_dots: bool,
         rail_fold: crate::config::RailFold,
@@ -446,6 +448,7 @@ pub enum SidebarOutput {
         starred: bool,
         sent: bool,
         drafts: bool,
+        archive: bool,
     },
     /// A unified Starred / Sent / Drafts row was chosen: every account's
     /// folder of that kind, merged.
@@ -522,6 +525,10 @@ pub enum CtxAction {
     RenameFolder { account_id: u32, name: String, path: String },
     /// Erase everything in Trash or Junk (#152).
     EmptyFolder { account_id: u32, folder_id: u32, name: String, path: String },
+    /// Open Settings on the filter rule that files into this folder.
+    EditFilter { account_id: u32, path: String },
+    /// Open Settings on this tag (by keyword).
+    EditTag(String),
 }
 
 #[relm4::component(pub)]
@@ -605,7 +612,7 @@ impl Component for Sidebar {
         let mut model = Sidebar {
             sections: Vec::new(),
             show_unified: false,
-            show_unified_chip: true,
+            unified_chips: crate::config::UnifiedChips::default(),
             chevrons_left: false,
             rail_dots: false,
             rail_fold: crate::config::RailFold::default(),
@@ -658,6 +665,7 @@ impl Component for Sidebar {
                 (FolderKind::Starred, init.starred_expanded),
                 (FolderKind::Sent, init.sent_expanded),
                 (FolderKind::Drafts, init.drafts_expanded),
+                (FolderKind::Archive, init.archive_expanded),
             ]),
             kind_widgets: HashMap::new(),
             rail_open: HashMap::new(),
@@ -698,7 +706,7 @@ impl Component for Sidebar {
                 unified_kinds,
                 unified_tags,
                 show_accounts,
-                unified_chip,
+                unified_chips,
                 chevrons_left,
                 rail_dots,
                 rail_fold,
@@ -724,7 +732,7 @@ impl Component for Sidebar {
                     .collect();
                 self.sections = sections;
                 self.show_unified = show_unified;
-                self.show_unified_chip = unified_chip;
+                self.unified_chips = unified_chips;
                 self.chevrons_left = chevrons_left;
                 self.rail_dots = rail_dots;
                 // "Fold up expanded items" is a view of the rail, not a
@@ -1155,21 +1163,21 @@ impl Component for Sidebar {
                     label.set_visible(
                         unified > 0
                             && !self.row_shown_open(UnifiedRow::Kind(FolderKind::Inbox))
-                            && self.show_unified_chip,
+                            && self.unified_chips.all_inboxes,
                     );
                 }
                 for (slot, badges) in &self.filtered_badges {
                     let total: u32 = badges.keys().map(|k| folders.get(k).copied().unwrap_or(0)).sum();
                     if let Some(b) = self.filtered_sections.get(slot).and_then(|w| w.badge.as_ref()) {
                         b.set_text(&total.to_string());
-                        b.set_visible(total > 0 && !self.filtered_open(*slot));
+                        b.set_visible(total > 0 && !self.filtered_open(*slot) && self.unified_chips.filtered);
                     }
                 }
                 for (row, w) in &self.kind_widgets {
                     let total: u32 = w.row_badges.keys().map(|k| folders.get(k).copied().unwrap_or(0)).sum();
                     if let Some(b) = &w.badge {
                         b.set_text(&total.to_string());
-                        b.set_visible(total > 0 && !self.row_shown_open(*row) && self.show_unified_chip);
+                        b.set_visible(total > 0 && !self.row_shown_open(*row) && self.chip_shown(*row));
                     }
                 }
                 // Keep the avatar-circle badges in sync too. They only show while
@@ -1850,8 +1858,7 @@ impl Sidebar {
             img.add_css_class("folder-icon");
             pin_icon_size(&img);
             let badge = gtk::Label::new(Some(&self.outbox_count.to_string()));
-            badge.add_css_class("unread-badge");
-            badge.set_valign(gtk::Align::Center);
+            style_badge(&badge, 5);
             if self.collapsed {
                 hbox.set_halign(gtk::Align::Center);
                 row.set_tooltip_text(Some(&format!(
@@ -2109,8 +2116,9 @@ impl Sidebar {
             list.set_selection_mode(gtk::SelectionMode::Single);
             list.add_css_class("navigation-sidebar");
             for folder in &essential {
+                let icon = filter_icon(section, folder);
                 let (row, badge) =
-                    build_folder_row(folder, self.collapsed, 0, None, self.chevrons_left, None);
+                    build_folder_row(folder, self.collapsed, 0, None, self.chevrons_left, icon);
                 row.add_controller(folder_drop_target(id, folder.path.clone(), sender));
                 list.append(&row);
                 if let Some(badge) = badge {
@@ -2130,6 +2138,7 @@ impl Sidebar {
                 &list,
                 id,
                 essential.iter().map(|f| (*f).clone()).collect(),
+                section.filtered.iter().map(|f| f.path.clone()).collect(),
                 sender,
             );
 
@@ -2195,7 +2204,7 @@ impl Sidebar {
                             depth,
                             lead.as_ref(),
                             self.chevrons_left,
-                            None,
+                            filter_icon(section, folder),
                         );
                     // Hidden while any ancestor is collapsed; the row still
                     // exists, so selection indices stay stable. Its content
@@ -2259,7 +2268,8 @@ impl Sidebar {
                     &custom_list,
                     id,
                     custom.iter().map(|f| (*f).clone()).collect(),
-                    sender,
+                    section.filtered.iter().map(|f| f.path.clone()).collect(),
+                sender,
                 );
 
                 custom_revealer.set_transition_type(gtk::RevealerTransitionType::SlideDown);
@@ -2328,18 +2338,16 @@ impl Sidebar {
 
             let wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);
             wrap.append(&list);
+            // The account's own Tags section, above its folder hierarchy:
+            // every tag scoped to this account, there whatever the unified
+            // section shows. (Its filtered folders are marked in place in
+            // the hierarchy instead — see `filter_icon`.)
+            if !self.tags.is_empty() {
+                self.build_tags_section(&wrap, Slot::Account(id), false, sender);
+            }
             if !custom.is_empty() {
                 wrap.append(&folders_toggle);
                 wrap.append(&custom_revealer);
-            }
-            // The account's own Filtered Folders and Tags sections: every
-            // rule's folder, and every tag scoped to this account — there
-            // whether or not the unified section shows either.
-            if !section.filtered.is_empty() {
-                self.build_filtered_section(&wrap, Slot::Account(id), &sections, sender);
-            }
-            if !self.tags.is_empty() {
-                self.build_tags_section(&wrap, Slot::Account(id), false, sender);
             }
             wrap.append(&add_btn);
             revealer.set_child(Some(&wrap));
@@ -2450,7 +2458,7 @@ impl Sidebar {
         let counted = row_kind != UnifiedRow::Kind(FolderKind::Sent);
         let unread = self.row_unread(row_kind);
         let expanded = self.row_shown_open(row_kind);
-        let show_chip = unread > 0 && !expanded && self.show_unified_chip;
+        let show_chip = unread > 0 && !expanded && self.chip_shown(row_kind);
         let toggle_tip = match row_kind {
             UnifiedRow::Kind(FolderKind::Inbox) => i18n("Show each inbox"),
             UnifiedRow::Kind(_) => i18n("Show each account"),
@@ -2519,6 +2527,9 @@ impl Sidebar {
             let label = gtk::Label::new(Some(&title));
             label.set_halign(gtk::Align::Start);
             label.set_hexpand(true);
+            // Squeezed by a wide chip, the title shortens; the chip and the
+            // chevron never leave the row.
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
             label.add_css_class("account-name");
             if self.chevrons_left {
                 label.set_margin_start(-2);
@@ -2531,8 +2542,7 @@ impl Sidebar {
             // expanded its rows carry the counts, so the total is
             // redundant and hidden.
             let b = gtk::Label::new(Some(&unread.to_string()));
-            b.add_css_class("unread-badge");
-            b.set_valign(gtk::Align::Center);
+            style_badge(&b, 5);
             b.set_visible(show_chip);
             hbox.append(&b);
             badge = b;
@@ -2692,10 +2702,9 @@ impl Sidebar {
                     let Some(section) = sections.iter().find(|s| s.account.id == r.account_id) else {
                         continue;
                     };
-                    // The filter-folder glyph in the account's colour says
-                    // whose folder this is; the tooltip names the account.
-                    let icon = gtk::Image::from_icon_name("co.hyprlab.Vireo-filter-folder-symbolic");
-                    icon.add_css_class(&format!("acct-tint-{}", section.account.id));
+                    // The glyph in the account's colour says whose folder
+                    // this is; the tooltip names the account.
+                    let icon = filtered_folder_icon(&r.folder, section.account.id);
                     pin_icon_size(&icon);
                     let tip = format!("{} \u{2014} {}", r.folder.name, section.account.label);
                     let (row, badge) = build_unified_sub_row(
@@ -2705,6 +2714,7 @@ impl Sidebar {
                         r.folder.unread,
                         self.collapsed,
                         self.chevrons_left,
+                        false,
                     );
                     // Filtered folders take drops like any folder of their account.
                     row.add_controller(folder_drop_target(r.account_id, r.folder.path.clone(), sender));
@@ -2731,22 +2741,9 @@ impl Sidebar {
                         .row_at_y(y as i32)
                         .and_then(|row| refs.get(row.index() as usize))
                     {
-                        show_sidebar_menu(
-                            &sub_w,
-                            x,
-                            y,
-                            vec![
-                                (i18n_noop("Mark as Read"), CtxAction::MarkFolderRead {
-                                    account_id: r.account_id,
-                                    folder_id: r.folder.id,
-                                }),
-                                (i18n_noop("Refresh"), CtxAction::RefreshFolder {
-                                    account_id: r.account_id,
-                                    folder_id: r.folder.id,
-                                }),
-                            ],
-                            &cs,
-                        );
+                        // The same menu the folder has under its account.
+                        let items = folder_menu_items(r.account_id, &r.folder, true);
+                        show_sidebar_menu(&sub_w, x, y, items, &cs);
                     }
                 });
                 sub.add_controller(click);
@@ -2761,6 +2758,7 @@ impl Sidebar {
                         0,
                         self.collapsed,
                         self.chevrons_left,
+                        false,
                     );
                     badge.set_visible(false);
                     sub.append(&row);
@@ -2774,6 +2772,11 @@ impl Sidebar {
                         });
                     }
                 });
+                attach_tag_context_menu(
+                    &sub,
+                    self.tags.iter().map(|t| t.keyword.clone()).collect(),
+                    sender,
+                );
             }
         }
 
@@ -2891,7 +2894,7 @@ impl Sidebar {
                 rev.set_reveal_child(open);
             }
             if let Some(label) = &self.unified_badge {
-                label.set_visible(unread > 0 && !open && self.show_unified_chip);
+                label.set_visible(unread > 0 && !open && self.unified_chips.all_inboxes);
             }
             if let Some(ch) = &self.unified_chevron {
                 ch.set_icon_name(Some(chevron_icon(open)));
@@ -2901,7 +2904,7 @@ impl Sidebar {
             // Expanded: the list shows each count, so the total chip bows
             // out; it returns when folded back up.
             if let Some(b) = &w.badge {
-                b.set_visible(unread > 0 && !open && self.show_unified_chip);
+                b.set_visible(unread > 0 && !open && self.chip_shown(row));
             }
             if let Some(ch) = &w.chevron {
                 ch.set_icon_name(Some(chevron_icon(open)));
@@ -2972,8 +2975,9 @@ impl Sidebar {
         let hb = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         hb.add_css_class("folder-row");
         // The header's unread chip — the section's total — shows only while
-        // the section is folded up, as All Inboxes' does.
-        let show_chip = unread > 0 && !open;
+        // the section is folded up, as All Inboxes' does, and only with its
+        // switch on (Settings → Sidebar → Unread counts).
+        let show_chip = unread > 0 && !open && self.unified_chips.filtered;
         let badge: gtk::Label;
         if self.collapsed {
             // The rail has no room for a label: Jason's filter-folder glyph
@@ -2985,9 +2989,9 @@ impl Sidebar {
             hb.append(&overlay);
             badge = b;
             toggle.set_tooltip_text(Some(&if unread > 0 {
-                format!("{} ({unread})", i18n("Filtered Folders"))
+                format!("{} ({unread})", i18n("Filters"))
             } else {
-                i18n("Filtered Folders")
+                i18n("Filters")
             }));
         } else {
             // A leading caret and the label, like the accounts' "Folders"
@@ -2998,7 +3002,7 @@ impl Sidebar {
                 chevron.set_margin_start(2);
             }
             hb.append(&chevron);
-            let lbl = gtk::Label::new(Some(i18n("Filtered Folders").as_str()));
+            let lbl = gtk::Label::new(Some(i18n("Filters").as_str()));
             if unified {
                 lbl.add_css_class("account-name");
             }
@@ -3007,8 +3011,7 @@ impl Sidebar {
             lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
             hb.append(&lbl);
             let b = gtk::Label::new(Some(&unread.to_string()));
-            b.add_css_class("unread-badge");
-            b.set_valign(gtk::Align::Center);
+            style_badge(&b, 5);
             b.set_visible(show_chip);
             hb.append(&b);
             badge = b;
@@ -3047,11 +3050,9 @@ impl Sidebar {
             };
             // Laid out exactly like a folder under an account's "Folders"
             // heading — same builder, same leaf expander slot — so folders
-            // read the same wherever they sit in the sidebar. Only the icon
-            // differs: the filter-folder glyph in the account's colour, which
-            // is what says whose folder this is.
-            let icon = gtk::Image::from_icon_name("co.hyprlab.Vireo-filter-folder-symbolic");
-            icon.add_css_class(&format!("acct-tint-{}", section.account.id));
+            // read the same wherever they sit in the sidebar. Only the
+            // colour differs: the account's, which says whose folder this is.
+            let icon = filtered_folder_icon(&r.folder, section.account.id);
             let lead: Option<gtk::Widget> = if self.collapsed {
                 None
             } else {
@@ -3065,7 +3066,7 @@ impl Sidebar {
                 0,
                 lead.as_ref(),
                 self.chevrons_left,
-                Some(icon),
+                FolderGlyph::Icon(icon),
             );
             let Some(badge) = badge else { continue };
             // Name the account too: the tint alone is a hint.
@@ -3085,7 +3086,8 @@ impl Sidebar {
                 let _ = ss.send(SidebarInput::FilteredRowSelected { slot, index: row.index() });
             }
         });
-        // Right-click a filtered folder: act on that folder alone.
+        // Right-click a filtered folder: the same menu it has under its
+        // account.
         let click = gtk::GestureClick::new();
         click.set_button(gtk::gdk::BUTTON_SECONDARY);
         let cs = sender.clone();
@@ -3096,22 +3098,8 @@ impl Sidebar {
                 .row_at_y(y as i32)
                 .and_then(|row| refs.get(row.index() as usize))
             {
-                show_sidebar_menu(
-                    &list_w,
-                    x,
-                    y,
-                    vec![
-                        (i18n_noop("Mark as Read"), CtxAction::MarkFolderRead {
-                            account_id: r.account_id,
-                            folder_id: r.folder.id,
-                        }),
-                        (i18n_noop("Refresh"), CtxAction::RefreshFolder {
-                            account_id: r.account_id,
-                            folder_id: r.folder.id,
-                        }),
-                    ],
-                    &cs,
-                );
+                let items = folder_menu_items(r.account_id, &r.folder, true);
+                show_sidebar_menu(&list_w, x, y, items, &cs);
             }
         });
         list.add_controller(click);
@@ -3231,6 +3219,7 @@ impl Sidebar {
                 let _ = ss.send(SidebarInput::TagRowSelected { slot, index: row.index() });
             }
         });
+        attach_tag_context_menu(&list, self.tags.iter().map(|t| t.keyword.clone()).collect(), sender);
 
         let revealer = gtk::Revealer::new();
         revealer.set_transition_type(gtk::RevealerTransitionType::SlideDown);
@@ -3239,6 +3228,16 @@ impl Sidebar {
         revealer.set_child(Some(&list));
         parent.append(&revealer);
         self.tag_sections.insert(slot, SectionWidgets { revealer, chevron, toggle, list, badge: None });
+    }
+
+    /// Whether a unified row's total-unread chip is switched on (Settings →
+    /// Sidebar → Unified → Unread counts). Sent and Tags never carry one.
+    fn chip_shown(&self, row: UnifiedRow) -> bool {
+        match row {
+            UnifiedRow::Kind(kind) => self.unified_chips.has(kind),
+            UnifiedRow::Filtered => self.unified_chips.filtered,
+            UnifiedRow::Tags => false,
+        }
     }
 
     /// Whether the unified Tags section has anything to show.
@@ -3626,10 +3625,83 @@ fn folder_drop_target(
 
 /// Wire a right-click menu (Mark as Read / Refresh / Delete) onto a folder list;
 /// `folders` maps the list's row indices to their folders.
+/// The context menu of one folder — the same wherever the folder is
+/// listed (under its account, or as a filtered folder in the unified
+/// section): `filtered` says a filter rule files into it.
+fn folder_menu_items(id: u32, f: &Folder, filtered: bool) -> Vec<(&'static str, CtxAction)> {
+    let mut items = vec![
+        (i18n_noop("Mark as Read"), CtxAction::MarkFolderRead { account_id: id, folder_id: f.id }),
+        (i18n_noop("Refresh"), CtxAction::RefreshFolder { account_id: id, folder_id: f.id }),
+    ];
+    // A filter files into this folder: its rule is a click away.
+    if filtered {
+        items.push((i18n_noop("Edit Filter…"), CtxAction::EditFilter {
+            account_id: id,
+            path: f.path.clone(),
+        }));
+    }
+    // Only user-created folders can be renamed or deleted.
+    if f.kind == FolderKind::Custom {
+        items.push((i18n_noop("Rename Folder…"), CtxAction::RenameFolder {
+            account_id: id,
+            name: f.name.clone(),
+            path: f.path.clone(),
+        }));
+        items.push((i18n_noop("Delete Folder…"), CtxAction::DeleteFolder {
+            account_id: id,
+            name: f.name.clone(),
+            path: f.path.clone(),
+        }));
+    }
+    // Trash and Junk can be emptied outright (#152).
+    let empty_label = match f.kind {
+        FolderKind::Trash => Some(i18n_noop("Empty Trash…")),
+        FolderKind::Junk => Some(i18n_noop("Empty Junk…")),
+        _ => None,
+    };
+    if let Some(label) = empty_label {
+        items.push((label, CtxAction::EmptyFolder {
+            account_id: id,
+            folder_id: f.id,
+            name: f.name.clone(),
+            path: f.path.clone(),
+        }));
+    }
+    items
+}
+
+/// Right-click on a tag row, wherever tags are listed: edit it in Settings.
+fn attach_tag_context_menu(
+    list: &gtk::ListBox,
+    keywords: Vec<String>,
+    sender: &ComponentSender<Sidebar>,
+) {
+    let click = gtk::GestureClick::new();
+    click.set_button(gtk::gdk::BUTTON_SECONDARY);
+    let cs = sender.clone();
+    let list_w = list.clone();
+    click.connect_pressed(move |_, _, x, y| {
+        if let Some(k) = list_w
+            .row_at_y(y as i32)
+            .and_then(|row| keywords.get(row.index() as usize))
+        {
+            show_sidebar_menu(
+                &list_w,
+                x,
+                y,
+                vec![(i18n_noop("Edit Tag…"), CtxAction::EditTag(k.clone()))],
+                &cs,
+            );
+        }
+    });
+    list.add_controller(click);
+}
+
 fn attach_folder_context_menu(
     list: &gtk::ListBox,
     id: u32,
     folders: Vec<Folder>,
+    filtered: Vec<String>,
     sender: &ComponentSender<Sidebar>,
 ) {
     let click = gtk::GestureClick::new();
@@ -3641,37 +3713,7 @@ fn attach_folder_context_menu(
             .row_at_y(y as i32)
             .and_then(|row| folders.get(row.index() as usize))
         {
-            let mut items = vec![
-                (i18n_noop("Mark as Read"), CtxAction::MarkFolderRead { account_id: id, folder_id: f.id }),
-                (i18n_noop("Refresh"), CtxAction::RefreshFolder { account_id: id, folder_id: f.id }),
-            ];
-            // Only user-created folders can be renamed or deleted.
-            if f.kind == FolderKind::Custom {
-                items.push((i18n_noop("Rename Folder…"), CtxAction::RenameFolder {
-                    account_id: id,
-                    name: f.name.clone(),
-                    path: f.path.clone(),
-                }));
-                items.push((i18n_noop("Delete Folder…"), CtxAction::DeleteFolder {
-                    account_id: id,
-                    name: f.name.clone(),
-                    path: f.path.clone(),
-                }));
-            }
-            // Trash and Junk can be emptied outright (#152).
-            let empty_label = match f.kind {
-                FolderKind::Trash => Some(i18n_noop("Empty Trash…")),
-                FolderKind::Junk => Some(i18n_noop("Empty Junk…")),
-                _ => None,
-            };
-            if let Some(label) = empty_label {
-                items.push((label, CtxAction::EmptyFolder {
-                    account_id: id,
-                    folder_id: f.id,
-                    name: f.name.clone(),
-                    path: f.path.clone(),
-                }));
-            }
+            let items = folder_menu_items(id, f, filtered.iter().any(|p| *p == f.path));
             show_sidebar_menu(&list_w, x, y, items, &cs);
         }
     });
@@ -3716,6 +3758,7 @@ impl Sidebar {
             starred: self.kind_open(FolderKind::Starred),
             sent: self.kind_open(FolderKind::Sent),
             drafts: self.kind_open(FolderKind::Drafts),
+            archive: self.kind_open(FolderKind::Archive),
         });
     }
 
@@ -3786,7 +3829,7 @@ fn build_unified_inbox_row(
     }
     circle.append(&glyph);
 
-    build_unified_sub_row(&circle, label, label, inbox.unread, collapsed, inset)
+    build_unified_sub_row(&circle, label, label, inbox.unread, collapsed, inset, true)
 }
 
 /// A row nested under "All Inboxes": `lead` (the account's pill), `title`,
@@ -3800,11 +3843,15 @@ fn build_unified_sub_row(
     unread: u32,
     collapsed: bool,
     inset: bool,
+    pill: bool,
 ) -> (gtk::ListBoxRow, gtk::Label) {
     let row = gtk::ListBoxRow::new();
     let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     hbox.add_css_class("folder-row");
-    if !collapsed {
+    // The 2px pull-in centres a 21px account pill on the 16px icon column;
+    // a row led by a 16px icon or disc sits on that column as it is, and
+    // pulled in it read as drifting left of the header's glyph.
+    if !collapsed && pill {
         hbox.add_css_class("unified-subrow");
     }
 
@@ -3829,15 +3876,16 @@ fn build_unified_sub_row(
         }
 
         let name = gtk::Label::new(Some(title));
-        name.set_margin_start(6);
+        // The label keeps the same column either way: the icon-led row
+        // gave up the 2px pull-in, so its label gives up 2px here.
+        name.set_margin_start(if pill { 6 } else { 4 });
         name.set_hexpand(true);
         name.set_halign(gtk::Align::Start);
         name.set_ellipsize(gtk::pango::EllipsizeMode::End);
         hbox.append(&name);
 
         let badge = gtk::Label::new(Some(&unread.to_string()));
-        badge.add_css_class("unread-badge");
-        badge.set_valign(gtk::Align::Center);
+        style_badge(&badge, 5);
         badge.set_visible(unread > 0);
         hbox.append(&badge);
         badge
@@ -3888,7 +3936,7 @@ fn with_unread_overlay(
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(child));
     let badge = gtk::Label::new(Some(&unread.to_string()));
-    badge.add_css_class("unread-badge");
+    style_badge(&badge, 4);
     badge.add_css_class("unread-badge-mini");
     badge.set_halign(gtk::Align::End);
     badge.set_valign(gtk::Align::Start);
@@ -3915,6 +3963,54 @@ fn folder_depth(folder: &Folder, all: &[&Folder]) -> usize {
         .count()
 }
 
+/// The icon a folder row wears when a filter rule files into it: the
+/// filter-folder glyph in the account's colour, in place in the hierarchy.
+fn filter_icon(section: &SectionData, folder: &Folder) -> FolderGlyph {
+    if !section.filtered.iter().any(|f| f.id == folder.id) {
+        return FolderGlyph::Plain;
+    }
+    if folder.kind == FolderKind::Custom {
+        FolderGlyph::Icon(filtered_folder_icon(folder, section.account.id))
+    } else {
+        FolderGlyph::Marked(section.account.id)
+    }
+}
+
+/// What a folder row shows for its icon.
+enum FolderGlyph {
+    /// The folder kind's own icon.
+    Plain,
+    /// The caller's icon in place of it (a filter destination's tinted glyph).
+    Icon(gtk::Image),
+    /// The kind's own icon, grey as ever, with a small filter glyph in the
+    /// account's colour riding its corner: a main folder (Archive, Junk…)
+    /// that a filter files into.
+    Marked(u32),
+}
+
+/// The icon of a folder a filter files into: a custom folder wears the
+/// filter-folder glyph, a main folder (Archive, Junk…) keeps its own —
+/// either in the account's colour, which is what says "part of a filter".
+fn filtered_folder_icon(folder: &Folder, account_id: u32) -> gtk::Image {
+    let name = if folder.kind == FolderKind::Custom {
+        "co.hyprlab.Vireo-filter-folder-symbolic"
+    } else {
+        folder.kind.icon()
+    };
+    let icon = gtk::Image::from_icon_name(name);
+    icon.add_css_class(&format!("acct-tint-{account_id}"));
+    icon
+}
+
+/// An unread chip: the count in a pill that never pushes its row wider
+/// than the sidebar — past `max_chars` digits it ends in an ellipsis.
+fn style_badge(badge: &gtk::Label, max_chars: i32) {
+    badge.add_css_class("unread-badge");
+    badge.set_valign(gtk::Align::Center);
+    badge.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    badge.set_max_width_chars(max_chars);
+}
+
 /// Build one folder row. `depth` indents sub-folders to mirror the server's
 /// hierarchy (0 = top level; only meaningful for custom folders).
 fn build_folder_row(
@@ -3923,7 +4019,7 @@ fn build_folder_row(
     depth: usize,
     lead: Option<&gtk::Widget>,
     inset: bool,
-    icon: Option<gtk::Image>,
+    glyph: FolderGlyph,
 ) -> (gtk::ListBoxRow, Option<gtk::Label>) {
     let row = gtk::ListBoxRow::new();
     let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -3949,10 +4045,32 @@ fn build_folder_row(
     }
 
     // The folder kind's icon, unless the caller brought its own (the
-    // Filtered Folders rows' account-tinted glyph).
-    let img = icon.unwrap_or_else(|| gtk::Image::from_icon_name(folder.kind.icon()));
+    // Filters rows' account-tinted glyph).
+    let img = match &glyph {
+        FolderGlyph::Icon(icon) => icon.clone(),
+        _ => gtk::Image::from_icon_name(folder.kind.icon()),
+    };
     img.add_css_class("folder-icon");
     pin_icon_size(&img);
+    // A marked folder carries the filter glyph on the icon's corner: top
+    // right, or bottom right in the rail where the unread badge has the
+    // top. The mark takes no room of its own.
+    let visual: gtk::Widget = match glyph {
+        FolderGlyph::Marked(account_id) => {
+            let overlay = gtk::Overlay::new();
+            overlay.set_child(Some(&img));
+            let mark = gtk::Image::from_icon_name("co.hyprlab.Vireo-filter-symbolic");
+            mark.set_pixel_size(9);
+            mark.add_css_class("filter-mark");
+            mark.add_css_class(&format!("acct-tint-{account_id}"));
+            mark.set_halign(gtk::Align::End);
+            mark.set_valign(if collapsed { gtk::Align::End } else { gtk::Align::Start });
+            overlay.add_overlay(&mark);
+            overlay.set_measure_overlay(&mark, false);
+            overlay.upcast()
+        }
+        _ => img.clone().upcast(),
+    };
 
     // Sent wears no unread chip: what you sent is not new mail. `None` keeps
     // it off the in-place update lists too.
@@ -3968,14 +4086,14 @@ fn build_folder_row(
         row.set_tooltip_text(Some(&tip));
         // Every folder carries an unread chip; in the rail it rides the icon's
         // corner so new mail shows without expanding the sidebar.
-        let (overlay, badge) = with_unread_overlay(&img, unread);
+        let (overlay, badge) = with_unread_overlay(&visual, unread);
         hbox.append(&overlay);
         counted.then_some(badge)
     } else {
         if inset {
-            img.set_margin_start(ROW_LEFT_INSET);
+            visual.set_margin_start(ROW_LEFT_INSET);
         }
-        hbox.append(&img);
+        hbox.append(&visual);
         let name = gtk::Label::new(Some(&folder.name));
         name.set_hexpand(true);
         name.set_halign(gtk::Align::Start);
@@ -3985,8 +4103,7 @@ fn build_folder_row(
         // Every folder shows an unread count chip — present but hidden when
         // zero so it can update in place.
         let badge = gtk::Label::new(Some(&unread.to_string()));
-        badge.add_css_class("unread-badge");
-        badge.set_valign(gtk::Align::Center);
+        style_badge(&badge, 5);
         badge.set_visible(unread > 0);
         hbox.append(&badge);
         counted.then_some(badge)
