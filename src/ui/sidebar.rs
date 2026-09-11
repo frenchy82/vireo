@@ -167,14 +167,13 @@ pub struct SectionData {
 }
 
 /// Initial state for the sidebar.
-/// Start margin that centres the peek's refresh button over the rail's
-/// 80px column: (80 - the flat icon button's 36px) / 2, measured against
-/// the rail in a demo run (rail refresh at x=22, menu at x=23).
-const PEEK_RAIL_REFRESH_MARGIN: i32 = 22;
-
 pub struct SidebarInit {
     /// Icon-only mode: hide all text, show just icons and account pills.
     pub collapsed: bool,
+    /// A mirror instance (the floating peek panel): it never picks a view
+    /// on its own when nothing is selected — the app hands it the primary
+    /// sidebar's choice through `SidebarInput::MirrorSelection`.
+    pub mirror: bool,
     /// The three sections' open state as last left (persisted with the
     /// sidebar layout).
     pub unified_expanded: bool,
@@ -193,7 +192,7 @@ pub struct SidebarInit {
 
 /// What is currently selected in the sidebar.
 #[derive(Clone, PartialEq, Debug)]
-enum Sel {
+pub enum Sel {
     None,
     Unified,
     /// The attachments gallery (all inboxes).
@@ -288,11 +287,15 @@ pub struct Sidebar {
     selected: Sel,
     /// Icon-only mode: hide all text, show just icons and account pills.
     collapsed: bool,
-    /// The narrow-window peek: expanded rows floating over the icon rail.
-    /// The rail's own refresh button stays in place below the menu, so the
-    /// panel's first 80px column is the rail, pixel for pixel, with the
-    /// labels sliding out beside it.
-    peek: bool,
+    /// Set while rows are selected *programmatically* (restoring after a
+    /// rebuild, following the app's navigation): the list boxes' selection
+    /// signals then stay silent. Otherwise a signal-driven input would be
+    /// queued and judged against a selection that has since moved on — two
+    /// programmatic selections in a row used to oscillate forever through
+    /// the app that way.
+    quiet: std::rc::Rc<std::cell::Cell<bool>>,
+    /// See `SidebarInit::mirror`.
+    mirror: bool,
     /// Whether the "Attachments" row is shown (in the pinned footer).
     show_attachments: bool,
     /// Whether the "Contacts" row is shown (in the pinned footer).
@@ -356,7 +359,7 @@ pub struct Sidebar {
     tags_placement: crate::config::SectionPlacement,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum SidebarInput {
     SetContents {
         sections: Vec<SectionData>,
@@ -425,11 +428,10 @@ pub enum SidebarInput {
     /// unlike ToggleCollapsed this never reports CollapsedChanged, so it can't
     /// overwrite the user's own persisted choice.
     SetCollapsed(bool),
-    /// The expanded rows are (or are no longer) the narrow-window peek
-    /// floating over the rail — see the `peek` field. Rebuilds only when the
-    /// rows are expanded; set it before SetCollapsed(false) on open and after
-    /// SetCollapsed(true) on close so each transition rebuilds once.
-    SetPeek(bool),
+    /// Move the highlight to what the app is showing, without reporting it
+    /// back (the docked rail and the floating peek panel are two instances
+    /// of this component; the app pushes every navigation to both).
+    MirrorSelection(Sel),
     /// Toggle the collapsible "Folders" (custom folders) section for an account.
     ToggleCustomFoldersLocal(u32),
     /// Collapse/expand one folder-tree node (a parent folder's chevron, #51).
@@ -668,7 +670,8 @@ impl Component for Sidebar {
             color_provider,
             selected: Sel::None,
             collapsed: init.collapsed,
-            peek: false,
+            quiet: std::rc::Rc::new(std::cell::Cell::new(false)),
+            mirror: init.mirror,
             show_attachments: init.show_attachments,
             show_contacts: init.show_contacts,
             outbox_count: 0,
@@ -728,9 +731,31 @@ impl Component for Sidebar {
         widgets: &mut Self::Widgets,
         msg: Self::Input,
         sender: ComponentSender<Self>,
-        _root: &Self::Root,
+        root: &Self::Root,
+    ) {
+        self.update_inner(widgets, msg, sender, root);
+    }
+}
+
+impl Sidebar {
+    fn update_inner(
+        &mut self,
+        widgets: &mut <Self as Component>::Widgets,
+        msg: SidebarInput,
+        sender: ComponentSender<Self>,
+        _root: &<Self as Component>::Root,
     ) {
         match msg {
+            SidebarInput::MirrorSelection(sel) => {
+                if self.selected != sel {
+                    self.selected = sel.clone();
+                    self.quiet.set(true);
+                    self.clear_other_selections(sel);
+                    self.quiet.set(false);
+                    self.restore_selection();
+                }
+            }
+
             SidebarInput::SetContents {
                 mut sections,
                 show_unified,
@@ -875,10 +900,12 @@ impl Component for Sidebar {
                     return;
                 }
                 self.selected = Sel::Unified;
+                self.quiet.set(true);
                 self.clear_other_selections(Sel::Unified);
                 if let Some(l) = &self.unified_list {
                     l.select_row(l.row_at_index(0).as_ref());
                 }
+                self.quiet.set(false);
                 let _ = sender.output(SidebarOutput::UnifiedSelected);
             }
 
@@ -1154,8 +1181,10 @@ impl Component for Sidebar {
                 let key = Sel::Folder(account_id, path.clone());
                 if self.selected != key {
                     self.selected = key.clone();
+                    self.quiet.set(true);
                     self.clear_other_selections(key);
                     self.select_folder(account_id, &path);
+                    self.quiet.set(false);
                 }
             }
 
@@ -1302,21 +1331,6 @@ impl Component for Sidebar {
                         &sender,
                     );
                     self.restore_selection();
-                }
-            }
-
-            SidebarInput::SetPeek(peek) => {
-                if self.peek != peek {
-                    self.peek = peek;
-                    if !self.collapsed {
-                        self.rebuild_normal(
-                            &widgets.pinned_box,
-                            &widgets.normal_box,
-                            &widgets.footer_box,
-                            &sender,
-                        );
-                        self.restore_selection();
-                    }
                 }
             }
 
@@ -1704,13 +1718,9 @@ impl Sidebar {
         // and centred (Refresh lives in the app's header bar, top-left across
         // from the menu). The collapsed rail's header only has room for the
         // menu button, so Refresh stacks here instead — directly below it.
-        // The peek keeps that rail stack (the panel floats over the rail and
-        // its first column must not move), just pinned to the rail's centre
-        // line instead of the wider panel's.
         {
-            let rail_stack = self.collapsed || self.peek;
             let bar = gtk::Box::new(
-                if rail_stack {
+                if self.collapsed {
                     gtk::Orientation::Vertical
                 } else {
                     gtk::Orientation::Horizontal
@@ -1720,19 +1730,13 @@ impl Sidebar {
 
             self.sync_stack = None;
             self.sync_spinner = None;
-            if rail_stack {
+            if self.collapsed {
                 // Refresh, showing a spinner while any account syncs.
                 let refresh = gtk::Button::new();
                 refresh.set_tooltip_text(Some(i18n("Refresh or long-press for Status Bar").as_str()));
                 refresh.add_css_class("flat");
                 refresh.set_valign(gtk::Align::Center);
-                if self.peek {
-                    // Centred over the rail's 80px, where the rail draws it.
-                    refresh.set_halign(gtk::Align::Start);
-                    refresh.set_margin_start(PEEK_RAIL_REFRESH_MARGIN);
-                } else {
-                    refresh.set_halign(gtk::Align::Center);
-                }
+                refresh.set_halign(gtk::Align::Center);
                 let stack = gtk::Stack::new();
                 stack.set_transition_type(gtk::StackTransitionType::Crossfade);
                 let icon = gtk::Image::from_icon_name("co.hyprlab.Vireo-view-refresh-symbolic");
@@ -1796,7 +1800,11 @@ impl Sidebar {
             row.set_child(Some(&hbox));
             list.append(&row);
             let s = sender.clone();
+            let quiet = self.quiet.clone();
             list.connect_row_activated(move |_, _| {
+                if quiet.get() {
+                    return;
+                }
                 let _ = s.output(SidebarOutput::ComposeRequested);
             });
 
@@ -1927,7 +1935,11 @@ impl Sidebar {
             let s = sender.clone();
             let contacts_row = self.contacts_row.clone();
             let attachments_row = self.attachments_row.clone();
+            let quiet = self.quiet.clone();
             list.connect_row_selected(move |_, row| {
+                if quiet.get() {
+                    return;
+                }
                 let Some(row) = row else { return };
                 if Some(row) == contacts_row.as_ref() {
                     s.input(SidebarInput::ContactsRowClicked);
@@ -1977,7 +1989,11 @@ impl Sidebar {
             list.append(&row);
 
             let s = sender.clone();
+            let quiet = self.quiet.clone();
             list.connect_row_selected(move |_, row| {
+                if quiet.get() {
+                    return;
+                }
                 if row.is_some() {
                     s.input(SidebarInput::OutboxRowSelected);
                 }
@@ -2230,7 +2246,11 @@ impl Sidebar {
                 }
             }
             let s2 = sender.input_sender().clone();
+            let quiet = self.quiet.clone();
             list.connect_row_selected(move |_, row| {
+                if quiet.get() {
+                    return;
+                }
                 if let Some(row) = row {
                     let _ = s2.send(SidebarInput::FolderRowSelected {
                         account_id: id,
@@ -2352,7 +2372,11 @@ impl Sidebar {
                 self.custom_folders
                     .insert(id, custom.iter().map(|f| (*f).clone()).collect());
                 let s3 = sender.input_sender().clone();
+                let quiet = self.quiet.clone();
                 custom_list.connect_row_selected(move |_, row| {
+                    if quiet.get() {
+                        return;
+                    }
                     if let Some(row) = row {
                         // Offset past the essential folders into `section.folders`.
                         let _ = s3.send(SidebarInput::FolderRowSelected {
@@ -2362,7 +2386,11 @@ impl Sidebar {
                     }
                 });
                 let s4 = sender.input_sender().clone();
+                let quiet = self.quiet.clone();
                 custom_list.connect_row_activated(move |_, row| {
+                    if quiet.get() {
+                        return;
+                    }
                     let _ = s4.send(SidebarInput::FolderRowActivated {
                         account_id: id,
                         index: row.index(),
@@ -2673,7 +2701,11 @@ impl Sidebar {
         list.append(&row);
 
         let s = sender.input_sender().clone();
+        let quiet = self.quiet.clone();
         list.connect_row_selected(move |_, row| {
+            if quiet.get() {
+                return;
+            }
             if row.is_some() {
                 let _ = s.send(select_msg(row_kind));
             }
@@ -2683,7 +2715,11 @@ impl Sidebar {
         // activation is off).
         list.set_activate_on_single_click(false);
         let s2 = sender.input_sender().clone();
+        let quiet = self.quiet.clone();
         list.connect_row_activated(move |_, _| {
+            if quiet.get() {
+                return;
+            }
             let _ = s2.send(toggle_msg(row_kind));
         });
         if is_inbox {
@@ -2759,7 +2795,11 @@ impl Sidebar {
                     });
                 }
                 let ss = sender.input_sender().clone();
+                let quiet = self.quiet.clone();
                 sub.connect_row_selected(move |_, row| {
+                    if quiet.get() {
+                        return;
+                    }
                     if let Some(row) = row {
                         let _ = ss.send(if is_inbox {
                             SidebarInput::UnifiedInboxRowSelected(row.index())
@@ -2827,7 +2867,11 @@ impl Sidebar {
                 }
                 self.filtered_badges.insert(Slot::Unified, row_badges.clone());
                 let ss = sender.input_sender().clone();
+                let quiet = self.quiet.clone();
                 sub.connect_row_selected(move |_, row| {
+                    if quiet.get() {
+                        return;
+                    }
                     if let Some(row) = row {
                         let _ = ss.send(SidebarInput::FilteredRowSelected {
                             slot: Slot::Unified,
@@ -2868,7 +2912,11 @@ impl Sidebar {
                     sub.append(&row);
                 }
                 let ss = sender.input_sender().clone();
+                let quiet = self.quiet.clone();
                 sub.connect_row_selected(move |_, row| {
+                    if quiet.get() {
+                        return;
+                    }
                     if let Some(row) = row {
                         let _ = ss.send(SidebarInput::TagRowSelected {
                             slot: Slot::Unified,
@@ -3185,7 +3233,11 @@ impl Sidebar {
             badges.insert((r.account_id, r.folder.id), badge);
         }
         let ss = sender.input_sender().clone();
+        let quiet = self.quiet.clone();
         list.connect_row_selected(move |_, row| {
+            if quiet.get() {
+                return;
+            }
             if let Some(row) = row {
                 let _ = ss.send(SidebarInput::FilteredRowSelected { slot, index: row.index() });
             }
@@ -3318,7 +3370,11 @@ impl Sidebar {
             list.append(&row);
         }
         let ss = sender.input_sender().clone();
+        let quiet = self.quiet.clone();
         list.connect_row_selected(move |_, row| {
+            if quiet.get() {
+                return;
+            }
             if let Some(row) = row {
                 let _ = ss.send(SidebarInput::TagRowSelected { slot, index: row.index() });
             }
@@ -3552,6 +3608,17 @@ impl Sidebar {
     }
 
     fn restore_selection(&mut self) {
+        // With nothing selected the primary instance picks the opening view
+        // (All Inboxes, else the first inbox) and must say so: that first
+        // pick reaches the app through the list boxes' selection signals.
+        // Everything else is a restore of what is already shown — silent.
+        let announce = self.selected == Sel::None && !self.mirror;
+        self.quiet.set(!announce);
+        self.restore_selection_inner();
+        self.quiet.set(false);
+    }
+
+    fn restore_selection_inner(&mut self) {
         match self.selected.clone() {
             Sel::Unified => self.select_unified(),
             Sel::Attachments => self.select_attachments(),
