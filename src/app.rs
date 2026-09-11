@@ -20,6 +20,8 @@ const CONTRIBUTORS: &[(&str, &str)] = &[
     ("frenchy82", "frenchy82"),
     ("Yiannis Ioannides", "yioannides"),
     ("p-mitana", "p-mitana"),
+    ("Laszlo Lang", "7system7"),
+    ("Peter Weiss", "peterweissdk"),
 ];
 
 // The message list's opening width now comes from config (the remembered pane
@@ -203,6 +205,9 @@ pub struct AppModel {
     reader_overflow_btn: gtk::Button,
     /// The toolbar's tag button (#71) — the anchor its menu pops from.
     reader_tag_btn: gtk::Button,
+    /// The reader toolbar's Move To… button (#164): the folder picker
+    /// anchors to it.
+    reader_move_btn: gtk::Button,
     /// Cache of fetched attachments, keyed by (account_id, message_id), so
     /// revisiting a message doesn't re-download them. Byte-bounded — raw
     /// attachment bytes for every message ever opened added up to hundreds of
@@ -474,6 +479,10 @@ pub struct AppModel {
     /// asked for meanwhile runs when it lands.
     tag_view_loading: bool,
     tag_view_dirty: bool,
+    /// When each account's keywords were last re-synced from the server
+    /// (#166), so reopening a tag view within a few seconds does not scan
+    /// every folder again.
+    keyword_sync_at: HashMap<u32, std::time::Instant>,
     /// The tag colours as `.tag-<keyword>` classes, app-wide (the list's
     /// chips, the sidebar's rows, the menus' swatches).
     tag_provider: gtk::CssProvider,
@@ -504,6 +513,8 @@ pub struct AppModel {
     /// Whether the message list rows carry an Actions Palette at all.
     list_palette: bool,
     list_palette_hover: bool,
+    /// The row's ⋯ opens the row menu instead of the sliding palette.
+    list_palette_menu: bool,
     /// Message rows take a sideways swipe to archive / delete (#92).
     swipe_enabled: bool,
     /// The message list's swipe-gesture sides are swapped (#swipe).
@@ -778,6 +789,7 @@ pub enum AppMsg {
     SetCardActionsMode { hover_toggle: bool, hover_auto: bool },
     SetListPalette(bool),
     SetListPaletteHover(bool),
+    SetListPaletteMenu(bool),
     SetSwipeEnabled(bool),
     SetSwipeReversed(bool),
     SetComposeInline(bool),
@@ -909,6 +921,8 @@ pub enum AppMsg {
     FindTags,
     /// One account's answer to the scan.
     KeywordsFound { account_id: u32, findings: Vec<KeywordFinding> },
+    /// A keyword re-sync (#166) changed the cached keywords of these folders.
+    KeywordsSynced { account_id: u32, paths: Vec<String> },
     /// The scan's safety net: report what has come in, if the scan `gen` is
     /// still the one running.
     TagScanTimeout(u32),
@@ -985,6 +999,11 @@ pub enum AppMsg {
     MoveToInbox,
     /// Pop the tag menu on the reader toolbar's tag button.
     ReaderTagMenu,
+    /// Open the Move To… folder picker (#164) for the reader's target, or
+    /// the whole list selection.
+    MoveToMenu,
+    /// The picker's answer: file the target or selection into `dest`.
+    MoveSelectionTo { account_id: u32, dest: String },
     /// Second stage of ImportSettings: the chosen file, applied on a clean
     /// main-loop turn (working inside the chooser's completion callback froze
     /// the app when the confirmation dialog presented there).
@@ -1451,26 +1470,14 @@ impl SimpleComponent for AppModel {
                                     },
                                 },
                                 // In-message find (#103), right of the star.
-                                pack_start = &gtk::Button {
-                                    set_icon_name: "co.hyprlab.Vireo-loupe-with-arrow-symbolic",
-                                    set_tooltip_text: Some(i18n("Find in message (Ctrl+F)").as_str()),
-                                    add_css_class: "flat",
-                                    #[watch]
-                                    set_visible: !model.showing_outbox
-                                        && model.current.is_some()
-                                        && model.reader_compose.is_none()
-                                        && !model.reader_actions_collapsed,
-                                    connect_clicked[sender] => move |_| {
-                                        sender.input(AppMsg::OpenReaderFind);
-                                    },
-                                },
                                 // (No Add-to-Contacts button here: the action
                                 // lives on the address itself — right-click any
                                 // address in a message header.)
                                 // pack_end fills right-to-left, so these are declared
                                 // in reverse of their visual order. Left to right:
-                                // Archive, Delete, Spam, Print. (The sender-check
-                                // seal lives in the message header now — #88.)
+                                // Archive, Delete, Spam, Move To, Find, Print. (The
+                                // sender-check seal lives in the message header
+                                // now — #88.)
                                                                 pack_end = &gtk::Button {
                                     set_icon_name: "co.hyprlab.Vireo-printer-symbolic",
                                     set_tooltip_text: Some(i18n("Print Preview (Ctrl+Shift+P)").as_str()),
@@ -1484,6 +1491,36 @@ impl SimpleComponent for AppModel {
                                     // shows what will come out and prints from
                                     // there, so nobody spends paper to find out.
                                     connect_clicked[sender] => move |_| sender.input(AppMsg::PrintPreview),
+                                },
+                                pack_end = &gtk::Button {
+                                    set_icon_name: "co.hyprlab.Vireo-loupe-with-arrow-symbolic",
+                                    set_tooltip_text: Some(i18n("Find in message (Ctrl+F)").as_str()),
+                                    add_css_class: "flat",
+                                    // Greyed out, not hidden, with no message
+                                    // open: the toolbar must not shift.
+                                    #[watch]
+                                    set_visible: !model.showing_outbox
+                                        && model.reader_compose.is_none()
+                                        && !model.reader_actions_collapsed,
+                                    #[watch]
+                                    set_sensitive: model.current.is_some(),
+                                    connect_clicked[sender] => move |_| {
+                                        sender.input(AppMsg::OpenReaderFind);
+                                    },
+                                },
+                                // Move To… (#164), between Find and Spam: a
+                                // folder picker for the target, or the whole
+                                // list selection.
+                                pack_end = &gtk::Box {
+                                    #[local_ref]
+                                    reader_move_btn -> gtk::Button {
+                                        #[watch]
+                                        set_visible: !model.showing_outbox && !model.reader_actions_collapsed
+                                            && model.reader_compose.is_none(),
+                                        #[watch]
+                                        set_sensitive: model.reply_target().is_some()
+                                            || model.list_selection.len() > 1,
+                                    },
                                 },
                                 pack_end = &gtk::Button {
                                     #[watch]
@@ -2070,6 +2107,12 @@ impl SimpleComponent for AppModel {
                 b.add_css_class("flat");
                 b
             },
+            reader_move_btn: {
+                let b = gtk::Button::from_icon_name("co.hyprlab.Vireo-folder-symbolic");
+                b.set_tooltip_text(Some(i18n("Move To…").as_str()));
+                b.add_css_class("flat");
+                b
+            },
             attachment_cache: crate::ram_cache::RamCache::new(ATTACHMENT_CACHE_BUDGET),
             unified: false,
             unified_view: UnifiedView::Kind(FolderKind::Inbox),
@@ -2203,6 +2246,7 @@ impl SimpleComponent for AppModel {
             tag_view_cache: HashMap::new(),
             tag_view_loading: false,
             tag_view_dirty: false,
+            keyword_sync_at: HashMap::new(),
             tag_provider: gtk::CssProvider::new(),
             cache: crate::cache::Cache::open().ok(),
             filter_moved: Default::default(),
@@ -2214,6 +2258,7 @@ impl SimpleComponent for AppModel {
             card_actions_auto: config::load_card_actions_auto(),
             list_palette: config::load_list_palette(),
             list_palette_hover: config::load_list_palette_hover(),
+            list_palette_menu: config::load_list_palette_menu(),
             swipe_enabled: config::load_swipe_enabled(),
             swipe_reversed: config::load_swipe_reversed(),
             compose_inline: config::load_compose_inline(),
@@ -2348,6 +2393,7 @@ impl SimpleComponent for AppModel {
         // The app-wide theme choice must be in force before the first frame.
         apply_app_theme(model.app_theme);
         let reader_tag_btn = model.reader_tag_btn.clone();
+        let reader_move_btn = model.reader_move_btn.clone();
         let widgets = view_output!();
         let _ = model.reader_header.set(widgets.reader_header.clone());
         // Collapse the reader header's actions into the overflow menu when the
@@ -2433,6 +2479,10 @@ impl SimpleComponent for AppModel {
             let s = sender.input_sender().clone();
             model.reader_tag_btn.connect_clicked(move |_| {
                 let _ = s.send(AppMsg::ReaderTagMenu);
+            });
+            let s = sender.input_sender().clone();
+            model.reader_move_btn.connect_clicked(move |_| {
+                let _ = s.send(AppMsg::MoveToMenu);
             });
         }
         // The inline compose/reply pane is an overlay over the WHOLE reader
@@ -3096,6 +3146,14 @@ impl SimpleComponent for AppModel {
                     let ml = model.message_list.sender().clone();
                     gtk::glib::timeout_add_seconds_local_once(5, move || {
                         let _ = ml.send(MessageListInput::ContextMenu { x: 120.0, y: 40.0 });
+                    });
+                }
+                // VIREO_SHOWCASE_MOVE=1 opens the Move To… picker at 5s
+                // (it captures itself a second later).
+                if std::env::var("VIREO_SHOWCASE_MOVE").is_ok() {
+                    let s = sender.input_sender().clone();
+                    gtk::glib::timeout_add_seconds_local_once(5, move || {
+                        let _ = s.send(AppMsg::MoveToMenu);
                     });
                 }
                 // VIREO_SHOWCASE_RAIL=1 collapses the sidebar to the rail
@@ -4496,6 +4554,10 @@ impl SimpleComponent for AppModel {
                 for w in self.workers.values() {
                     let _ = w.send(MailRequest::RefreshUnread);
                 }
+                // A tag view lists what the index holds, and the index only
+                // learns a folder's flags when that folder syncs: have the
+                // accounts in scope re-read their keywords (#166).
+                self.sync_tag_keywords();
             }
 
             AppMsg::ShowcaseFolder(kind) => {
@@ -4524,13 +4586,13 @@ impl SimpleComponent for AppModel {
             }
 
             AppMsg::Reply => {
-                if let Some(m) = self.reply_target() {
+                if let Some(m) = self.compose_target() {
                     self.open_inline_reply(m.account_id, self.reply_pgp(&m, reply_prefill(&m)), Some((m.account_id, m.id)), &sender);
                 }
             }
 
             AppMsg::ReplyAll => {
-                if let Some(m) = self.reply_target() {
+                if let Some(m) = self.compose_target() {
                     let self_email = self.email_of(m.account_id).unwrap_or_default();
                     self.open_inline_reply(
                         m.account_id,
@@ -4542,7 +4604,7 @@ impl SimpleComponent for AppModel {
             }
 
             AppMsg::Forward => {
-                if let Some(m) = self.reply_target() {
+                if let Some(m) = self.compose_target() {
                     self.open_inline_reply(m.account_id, forward_prefill(&m), Some((m.account_id, m.id)), &sender);
                 }
             }
@@ -5228,6 +5290,14 @@ impl SimpleComponent for AppModel {
                 }
             }
 
+            AppMsg::SetListPaletteMenu(on) => {
+                if self.list_palette_menu != on {
+                    self.list_palette_menu = on;
+                    self.save_settings();
+                    self.message_list.emit(MessageListInput::SetPaletteMenu(on));
+                }
+            }
+
             AppMsg::SetSwipeEnabled(on) => {
                 if self.swipe_enabled != on {
                     self.swipe_enabled = on;
@@ -5859,7 +5929,28 @@ impl SimpleComponent for AppModel {
                 self.message_list.emit(MessageListInput::SetInJunk(false));
                 self.show_tag_view();
                 self.refresh_tag_view(&sender);
+                self.sync_tag_keywords();
                 self.push_index_complete();
+            }
+
+            AppMsg::KeywordsSynced { account_id, paths } => {
+                if paths.is_empty() {
+                    return;
+                }
+                // The index changed under the open views: the tag view
+                // re-reads it, and an open folder among the changed ones
+                // re-syncs so its rows' chips follow.
+                if self.tag_view.is_some() {
+                    self.refresh_tag_view(&sender);
+                }
+                if let Some(sel) = self.selected.clone() {
+                    if sel.account_id == account_id && paths.contains(&sel.path) {
+                        self.send_to(account_id, MailRequest::LoadMessages {
+                            folder_id: sel.folder_id,
+                            path: sel.path,
+                        });
+                    }
+                }
             }
 
             AppMsg::TagViewLoaded { key, rows } => {
@@ -5903,6 +5994,61 @@ impl SimpleComponent for AppModel {
                         btn.height() as f64,
                         vec![entries],
                     );
+                }
+            }
+
+            AppMsg::MoveToMenu => {
+                // A multi-selection lists the folders of its first message's
+                // account (the move reports anything from another account);
+                // otherwise the target's. The picker leaves out the folder
+                // the mail already sits in.
+                let (account_id, exclude) = if self.list_selection.len() > 1 {
+                    (self.list_selection[0].0, None)
+                } else {
+                    match self.reply_target() {
+                        Some(m) => (m.account_id, self.resolve_folder_path(&m)),
+                        None => return,
+                    }
+                };
+                let folders = self.folders.get(&account_id).cloned().unwrap_or_default();
+                if folders.is_empty() {
+                    return;
+                }
+                // Anchored to the toolbar button, or to the overflow button
+                // when the toolbar has folded into it.
+                let btn = if self.reader_move_btn.is_mapped() {
+                    self.reader_move_btn.clone()
+                } else {
+                    self.reader_overflow_btn.clone()
+                };
+                let s = sender.input_sender().clone();
+                crate::ui::folder_picker::show_folder_picker(
+                    &btn,
+                    (btn.width() / 2) as f64,
+                    btn.height() as f64,
+                    folders,
+                    exclude,
+                    move |dest| {
+                        let _ = s.send(AppMsg::MoveSelectionTo { account_id, dest });
+                    },
+                );
+            }
+
+            AppMsg::MoveSelectionTo { account_id, dest } => {
+                if self.list_selection.len() > 1 {
+                    // The same path a drag onto the sidebar takes: grouped by
+                    // source folder, undoable, foreign accounts reported.
+                    let items: Vec<(u32, u32, u32, u32)> = self
+                        .list_selection
+                        .iter()
+                        .filter_map(|(aid, id)| {
+                            self.find_cached_message(*aid, *id)
+                                .map(|m| (m.account_id, m.folder_id, m.uid, m.id))
+                        })
+                        .collect();
+                    self.drop_move(account_id, dest, items);
+                } else if let Some(m) = self.reply_target() {
+                    self.move_to_path(m, dest);
                 }
             }
 
@@ -7136,6 +7282,7 @@ impl AppModel {
             self.card_actions_auto,
             self.list_palette,
             self.list_palette_hover,
+            self.list_palette_menu,
             self.swipe_enabled,
             self.swipe_reversed,
             self.compose_inline,
@@ -7635,6 +7782,15 @@ impl AppModel {
         self.set_header_refresh_busy(busy);
     }
 
+    /// An account's avatar picture (#162), when one is set and its file is
+    /// still there.
+    fn account_avatar(&self, account_id: u32) -> Option<std::path::PathBuf> {
+        self.config
+            .get(account_id.saturating_sub(1) as usize)
+            .and_then(|c| c.avatar.as_deref())
+            .and_then(config::avatar_path)
+    }
+
     /// Custom avatar emoji for an account, if set.
     fn account_emoji(&self, account_id: u32) -> Option<String> {
         // Demo mode only: showcase the emoji-avatar feature on the sample accounts.
@@ -7742,6 +7898,31 @@ impl AppModel {
                 .cloned(),
             _ => None,
         }
+    }
+
+    /// The message a reply, reply-all or forward addresses: the reply
+    /// target, except when only the list row is selected over a
+    /// conversation. That row stands for the thread's head, its oldest
+    /// message; the toolbar's reply follows the reading pane instead and
+    /// addresses the message shown at the top (#165) — with "newest first"
+    /// on, the newest message from someone else (never the user's own
+    /// reply by accident), or the newest of all when every message is
+    /// theirs; the head otherwise. A highlighted card is addressed as
+    /// itself.
+    fn compose_target(&self) -> Option<Message> {
+        let m = self.reply_target()?;
+        if self.selection_from_cards || !self.thread_star_target(&m) || !self.thread_newest_first {
+            return Some(m);
+        }
+        let own = self.email_of(m.account_id).unwrap_or_default();
+        let newest = |from_others: bool| {
+            self.current_thread
+                .iter()
+                .filter(|t| !from_others || !t.from_addr.eq_ignore_ascii_case(&own))
+                .max_by_key(|t| t.timestamp)
+                .cloned()
+        };
+        newest(true).or_else(|| newest(false)).or(Some(m))
     }
 
     /// Launch (or re-present) the welcome wizard: the first run's greeting,
@@ -8326,6 +8507,7 @@ impl AppModel {
                     .collect();
                 let color = self.account_color(account.id);
                 let emoji = self.account_emoji(account.id);
+                let avatar = self.account_avatar(account.id);
                 // This account's collapsed tree nodes, keyed "email\tpath".
                 let prefix = format!("{email}\t");
                 let tree_collapsed = self
@@ -8341,6 +8523,7 @@ impl AppModel {
                     tags_expanded: self.tags_expanded_accounts.contains(email),
                     color,
                     emoji,
+                    avatar,
                     account,
                     folders,
                     filtered,
@@ -8600,6 +8783,12 @@ impl AppModel {
                     } else {
                         section.push(entry!(i18n("Mark as Spam"), "mail-mark-junk", AppMsg::MarkSpam, acts));
                     }
+                    section.push(entry!(
+                        i18n("Move To…"),
+                        "folder",
+                        AppMsg::MoveToMenu,
+                        acts || self.list_selection.len() > 1
+                    ));
                     section.push(entry!(i18n("Archive"), "mail-archive", AppMsg::Archive, acts));
                     section.push(entry!(
                         i18n("Delete"),
@@ -10674,6 +10863,33 @@ impl AppModel {
 
     /// The keywords a tag view answers: one, or — the unified Tags row —
     /// every configured tag.
+    /// With a tag view open, ask the accounts in its scope to bring their
+    /// cached keywords in line with the server (#166). An account scanned
+    /// within the last few seconds is left alone: reopening a view, or a
+    /// refresh right after opening one, must not walk every folder twice.
+    fn sync_tag_keywords(&mut self) {
+        const PAUSE: std::time::Duration = std::time::Duration::from_secs(15);
+        let Some((scope, _)) = self.tag_view.clone() else { return };
+        let keywords: Vec<String> = self.tags.iter().map(|t| t.keyword.clone()).collect();
+        if keywords.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let ids: Vec<u32> = self
+            .accounts
+            .iter()
+            .map(|a| a.id)
+            .filter(|id| scope.map_or(true, |s| s == *id))
+            .collect();
+        for id in ids {
+            if self.keyword_sync_at.get(&id).is_some_and(|t| now.duration_since(*t) < PAUSE) {
+                continue;
+            }
+            self.keyword_sync_at.insert(id, now);
+            self.send_to(id, MailRequest::RefreshKeywords { keywords: keywords.clone() });
+        }
+    }
+
     fn tag_view_keywords(&self, kw: &Option<String>) -> Vec<String> {
         match kw {
             Some(k) => vec![k.clone()],
@@ -11018,6 +11234,7 @@ impl AppModel {
             card_actions_auto: self.card_actions_auto,
             list_palette: self.list_palette,
             list_palette_hover: self.list_palette_hover,
+            list_palette_menu: self.list_palette_menu,
             swipe_enabled: self.swipe_enabled,
             swipe_reversed: self.swipe_reversed,
             compose_inline: self.compose_inline,
@@ -11076,6 +11293,7 @@ impl AppModel {
                 }
                 PrefOutput::SetListPalette(on) => AppMsg::SetListPalette(on),
                 PrefOutput::SetListPaletteHover(on) => AppMsg::SetListPaletteHover(on),
+                PrefOutput::SetListPaletteMenu(on) => AppMsg::SetListPaletteMenu(on),
                 PrefOutput::SetSwipeEnabled(on) => AppMsg::SetSwipeEnabled(on),
                 PrefOutput::SetSwipeReversed(on) => AppMsg::SetSwipeReversed(on),
                 PrefOutput::SetComposeInline(on) => AppMsg::SetComposeInline(on),
@@ -12721,6 +12939,7 @@ fn demo_account_configs() -> Vec<AccountConfig> {
         smtp_password: String::new(),
         color: Some(color.into()),
         emoji: Some(emoji.into()),
+        avatar: None,
         signature: None,
         signature_html: false,
         label: None,
@@ -13259,6 +13478,7 @@ fn map_event(account_id: u32, event: WorkerEvent) -> AppMsg {
         }
         WorkerEvent::Located { message_id, hit } => AppMsg::MidLocated { account_id, message_id, hit },
         WorkerEvent::KeywordsFound(findings) => AppMsg::KeywordsFound { account_id, findings },
+        WorkerEvent::KeywordsSynced { paths } => AppMsg::KeywordsSynced { account_id, paths },
         WorkerEvent::Restored { folder_id, message_ids } => {
             AppMsg::UndoRestored { account_id, folder_id, message_ids }
         }

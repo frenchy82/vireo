@@ -64,11 +64,11 @@ msgstr "Marquer comme non lu"
 msgid "Flag"
 msgstr "Suivre"
 
-msgid "Find in message (Ctrl+F)"
-msgstr "Rechercher dans le message (Ctrl+F)"
-
 msgid "Print Preview (Ctrl+Shift+P)"
 msgstr "Aperçu avant impression (Ctrl+Maj+P)"
+
+msgid "Find in message (Ctrl+F)"
+msgstr "Rechercher dans le message (Ctrl+F)"
 
 msgid "Not Spam"
 msgstr ""
@@ -118,6 +118,10 @@ msgstr "Actions"
 
 msgid "Tags"
 msgstr "Mots-clés"
+
+#, fuzzy
+msgid "Move To…"
+msgstr "Déplacer vers"
 
 msgid "Refresh or long-press for Status Bar"
 msgstr "Actualiser ou appuyer longuement pour la barre d'état"
@@ -995,20 +999,38 @@ msgstr ""
 msgid "Label (defaults to email address)"
 msgstr "Étiquette (adresse e-mail par défaut)"
 
-msgid "Circle color"
+msgid "Account accent color"
+msgstr ""
+
+msgid "The circle, and this account's marks in the sidebar and lists"
+msgstr ""
+
+#, fuzzy
+msgid "Circle shows"
 msgstr "Couleur du cercle"
+
+msgid "Initials or emoji"
+msgstr ""
+
+#, fuzzy
+msgid "Picture"
+msgstr "Signature"
 
 msgid "Emoji"
 msgstr "Émoji"
 
-msgid "Optional — shown instead of initials"
+#, fuzzy
+msgid "Shown in the circle instead of the initials"
 msgstr "Optionnel — affiché à la place des initiales"
+
+msgid "Choose…"
+msgstr ""
 
 msgid "Use initials"
 msgstr "Utiliser les initiales"
 
-msgid "Show name initials instead of an emoji"
-msgstr "Afficher les initiales du nom au lieu d'un émoji"
+msgid "A photo or logo from this computer"
+msgstr ""
 
 msgid "Send-as aliases"
 msgstr "Alias d'expédition"
@@ -1118,6 +1140,12 @@ msgstr "Activé"
 
 msgid "Off"
 msgstr "Désactivé"
+
+msgid "Choose a Picture"
+msgstr ""
+
+msgid "Images"
+msgstr "Images"
 
 msgid "Testing…"
 msgstr "Test en cours…"
@@ -1439,9 +1467,6 @@ msgstr "Afficher uniquement ce type"
 
 msgid "All types"
 msgstr "Tous les types"
-
-msgid "Images"
-msgstr "Images"
 
 msgid "PDFs"
 msgstr "Fichiers PDF"
@@ -2014,6 +2039,10 @@ msgstr "Ajouter un numéro de téléphone"
 
 msgid "Add website"
 msgstr "Ajouter un site web"
+
+#, fuzzy
+msgid "Search folders"
+msgstr "Filtres de recherche"
 
 msgid "Mark as read"
 msgstr "Marquer comme lu"
@@ -2803,9 +2832,8 @@ msgstr ""
 msgid "The account list under the unified Drafts row."
 msgstr ""
 
-#, fuzzy
 msgid "The account list under the unified Archive row."
-msgstr "Afficher sous Toutes les boîtes"
+msgstr ""
 
 msgid "The folders under the Filters row."
 msgstr ""
@@ -2855,6 +2883,15 @@ msgid ""
 msgstr ""
 "La palette ⋯ de la liste des messages s'ouvre automatiquement lorsque le "
 "pointeur s'arrête sur une ligne."
+
+#, fuzzy
+msgid "Actions Palette as a menu"
+msgstr "Délai d'expiration de la palette d'actions"
+
+msgid ""
+"The ⋯ opens the row's menu, the same one a right-click shows, instead of "
+"sliding the palette out."
+msgstr ""
 
 msgid "Swipe actions"
 msgstr "Actions par glissement"
@@ -3920,8 +3957,8 @@ msgstr "Hyprlab"
 #~ msgid "Add Account"
 #~ msgstr "Ajouter un compte"
 
-#~ msgid "Show under All Inboxes"
-#~ msgstr "Afficher sous Toutes les boîtes"
+#~ msgid "Show name initials instead of an emoji"
+#~ msgstr "Afficher les initiales du nom au lieu d'un émoji"
 
 #~ msgid "All Inboxes"
 #~ msgstr "Toutes les boîtes"
@@ -3939,9 +3976,6 @@ msgstr "Hyprlab"
 #~ msgid "Filtered Folders section"
 #~ msgstr "Section « Dossiers filtrés »"
 
-#~ msgid "Filtered Folders"
-#~ msgstr "Dossiers filtrés"
-
 #~ msgid ""
 #~ "Inside All Inboxes, folding away with it, or in the scrolling sidebar "
 #~ "above or below the accounts."
@@ -3955,6 +3989,9 @@ msgstr "Hyprlab"
 
 #~ msgid "Inside All Inboxes"
 #~ msgstr "Dans toutes les boîtes de réception"
+
+#~ msgid "Filtered Folders"
+#~ msgstr "Dossiers filtrés"
 
 #~ msgid "Remove Account"
 #~ msgstr "Supprimer le compte"

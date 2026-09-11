@@ -154,6 +154,8 @@ pub struct SectionData {
     pub color: String,
     /// Avatar emoji; when absent, account-name initials are shown.
     pub emoji: Option<String>,
+    /// Avatar picture (#162), shown before the emoji and the initials.
+    pub avatar: Option<std::path::PathBuf>,
     /// Custom-folder paths whose tree node is collapsed (#51).
     pub tree_collapsed: Vec<String>,
     /// The folders this account's own "Filtered Folders" section lists
@@ -1996,14 +1998,23 @@ impl Sidebar {
             circle.set_size_request(30, 30);
             // Drawn ink-centred (see `ui::initials`), not a label: a lone
             // letter or an emoji sits exactly in the middle of the disc.
-            let glyph = match &section.emoji {
-                Some(em) if !em.is_empty() => crate::ui::initials::glyph_picture(em, &section.color, 0.55, 30),
+            let glyph: gtk::Widget = match (&section.avatar, &section.emoji) {
+                (Some(path), _) => {
+                    // A picture fills the disc; the disc's rounded corners
+                    // clip it into a circle.
+                    circle.set_overflow(gtk::Overflow::Hidden);
+                    crate::ui::initials::avatar_picture(path, 30).upcast()
+                }
+                (None, Some(em)) if !em.is_empty() => {
+                    crate::ui::initials::glyph_picture(em, &section.color, 0.55, 30).upcast()
+                }
                 _ => crate::ui::initials::glyph_picture(
                     &account_initials(&name_str, &section.account.email),
                     &section.color,
                     0.47,
                     30,
-                ),
+                )
+                .upcast(),
             };
             circle.append(&glyph);
             // While this account's section is collapsed its Inbox row (and the
@@ -3772,7 +3783,7 @@ fn attach_folder_context_menu(
     list.add_controller(click);
 }
 
-fn account_initials(name: &str, email: &str) -> String {
+pub(crate) fn account_initials(name: &str, email: &str) -> String {
     let mut it = name.split_whitespace();
     let a = it.next().and_then(|w| w.chars().next());
     let b = it.next().and_then(|w| w.chars().next());
@@ -3868,14 +3879,21 @@ fn build_unified_inbox_row(
     circle.set_halign(gtk::Align::Center);
     circle.set_hexpand(false);
     circle.set_size_request(21, 21);
-    let glyph = match &section.emoji {
-        Some(em) if !em.is_empty() => crate::ui::initials::glyph_picture(em, &section.color, 0.6, 21),
+    let glyph: gtk::Widget = match (&section.avatar, &section.emoji) {
+        (Some(path), _) => {
+            circle.set_overflow(gtk::Overflow::Hidden);
+            crate::ui::initials::avatar_picture(path, 21).upcast()
+        }
+        (None, Some(em)) if !em.is_empty() => {
+            crate::ui::initials::glyph_picture(em, &section.color, 0.6, 21).upcast()
+        }
         _ => crate::ui::initials::glyph_picture(
             &account_initials(label, &section.account.email),
             &section.color,
             0.5,
             21,
-        ),
+        )
+        .upcast(),
     };
     circle.append(&glyph);
 
@@ -4002,7 +4020,7 @@ fn with_unread_overlay(
 /// list, while "INBOX.Clients.Acme" is one level down because "INBOX.Clients"
 /// is. The delimiter itself never reaches the UI, so any of the common ones is
 /// accepted at the boundary.
-fn folder_depth(folder: &Folder, all: &[&Folder]) -> usize {
+pub(crate) fn folder_depth(folder: &Folder, all: &[&Folder]) -> usize {
     all.iter()
         .filter(|g| {
             g.id != folder.id

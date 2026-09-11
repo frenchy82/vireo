@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.27.1-beta.1" date="2026-09-11" type="development">
+      <description>
+        <p>Catch-up with stable 1.27.0: the same code and documentation on the beta channel.</p>
+      </description>
+    </release>
     <release version="1.27.0-beta.3" date="2026-09-11" type="development">
       <description>
         <p>Third preview of 1.27.0: a tag finder in Settings that reads every mailbox for tags already in use and imports them; Not Spam in Junk; sender logos at the size the site publishes; initials centred by their ink in the list, the sidebar and the reader; the compose toolbar folds into a menu in a narrow pane; tags in a submenu of the context menu; the icon rail toggle no longer stretches the icons.</p>

@@ -58,10 +58,10 @@ msgstr ""
 msgid "Flag"
 msgstr ""
 
-msgid "Find in message (Ctrl+F)"
+msgid "Print Preview (Ctrl+Shift+P)"
 msgstr ""
 
-msgid "Print Preview (Ctrl+Shift+P)"
+msgid "Find in message (Ctrl+F)"
 msgstr ""
 
 msgid "Not Spam"
@@ -110,6 +110,9 @@ msgid "Actions"
 msgstr ""
 
 msgid "Tags"
+msgstr ""
+
+msgid "Move To…"
 msgstr ""
 
 msgid "Refresh or long-press for Status Bar"
@@ -913,19 +916,34 @@ msgstr ""
 msgid "Label (defaults to email address)"
 msgstr ""
 
-msgid "Circle color"
+msgid "Account accent color"
+msgstr ""
+
+msgid "The circle, and this account's marks in the sidebar and lists"
+msgstr ""
+
+msgid "Circle shows"
+msgstr ""
+
+msgid "Initials or emoji"
+msgstr ""
+
+msgid "Picture"
 msgstr ""
 
 msgid "Emoji"
 msgstr ""
 
-msgid "Optional — shown instead of initials"
+msgid "Shown in the circle instead of the initials"
+msgstr ""
+
+msgid "Choose…"
 msgstr ""
 
 msgid "Use initials"
 msgstr ""
 
-msgid "Show name initials instead of an emoji"
+msgid "A photo or logo from this computer"
 msgstr ""
 
 msgid "Send-as aliases"
@@ -1021,6 +1039,12 @@ msgid "On"
 msgstr ""
 
 msgid "Off"
+msgstr ""
+
+msgid "Choose a Picture"
+msgstr ""
+
+msgid "Images"
 msgstr ""
 
 msgid "Testing…"
@@ -1322,9 +1346,6 @@ msgid "Show only this type"
 msgstr ""
 
 msgid "All types"
-msgstr ""
-
-msgid "Images"
 msgstr ""
 
 msgid "PDFs"
@@ -1821,6 +1842,9 @@ msgid "Add phone"
 msgstr ""
 
 msgid "Add website"
+msgstr ""
+
+msgid "Search folders"
 msgstr ""
 
 msgid "Mark as read"
@@ -2570,6 +2594,14 @@ msgstr ""
 msgid ""
 "The message list's ⋯ palette slides open by itself while the pointer rests "
 "on a row."
+msgstr ""
+
+msgid "Actions Palette as a menu"
+msgstr ""
+
+msgid ""
+"The ⋯ opens the row's menu, the same one a right-click shows, instead of "
+"sliding the palette out."
 msgstr ""
 
 msgid "Swipe actions"
