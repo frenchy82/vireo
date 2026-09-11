@@ -1,5 +1,80 @@
 # Changelog
 
+## 1.27.0-beta.2 — 2026-09-11
+
+Second preview of 1.27.0: filters and tags settle into the sidebar and
+Settings, unread chips get per-row switches and never overflow, and a
+renamed folder no longer haunts every fetch.
+
+- **Filters in the sidebar.** The unified "Filtered Folders" row is
+  "Filters" (`row_title`, the heading-style section, and the Settings →
+  Sidebar rows that name it). The per-rule "Show under All Inboxes"
+  switch is gone: `FilterRule.show_in_unified` is removed (older
+  `filters.toml` files still load; the key is ignored) and the unified
+  Filters section lists every rule's destination
+  (`unified_folder_refs`), switched on or off as a whole. Each account's
+  own Filtered Folders section is gone too; instead a destination folder
+  is marked in place in the account's hierarchy (`filter_icon` →
+  `FolderGlyph`): a custom folder wears the filter-folder glyph in the
+  account's colour (`filtered_folder_icon`, `acct-tint-{id}`), a main
+  folder (Archive, Junk…) keeps its grey glyph with a 9px
+  `filter-symbolic` mark on the icon's corner in the account's colour
+  (`FolderGlyph::Marked`, `.filter-mark`; bottom-right in the rail, where
+  the unread badge has the top). The unified Filters rows show the
+  kind's glyph tinted. `co.hyprlab.Vireo-filter-symbolic` (GNOME's
+  three-bar filter) joins the bundled icon set.
+- **Tags under each account** sit between the essential folders and the
+  "Folders (N)" list.
+- **One folder context menu** (`folder_menu_items(id, &Folder,
+  filtered)`) wherever a folder is listed — under its account, as a
+  unified Filters row, or in a heading-style filtered section: Mark as
+  Read, Refresh, "Edit Filter…" for a filter destination
+  (`CtxAction::EditFilter { account_id, path }` opens Settings on the
+  Filters page with that rule's editor), Rename/Delete for custom
+  folders, Empty for Trash and Junk. The unified rows drop their extra
+  "Account Settings…" item. Every tag row (unified, heading-style,
+  per-account) takes a right-click: "Edit Tag…"
+  (`attach_tag_context_menu`, `CtxAction::EditTag(keyword)`).
+- **Filter and tag editors are pages.** `open_filter_page` /
+  `open_tag_page` push an `adw::NavigationPage` (tags `filter` / `tag`)
+  on the accounts panel's navigation view, like the account and cloud
+  editors: a header with Save and the window's close button, Enter in a
+  field saves (`push_form_page`, `form_save`). `AccountsOutput::EditorOpen`
+  carries the settings page that owns the open editor
+  (`Option<&'static str>`), so the leave-editor prompt says filter or
+  tag and saves through the open page (`AccountsInput::SaveOpenPage`);
+  `CloseEditor` pops any of the three. The colour chooser parents to the
+  active window. The Filters and Tags list cards lose their pencil (and
+  the filter cards their "Count unread" switch, which lives in the
+  editor) for a chevron, like the account and cloud cards.
+- **Unread chips per unified row** (Settings → Sidebar → Unified →
+  "Unread counts", an expander with a switch each for Inboxes, Starred,
+  Drafts, Archive and Filters): `UnifiedChips` in `privacy.toml`
+  (`[unified_chips]`, all on; the old `unified_chip` still counts for the
+  Inboxes row through `load_unified_chips`), read by the sidebar's
+  `chip_shown(row)` at every chip site, rail dots included.
+- **Chips never overflow.** `style_badge(label, max_chars)` is the one
+  way to make an unread chip: ellipsized past five digits (four in the
+  rail's corner badges), and the unified header titles ellipsize, so a
+  wide chip shortens the title rather than pushing the chevron out.
+- **Unified glyphs aligned.** Rows under Filters and Tags no longer take
+  the `.unified-subrow` 2px pull-in that centres the 21px account pills
+  (`build_unified_sub_row(..., pill)`), so their 16px icons and discs sit
+  on the header's icon column; their label gives up the same 2px.
+- **Renamed folder follows the selection.** `apply_folder_rename` left
+  `selected` on the old path, so every auto-fetch asked the server for a
+  mailbox that no longer existed ("Could not load Vreo" every minute
+  after Vreo → Vireo). The selection (and any child path) moves with the
+  rename, the sidebar row is reselected, and a `LoadMessages` is queued
+  behind the `RenameFolder` on the worker so the cleared view refills.
+- **"All Inboxes" is "Inboxes"**, in the sidebar, Settings, README and
+  the metainfo feature list.
+- **Archive row** in the unified section (`UnifiedKinds.archive`,
+  `archive_expanded`, rail fold-up and unread-chip switches).
+- **Tag views cached.** Opening a tag shows the cached list at once
+  (`tag_view_cache`) and reads the index off the main thread
+  (`AppMsg::TagViewLoaded`).
+
 ## 1.27.0-beta.1 — 2026-09-10
 
 A preview of 1.27.0: the unified section grows into its own thing, the

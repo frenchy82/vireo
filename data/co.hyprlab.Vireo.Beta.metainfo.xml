@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.27.0-beta.2" date="2026-09-11" type="development">
+      <description>
+        <p>Second preview of 1.27.0: the Filters row lists every rule's folder; filtered folders are marked in the account's colour under each account with Edit Filter in the menu; Edit Tag on every tag row; filter and tag editors as pages; per-row unread-chip switches; chips never overflow; a renamed folder follows the selection; All Inboxes is Inboxes.</p>
+      </description>
+    </release>
     <release version="1.27.0-beta.1" date="2026-09-10" type="development">
       <description>
         <p>Preview of 1.27.0: unified Starred, Sent, Drafts, Filtered Folders and Tags rows with combined views; per-account filtered folders and tags; a remembered sidebar layout; icon-rail dots and fold-up options; previews read their charset (#159); folder switches and Settings open far faster.</p>

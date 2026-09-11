@@ -2,6 +2,22 @@
 
 Vireo is a clean, fast, GNOME-native email client built with Rust and libadwaita for Wayland desktops. Privacy-first: no telemetry, remote content blocked by default, and credentials kept in the system keyring.
 
+## What's new in 1.27.0-beta.2
+
+Second preview of 1.27.0. Everything under 1.27.0-beta.1 below is in it too.
+
+**Filters.** The unified row is called Filters. Every folder a rule files into is listed there; the section switches on and off as a whole, and the per-rule "Show under All Inboxes" switch is gone. Under each account, a folder that a filter files into is marked in place: a custom folder shows the filter-folder glyph in the account's colour, and a main folder such as Archive keeps its own icon with a small filter mark on the corner in the account's colour. Right-click any of them, under the account or in the Filters row, for "Edit Filter…", which opens that rule. The folder menu is the same wherever the folder appears.
+
+**Tags.** Each account's Tags section sits above its folder list. Right-click a tag anywhere it appears for "Edit Tag…".
+
+**Filters and tags edit in a page.** Adding or editing a filter or a tag slides a page in over the list, like the account and cloud storage editors, with Save in its header. The list cards show a chevron, and the per-card "Count unread" switch moved into the filter's editor.
+
+**Unread counts per row.** Settings, Sidebar, Unified has an "Unread counts" expander with a switch for Inboxes, Starred, Drafts, Archive and Filters. Switch one off and that row shows no unread chip. Chips are also capped: a very large count ends in an ellipsis rather than pushing the row wider than the sidebar.
+
+**Renamed folders.** Renaming the open folder used to leave Vireo asking the server for the old name on every fetch, with a "Could not load" error each minute. The selection now follows the rename.
+
+**Also.** "All Inboxes" is "Inboxes". Archive joins the unified section. Opening a tag shows its cached list at once. The icons under Filters and Tags line up with the header's.
+
 ## What's new in 1.27.0-beta.1
 
 A preview of 1.27.0. Everything here is new since 1.26.0.

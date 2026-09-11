@@ -965,7 +965,8 @@ msgstr "Tester la connexion"
 msgid "Appearance"
 msgstr "Apparence"
 
-msgid "How this account is shown in the sidebar and the All Inboxes view."
+#, fuzzy
+msgid "How this account is shown in the sidebar and the Inboxes view."
 msgstr ""
 "Comment ce compte est affiché dans la barre latérale et dans la vue Toutes "
 "les boîtes de réception."
@@ -1312,9 +1313,6 @@ msgid "Include the folder's unread mail in the unread count and the tray icon"
 msgstr ""
 "Inclure les e-mails non lus du dossier dans le compteur global et l'icône de "
 "la zone de notification"
-
-msgid "Show under All Inboxes"
-msgstr "Afficher sous Toutes les boîtes"
 
 msgid "Thumbnail size"
 msgstr "Taille des vignettes"
@@ -2479,6 +2477,30 @@ msgstr "Système"
 msgid "Backup"
 msgstr "Sauvegarde"
 
+#, fuzzy
+msgid "Save the filter?"
+msgstr "Enregistrer le compte ?"
+
+#, fuzzy
+msgid ""
+"The filter editor is open. Save what you changed, or discard it, before "
+"moving on."
+msgstr ""
+"L'éditeur de compte est ouvert. Enregistrez vos modifications ou annulez-les "
+"avant de continuer."
+
+#, fuzzy
+msgid "Save the tag?"
+msgstr "Enregistrer le compte ?"
+
+#, fuzzy
+msgid ""
+"The tag editor is open. Save what you changed, or discard it, before moving "
+"on."
+msgstr ""
+"L'éditeur de compte est ouvert. Enregistrez vos modifications ou annulez-les "
+"avant de continuer."
+
 msgid "Save the account?"
 msgstr "Enregistrer le compte ?"
 
@@ -2552,9 +2574,10 @@ msgstr ""
 msgid "Chevron placement"
 msgstr "Emplacement des chevrons"
 
+#, fuzzy
 msgid ""
-"Which side of All Inboxes and the account rows their expand/collapse "
-"chevrons sit on."
+"Which side of Inboxes and the account rows their expand/collapse chevrons "
+"sit on."
 msgstr ""
 "De quel côté des boîtes de réception et des lignes de compte se trouvent les "
 "«flèches » permettant de les développer ou de les réduire."
@@ -2616,8 +2639,9 @@ msgstr ""
 "Une boîte de réception unifiée regroupant chaque compte, en haut de la barre "
 "latérale. Affichée uniquement si vous avez plusieurs comptes."
 
-msgid "All Inboxes"
-msgstr "Toutes les boîtes"
+#, fuzzy
+msgid "Inboxes"
+msgstr "Boîte de réception"
 
 msgid ""
 "A unified inbox combining every account, at the top of the sidebar. Only "
@@ -2625,16 +2649,6 @@ msgid ""
 msgstr ""
 "Une boîte de réception unifiée regroupant chaque compte, en haut de la barre "
 "latérale. Affichée uniquement si vous avez plusieurs comptes."
-
-msgid "All Inboxes unread count"
-msgstr "Nombre de non lus dans Toutes les boîtes"
-
-msgid ""
-"Show the combined unread chip next to All Inboxes while its per-account list "
-"is folded up."
-msgstr ""
-"Afficher la pastille des messages non lus à côté de Toutes les boîtes de "
-"réception lorsque la liste par compte est repliée."
 
 #, fuzzy
 msgid "Starred"
@@ -2650,13 +2664,13 @@ msgstr ""
 msgid "Every account's drafts as one list, opening to each account's own."
 msgstr ""
 
-msgid "Filtered Folders section"
-msgstr "Section « Dossiers filtrés »"
+msgid "Every account's archive as one list, opening to each account's own."
+msgstr ""
 
+#, fuzzy
 msgid ""
-"List the folders your filter rules file into in a collapsible section. Each "
-"rule chooses whether its folder appears there; this switch hides the section "
-"altogether."
+"List every folder your filter rules file into in a collapsible section of "
+"the unified view."
 msgstr ""
 "Répertoriez les dossiers vers lesquels votre fichier de règles de filtrage "
 "redirige dans une section repliable. Chaque règle détermine si son dossier "
@@ -2668,12 +2682,22 @@ msgid ""
 "own Tags section either way."
 msgstr ""
 
-msgid "Filtered Folders placement"
+#, fuzzy
+msgid "Unread counts"
+msgstr "Non lus en premier"
+
+msgid ""
+"Which unified rows show their combined unread chip while folded up. "
+"Expanded, the rows beneath carry the counts. Sent never shows one."
+msgstr ""
+
+#, fuzzy
+msgid "Filters placement"
 msgstr "Emplacement des dossiers filtrés"
 
 msgid ""
-"In the unified section, as a row like All Inboxes whose caret opens the "
-"folders; or above or below the accounts as a heading with its own list."
+"In the unified section, as a row like Inboxes whose caret opens the folders; "
+"or above or below the accounts as a heading with its own list."
 msgstr ""
 
 msgid "Tags placement"
@@ -2715,7 +2739,7 @@ msgid "Every account's folder list."
 msgstr ""
 
 #, fuzzy
-msgid "The account list under All Inboxes."
+msgid "The account list under Inboxes."
 msgstr "Afficher sous Toutes les boîtes"
 
 msgid "The account list under the unified Starred row."
@@ -2727,10 +2751,11 @@ msgstr ""
 msgid "The account list under the unified Drafts row."
 msgstr ""
 
-msgid "Filtered Folders"
-msgstr "Dossiers filtrés"
+#, fuzzy
+msgid "The account list under the unified Archive row."
+msgstr "Afficher sous Toutes les boîtes"
 
-msgid "The folders under the Filtered Folders row."
+msgid "The folders under the Filters row."
 msgstr ""
 
 msgid "The tags under the Tags row."
@@ -3374,6 +3399,10 @@ msgstr "Afficher chaque boîte de réception"
 msgid "Long-press to expand or collapse"
 msgstr ""
 
+#, fuzzy
+msgid "Edit Filter…"
+msgstr "Modifier le filtre"
+
 msgid "Rename Folder…"
 msgstr "Renommer le dossier…"
 
@@ -3385,6 +3414,10 @@ msgstr "Vider la Corbeille…"
 
 msgid "Empty Junk…"
 msgstr "Vider les Indésirables…"
+
+#, fuzzy
+msgid "Edit Tag…"
+msgstr "Modifier la balise"
 
 msgid "Welcome to Vireo"
 msgstr "Bienvenue dans Vireo"
@@ -3780,7 +3813,8 @@ msgstr ""
 msgid "Features:"
 msgstr "Fonctionnalités :"
 
-msgid "Multiple IMAP and POP3 accounts, with a unified All Inboxes view"
+#, fuzzy
+msgid "Multiple IMAP and POP3 accounts, with a unified Inboxes view"
 msgstr ""
 "Gestion de plusieurs comptes IMAP et POP3, avec une vue unifiée Toutes les "
 "boîtes"
@@ -3822,6 +3856,28 @@ msgstr "La boîte de réception unifiée en mode clair"
 
 msgid "Hyprlab"
 msgstr "Hyprlab"
+
+#~ msgid "Show under All Inboxes"
+#~ msgstr "Afficher sous Toutes les boîtes"
+
+#~ msgid "All Inboxes"
+#~ msgstr "Toutes les boîtes"
+
+#~ msgid "All Inboxes unread count"
+#~ msgstr "Nombre de non lus dans Toutes les boîtes"
+
+#~ msgid ""
+#~ "Show the combined unread chip next to All Inboxes while its per-account "
+#~ "list is folded up."
+#~ msgstr ""
+#~ "Afficher la pastille des messages non lus à côté de Toutes les boîtes de "
+#~ "réception lorsque la liste par compte est repliée."
+
+#~ msgid "Filtered Folders section"
+#~ msgstr "Section « Dossiers filtrés »"
+
+#~ msgid "Filtered Folders"
+#~ msgstr "Dossiers filtrés"
 
 #~ msgid ""
 #~ "Inside All Inboxes, folding away with it, or in the scrolling sidebar "

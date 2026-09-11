@@ -893,7 +893,7 @@ msgstr ""
 msgid "Appearance"
 msgstr ""
 
-msgid "How this account is shown in the sidebar and the All Inboxes view."
+msgid "How this account is shown in the sidebar and the Inboxes view."
 msgstr ""
 
 msgid "Label (defaults to email address)"
@@ -1211,9 +1211,6 @@ msgid "Count unread mail"
 msgstr ""
 
 msgid "Include the folder's unread mail in the unread count and the tray icon"
-msgstr ""
-
-msgid "Show under All Inboxes"
 msgstr ""
 
 msgid "Thumbnail size"
@@ -2263,6 +2260,22 @@ msgstr ""
 msgid "Backup"
 msgstr ""
 
+msgid "Save the filter?"
+msgstr ""
+
+msgid ""
+"The filter editor is open. Save what you changed, or discard it, before "
+"moving on."
+msgstr ""
+
+msgid "Save the tag?"
+msgstr ""
+
+msgid ""
+"The tag editor is open. Save what you changed, or discard it, before moving "
+"on."
+msgstr ""
+
 msgid "Save the account?"
 msgstr ""
 
@@ -2326,8 +2339,8 @@ msgid "Chevron placement"
 msgstr ""
 
 msgid ""
-"Which side of All Inboxes and the account rows their expand/collapse "
-"chevrons sit on."
+"Which side of Inboxes and the account rows their expand/collapse chevrons "
+"sit on."
 msgstr ""
 
 msgid "Attachments in the sidebar"
@@ -2378,20 +2391,12 @@ msgid ""
 "shown with more than one account."
 msgstr ""
 
-msgid "All Inboxes"
+msgid "Inboxes"
 msgstr ""
 
 msgid ""
 "A unified inbox combining every account, at the top of the sidebar. Only "
 "shown with more than one account."
-msgstr ""
-
-msgid "All Inboxes unread count"
-msgstr ""
-
-msgid ""
-"Show the combined unread chip next to All Inboxes while its per-account list "
-"is folded up."
 msgstr ""
 
 msgid "Starred"
@@ -2407,13 +2412,12 @@ msgstr ""
 msgid "Every account's drafts as one list, opening to each account's own."
 msgstr ""
 
-msgid "Filtered Folders section"
+msgid "Every account's archive as one list, opening to each account's own."
 msgstr ""
 
 msgid ""
-"List the folders your filter rules file into in a collapsible section. Each "
-"rule chooses whether its folder appears there; this switch hides the section "
-"altogether."
+"List every folder your filter rules file into in a collapsible section of "
+"the unified view."
 msgstr ""
 
 msgid ""
@@ -2421,12 +2425,20 @@ msgid ""
 "own Tags section either way."
 msgstr ""
 
-msgid "Filtered Folders placement"
+msgid "Unread counts"
 msgstr ""
 
 msgid ""
-"In the unified section, as a row like All Inboxes whose caret opens the "
-"folders; or above or below the accounts as a heading with its own list."
+"Which unified rows show their combined unread chip while folded up. "
+"Expanded, the rows beneath carry the counts. Sent never shows one."
+msgstr ""
+
+msgid "Filters placement"
+msgstr ""
+
+msgid ""
+"In the unified section, as a row like Inboxes whose caret opens the folders; "
+"or above or below the accounts as a heading with its own list."
 msgstr ""
 
 msgid "Tags placement"
@@ -2466,7 +2478,7 @@ msgstr ""
 msgid "Every account's folder list."
 msgstr ""
 
-msgid "The account list under All Inboxes."
+msgid "The account list under Inboxes."
 msgstr ""
 
 msgid "The account list under the unified Starred row."
@@ -2478,10 +2490,10 @@ msgstr ""
 msgid "The account list under the unified Drafts row."
 msgstr ""
 
-msgid "Filtered Folders"
+msgid "The account list under the unified Archive row."
 msgstr ""
 
-msgid "The folders under the Filtered Folders row."
+msgid "The folders under the Filters row."
 msgstr ""
 
 msgid "The tags under the Tags row."
@@ -3019,6 +3031,9 @@ msgstr ""
 msgid "Long-press to expand or collapse"
 msgstr ""
 
+msgid "Edit Filter…"
+msgstr ""
+
 msgid "Rename Folder…"
 msgstr ""
 
@@ -3029,6 +3044,9 @@ msgid "Empty Trash…"
 msgstr ""
 
 msgid "Empty Junk…"
+msgstr ""
+
+msgid "Edit Tag…"
 msgstr ""
 
 msgid "Welcome to Vireo"
@@ -3389,7 +3407,7 @@ msgstr ""
 msgid "Features:"
 msgstr ""
 
-msgid "Multiple IMAP and POP3 accounts, with a unified All Inboxes view"
+msgid "Multiple IMAP and POP3 accounts, with a unified Inboxes view"
 msgstr ""
 
 msgid ""
