@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.27.3-beta.2 — 2026-09-11
+
+The narrow-window sidebar peek no longer moves the rail underneath it.
+
+- **Rail held still under the sidebar peek.** In a narrow window the
+  header's sidebar button used to hand the toggle to the sidebar, which
+  rebuilt its rows expanded while still docked at rail width; the split
+  view then re-laid the 80px rail around those rows for a frame before the
+  app collapsed it, and the ghost strip under the sliding panel showed a
+  rail snapshot cached at an earlier pointer-enter, stale whenever a folder
+  had been picked or a section folded since. The button now runs the peek
+  itself: capture the live rail, show its ghost and collapse the split in a
+  single layout pass, then rebuild the rows expanded off-screen for the
+  slide-in. The pointer-enter snapshot is kept only for the hover-expand
+  peek, where it avoids a hover-highlighted row in the ghost.
+- **End-of-close restore waits for the slide-out.** The rail used to be
+  docked back by a fixed 320ms timer, racing the split view's spring
+  (about 290ms to settle); when the spring finished after the dock, its
+  done handler hid the docked rail, leaving no sidebar and a dead toggle
+  until the next press repaired it (seen on 1.17.1). The close now watches
+  the split's sidebar bin for the slide-out to end (frame tick plus a
+  250ms poll for a stopped frame clock), rails the rows and compacts the
+  header first, and docks on a low-priority idle once the rows are rebuilt,
+  so the ghost is swapped for identical pixels. A generation counter drops
+  stale watchers when the peek reopens, pins or is repaired; a window
+  widening mid-slide-out runs the restore at once and restarts the spring
+  toward "shown" so it cannot hide the rail.
+
 ## 1.27.3-beta.1 — 2026-09-11
 
 Catch-up with stable 1.27.2: the beta channel carries exactly the 1.27.2
