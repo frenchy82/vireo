@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.27.3-beta.3 — 2026-09-11
+
+The sidebar peek's menu and refresh buttons stay where the rail draws them.
+
+- **Peek header pinned to the rail.** The floating sidebar covers the icon
+  rail, so its first 80px column is what reads as the rail. The peek header
+  used to place the hamburger at the panel's far end and Refresh at the
+  top-left, so both buttons appeared to jump as the panel slid in and back
+  as it left. The peek now keeps the hamburger centred over the rail strip
+  (start-packed, margin compensating the header padding) and keeps Refresh
+  out of the header; the sidebar rows keep the rail's refresh stacked
+  below the menu in peek mode (`SidebarInput::SetPeek`, set before the
+  expanded rebuild on open and after the rail rebuild on close), pinned to
+  the rail's centre line. The "Vireo" title stays centred in the panel.
+
 ## 1.27.3-beta.2 — 2026-09-11
 
 The narrow-window sidebar peek no longer moves the rail underneath it.

@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.27.3-beta.3" date="2026-09-11" type="development">
+      <description>
+        <p>The sidebar peek's menu and refresh buttons stay where the icon rail draws them while the panel slides over it.</p>
+      </description>
+    </release>
     <release version="1.27.3-beta.2" date="2026-09-11" type="development">
       <description>
         <p>The narrow-window sidebar peek slides out over the icon rail without moving or redrawing it, and the rail comes back reliably when the peek closes.</p>
