@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.27.2-beta.1 — 2026-09-11
+
+Catch-up with stable 1.27.1: the beta channel carries exactly the 1.27.1
+code and documentation below, under the beta app ID.
+
+## 1.27.1 — 2026-09-11
+
+French translation catch-up for the 1.26.0 strings.
+
+- **French translation updated** (PR #160 by @frenchy82). `po/fr.po` now
+  has 971 of 1054 strings translated (was 957, with 42 fuzzy and 55
+  untranslated). The 14 strings 1.26.0 added are in: the tag number
+  keys and "Your tags", the Tags page and Cloud Storage descriptions,
+  "Nickname (optional)", "Send new messages from" and its note, the
+  Backup page text and "Account of the current folder". Four existing
+  strings are reworded ("Generate…" gets its ellipsis, "No keys from
+  other people yet."). The 83 strings still in English are the ones
+  1.27.0 added.
+
 ## 1.27.1-beta.1 — 2026-09-11
 
 Catch-up with stable 1.27.0: the beta channel carries exactly the 1.27.0

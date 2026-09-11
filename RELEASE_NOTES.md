@@ -2,6 +2,14 @@
 
 Vireo is a clean, fast, GNOME-native email client built with Rust and libadwaita for Wayland desktops. Privacy-first: no telemetry, remote content blocked by default, and credentials kept in the system keyring.
 
+## What's new in 1.27.2-beta.1
+
+Catch-up with stable 1.27.1: the same code and documentation, on the beta channel.
+
+## What's new in 1.27.1
+
+**French translation updated.** The strings 1.26.0 added are now in French: the tag number keys, the Tags and Cloud Storage page descriptions, the nickname field, the default sender setting and the Backup page. French is at 971 of 1054 strings; the rest are 1.27.0's new strings. Translation by [@frenchy82](https://github.com/frenchy82) (#160).
+
 ## What's new in 1.27.1-beta.1
 
 Catch-up with stable 1.27.0. Everything listed under 1.27.0 below, on the beta channel.
