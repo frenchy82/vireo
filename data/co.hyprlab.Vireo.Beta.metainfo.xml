@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.27.3-beta.1" date="2026-09-11" type="development">
+      <description>
+        <p>Catch-up with stable 1.27.2: the same code and documentation on the beta channel.</p>
+      </description>
+    </release>
     <release version="1.27.2-beta.1" date="2026-09-11" type="development">
       <description>
         <p>Catch-up with stable 1.27.1: the same code and documentation on the beta channel.</p>

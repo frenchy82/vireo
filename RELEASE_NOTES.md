@@ -2,6 +2,14 @@
 
 Vireo is a clean, fast, GNOME-native email client built with Rust and libadwaita for Wayland desktops. Privacy-first: no telemetry, remote content blocked by default, and credentials kept in the system keyring.
 
+## What's new in 1.27.3-beta.1
+
+Catch-up with stable 1.27.2: the same code and documentation, on the beta channel.
+
+## What's new in 1.27.2
+
+**GNOME's Inbox and Archive icons.** The Inbox tray and the Archive shoe-box are now the icons from GNOME's own icon set, in the sidebar, the toolbars and the menus, in place of Vireo's earlier drawings.
+
 ## What's new in 1.27.2-beta.1
 
 Catch-up with stable 1.27.1: the same code and documentation, on the beta channel.
