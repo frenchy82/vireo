@@ -62,7 +62,7 @@ relm4::new_stateless_action!(ConsoleAction, WindowActionGroup, "console");
 relm4::new_stateless_action!(FindAction, WindowActionGroup, "find");
 
 use crate::config::{self, split_identity, AccountConfig};
-use crate::models::{Account, Attachment, Folder, FolderKind, Message};
+use crate::models::{Account, Attachment, Folder, FolderKind, KeywordFinding, Message};
 use crate::ui::accounts::{AccountsOutput, AccountsWindow};
 use crate::ui::compose::{
     Compose, ComposeAccount, ComposeInit, ComposeInput, ComposeOutput, ComposePrefill,
@@ -133,6 +133,11 @@ pub struct AppModel {
     /// `mid:` lookups out at the servers (#130): the Message-ID and how many
     /// accounts have yet to answer, so a miss is reported once, at the end.
     mid_searches: HashMap<String, usize>,
+    /// The tag finder's scan in progress (Settings → Tags → Find Tags…):
+    /// how many accounts have yet to answer, and what the others found.
+    tag_scan: Option<TagScan>,
+    /// Counts scans, so a stale timeout cannot end a later one.
+    tag_scan_gen: u32,
     config: Vec<AccountConfig>,
     window: adw::ApplicationWindow,
     prefs: Option<Controller<Preferences>>,
@@ -900,6 +905,13 @@ pub enum AppMsg {
     OpenMid(String),
     /// An account's answer to a server-side Message-ID search.
     MidLocated { account_id: u32, message_id: String, hit: Option<(String, u32)> },
+    /// The tag finder: scan every account for keywords in use.
+    FindTags,
+    /// One account's answer to the scan.
+    KeywordsFound { account_id: u32, findings: Vec<KeywordFinding> },
+    /// The scan's safety net: report what has come in, if the scan `gen` is
+    /// still the one running.
+    TagScanTimeout(u32),
     /// Files handed in from outside the app (a file manager's "Open With
     /// Vireo", or the command line): open a fresh composer with them attached
     /// (Isaac's PR #96).
@@ -1474,8 +1486,14 @@ impl SimpleComponent for AppModel {
                                     connect_clicked[sender] => move |_| sender.input(AppMsg::PrintPreview),
                                 },
                                 pack_end = &gtk::Button {
-                                    set_icon_name: "co.hyprlab.Vireo-mail-mark-junk-symbolic",
-                                    set_tooltip_text: Some(i18n("Mark as Spam").as_str()),
+                                    #[watch]
+                                    set_icon_name: if model.target_in_junk() {
+                                        "co.hyprlab.Vireo-mail-mark-notjunk-symbolic"
+                                    } else {
+                                        "co.hyprlab.Vireo-mail-mark-junk-symbolic"
+                                    },
+                                    #[watch]
+                                    set_tooltip_text: Some(if model.target_in_junk() { i18n("Not Spam") } else { i18n("Mark as Spam") }.as_str()),
                                     add_css_class: "flat",
                                     #[watch]
                                     set_visible: !model.showing_outbox && !model.reader_actions_collapsed
@@ -1981,6 +1999,8 @@ impl SimpleComponent for AppModel {
         let mut model = AppModel {
             workers: HashMap::new(),
             mid_searches: HashMap::new(),
+            tag_scan: None,
+            tag_scan_gen: 0,
             config,
             window: root.clone(),
             prefs: None,
@@ -3070,6 +3090,14 @@ impl SimpleComponent for AppModel {
                         let _ = sb.send(pick());
                     });
                 }
+                // VIREO_SHOWCASE_ROW_MENU=1 opens the first row's context
+                // menu at 5s (pair with VIREO_SHOWCASE_MENU to capture it).
+                if std::env::var("VIREO_SHOWCASE_ROW_MENU").is_ok() {
+                    let ml = model.message_list.sender().clone();
+                    gtk::glib::timeout_add_seconds_local_once(5, move || {
+                        let _ = ml.send(MessageListInput::ContextMenu { x: 120.0, y: 40.0 });
+                    });
+                }
                 // VIREO_SHOWCASE_RAIL=1 collapses the sidebar to the rail
                 // at 3s (the user's own toggle, fold-ups and all).
                 if std::env::var("VIREO_SHOWCASE_RAIL").is_ok() {
@@ -3455,6 +3483,7 @@ impl SimpleComponent for AppModel {
                     view == UnifiedView::Kind(FolderKind::Sent),
                 ));
                 self.message_list.emit(MessageListInput::SetRestorable(false));
+                self.message_list.emit(MessageListInput::SetInJunk(false));
                 let reqs = self.unified_targets();
                 // Keep every account's last known slice and top it up from the
                 // folder caches, the way opening a single folder does. This used
@@ -4371,6 +4400,7 @@ impl SimpleComponent for AppModel {
                     RowAction::ToggleStar => self.set_star(&m, !m.starred),
                     RowAction::ToggleRead => self.set_read(&m, m.unread),
                     RowAction::Spam => self.mark_spam_msg(m),
+                    RowAction::NotSpam => self.mark_ham_msg(m),
                     RowAction::Archive => self.move_to(m, FolderKind::Archive),
                     RowAction::MoveToInbox => self.move_to(m, FolderKind::Inbox),
                     RowAction::Delete => self.delete_messages(vec![m], &sender),
@@ -4412,6 +4442,7 @@ impl SimpleComponent for AppModel {
                     // one tick so the spinner paints before the blocking work runs.
                     BulkAction::Archive
                     | BulkAction::Spam
+                    | BulkAction::NotSpam
                     | BulkAction::Delete
                     | BulkAction::MoveToInbox => {
                         // Deleting in Trash means erasing, not moving — split the
@@ -4588,8 +4619,14 @@ impl SimpleComponent for AppModel {
             }
 
             AppMsg::MarkSpam => {
+                // In Junk the same button, shortcut and menu entry mean the
+                // reverse (#168).
                 if let Some(m) = self.reply_target() {
-                    self.mark_spam_msg(m);
+                    if self.in_junk(&m) {
+                        self.mark_ham_msg(m);
+                    } else {
+                        self.mark_spam_msg(m);
+                    }
                 }
             }
 
@@ -5438,6 +5475,49 @@ impl SimpleComponent for AppModel {
                 }
             }
 
+            AppMsg::FindTags => {
+                if self.tag_scan.is_some() {
+                    return;
+                }
+                if self.workers.is_empty() {
+                    if let Some(a) = &self.accounts_win {
+                        a.emit(crate::ui::accounts::AccountsInput::TagFindings(Vec::new()));
+                    }
+                    return;
+                }
+                self.tag_scan_gen = self.tag_scan_gen.wrapping_add(1);
+                let gen = self.tag_scan_gen;
+                self.tag_scan = Some(TagScan { gen, remaining: self.workers.len(), found: Vec::new() });
+                for w in self.workers.values() {
+                    let _ = w.send(MailRequest::FindKeywords);
+                }
+                if let Some(a) = &self.accounts_win {
+                    a.emit(crate::ui::accounts::AccountsInput::TagScanning(true));
+                }
+                // An account that is offline never answers: report what the
+                // others found rather than searching forever.
+                let s = sender.clone();
+                gtk::glib::timeout_add_seconds_local_once(120, move || {
+                    s.input(AppMsg::TagScanTimeout(gen));
+                });
+            }
+
+            AppMsg::KeywordsFound { account_id, findings } => {
+                let Some(scan) = self.tag_scan.as_mut() else { return };
+                scan.found.push((account_id, findings));
+                scan.remaining = scan.remaining.saturating_sub(1);
+                if scan.remaining == 0 {
+                    self.finish_tag_scan(&sender);
+                }
+            }
+
+            AppMsg::TagScanTimeout(gen) => {
+                if self.tag_scan.as_ref().is_some_and(|s| s.gen == gen) {
+                    tracing::warn!("find tags: not every account answered in time");
+                    self.finish_tag_scan(&sender);
+                }
+            }
+
             AppMsg::OpenMailto(uri) => {
                 // A mailto: link from anywhere on the system (the desktop file
                 // registers the scheme). Same open-composer flow as ComposeTo,
@@ -5776,6 +5856,7 @@ impl SimpleComponent for AppModel {
                 self.message_list.emit(MessageListInput::ResetPaging);
                 self.message_list.emit(MessageListInput::SetShowRecipient(false));
                 self.message_list.emit(MessageListInput::SetRestorable(false));
+                self.message_list.emit(MessageListInput::SetInJunk(false));
                 self.show_tag_view();
                 self.refresh_tag_view(&sender);
                 self.push_index_complete();
@@ -8024,9 +8105,9 @@ impl AppModel {
         let folders = self.folder_unread.clone();
         let unified = self.unified_unread();
         self.sidebar
-            .emit(SidebarInput::SetUnread { folders, unified });
-        // The same number is what GNOME shows beside Vireo in Background Apps,
-        // so a process with no window still says what it is there for.
+            .emit(SidebarInput::SetUnread { folders, unified: self.inboxes_unread() });
+        // The counted total is what GNOME shows beside Vireo in Background
+        // Apps, so a process with no window still says what it is there for.
         if self.run_in_background.get() {
             crate::background::set_status(&crate::background::status_text(unified));
         }
@@ -8281,7 +8362,7 @@ impl AppModel {
         // The other unified rows are as pointless with one account.
         let unified_kinds =
             if multi_account { self.unified_kinds } else { config::UnifiedKinds::NONE };
-        let unified_unread = self.unified_unread();
+        let unified_unread = self.inboxes_unread();
         let unified_folders = self.unified_folder_refs();
         self.sidebar.emit(SidebarInput::SetContents {
             sections,
@@ -8493,8 +8574,14 @@ impl AppModel {
                         entry!(i18n("Flag"), "starred", AppMsg::ToggleStar, acts)
                     },
                 ],
-                // Tags (#71), where there are any and something to tag.
-                self.reader_tag_entries(sender).unwrap_or_default(),
+                // Tags (#71), where there are any and something to tag —
+                // behind a submenu, as in the message list's menu.
+                self.reader_tag_entries(sender)
+                    .map(|entries| {
+                        vec![MenuEntry::submenu(i18n("Tags"), vec![entries])
+                            .icon("co.hyprlab.Vireo-tag-symbolic")]
+                    })
+                    .unwrap_or_default(),
                 // View Source is deliberately absent: it lives in the message
                 // list's context menu only (the Outbox variant above keeps it —
                 // queued rows have no such menu).
@@ -8508,7 +8595,11 @@ impl AppModel {
                     if restorable {
                         section.push(entry!(i18n("Move to Inbox"), "mail-inbox", AppMsg::MoveToInbox, acts));
                     }
-                    section.push(entry!(i18n("Mark as Spam"), "mail-mark-junk", AppMsg::MarkSpam, acts));
+                    if self.target_in_junk() {
+                        section.push(entry!(i18n("Not Spam"), "mail-mark-notjunk", AppMsg::MarkSpam, acts));
+                    } else {
+                        section.push(entry!(i18n("Mark as Spam"), "mail-mark-junk", AppMsg::MarkSpam, acts));
+                    }
                     section.push(entry!(i18n("Archive"), "mail-archive", AppMsg::Archive, acts));
                     section.push(entry!(
                         i18n("Delete"),
@@ -8652,11 +8743,12 @@ impl AppModel {
             .and_then(|fs| fs.iter().find(|f| f.id == folder_id))
             .is_some_and(|f| f.kind == FolderKind::Sent);
         self.message_list.emit(MessageListInput::SetShowRecipient(is_sent));
-        // Trash and Junk offer the way back to the Inbox (#138).
-        let restorable = self
-            .folder_kind(account_id, folder_id)
-            .is_some_and(|k| matches!(k, FolderKind::Trash | FolderKind::Junk));
+        // Trash and Junk offer the way back to the Inbox (#138); Junk's is
+        // "Not Spam" (#168).
+        let kind = self.folder_kind(account_id, folder_id);
+        let restorable = kind.is_some_and(|k| matches!(k, FolderKind::Trash | FolderKind::Junk));
         self.message_list.emit(MessageListInput::SetRestorable(restorable));
+        self.message_list.emit(MessageListInput::SetInJunk(kind == Some(FolderKind::Junk)));
         self.selected = Some(SelectedFolder {
             account_id,
             folder_id,
@@ -9272,7 +9364,9 @@ impl AppModel {
     ) -> adw::Window {
         let win = adw::Window::builder()
             .modal(false)
-            .default_width(660)
+            // Room for the full compose toolbar (Cancel, Save Draft, the
+            // action icons, Send) before it folds into its ⋯ menu.
+            .default_width(720)
             .default_height(760)
             .title(&i18n("New Message"))
             .transient_for(&self.window)
@@ -9757,6 +9851,18 @@ impl AppModel {
         self.folders.get(&m.account_id).is_some_and(|fs| {
             fs.iter().any(|f| f.id == m.folder_id && f.kind == FolderKind::Trash)
         })
+    }
+
+    fn in_junk(&self, m: &Message) -> bool {
+        self.folders.get(&m.account_id).is_some_and(|fs| {
+            fs.iter().any(|f| f.id == m.folder_id && f.kind == FolderKind::Junk)
+        })
+    }
+
+    /// Whether the reader's target sits in Junk: the spam button, shortcut
+    /// and menu entry then read "Not Spam" (#168).
+    fn target_in_junk(&self) -> bool {
+        self.reply_target().is_some_and(|m| self.in_junk(&m))
     }
 
     /// Delete `messages`: the ones still outside Trash are moved there, and any
@@ -10452,6 +10558,25 @@ impl AppModel {
         self.discard_message(&m);
     }
 
+    /// Not spam (#168): tell the server (`$NotJunk`, `$Junk` cleared) and
+    /// put the message back in its account's Inbox.
+    fn mark_ham_msg(&mut self, m: Message) {
+        let Some(src) = self.resolve_folder_path(&m) else {
+            return;
+        };
+        let Some(dest) = self.folder_path_for(m.account_id, FolderKind::Inbox) else {
+            self.notifications.emit(NotifyInput::Push {
+                text: i18n("No Inbox folder available for this account"),
+                error: true,
+                connectivity: false,
+            });
+            return;
+        };
+        self.push_undo(m.account_id, &dest, &src, vec![m.message_id.clone()]);
+        self.send_to(m.account_id, MailRequest::MarkHam { path: src, uid: m.uid, dest });
+        self.discard_message(&m);
+    }
+
     /// Mark every message in a folder as read: update server, caches, badges,
     /// and the displayed list.
     fn mark_folder_read(&mut self, account_id: u32, folder_id: u32) {
@@ -11021,6 +11146,13 @@ impl AppModel {
                 });
             }
         }
+        // VIREO_SHOWCASE_FIND_TAGS=1 runs the tag finder once the panel is
+        // up (the demo backend answers with a fixed set); the report dialog
+        // captures itself two seconds after it appears.
+        if std::env::var("VIREO_SHOWCASE_FIND_TAGS").is_ok() && demo_mode() {
+            let s = sender.clone();
+            gtk::glib::timeout_add_seconds_local_once(2, move || s.input(AppMsg::FindTags));
+        }
         // VIREO_SHOWCASE_EDIT_TAG=<index> likewise opens that tag's editor
         // (#147); an index past the end opens the Add Tag dialog.
         if let Some(Ok(i)) = std::env::var("VIREO_SHOWCASE_EDIT_TAG").ok().map(|v| v.parse::<usize>()) {
@@ -11100,11 +11232,84 @@ impl AppModel {
                 AccountsOutput::RemoveBlacklist(addr) => AppMsg::RemoveBlacklist(addr),
                 AccountsOutput::SetFilters(rules) => AppMsg::SetFilters(rules),
                 AccountsOutput::SetTags(tags) => AppMsg::SetTags(tags),
+                AccountsOutput::FindTags => AppMsg::FindTags,
             });
 
         // The host window: the preferences component, carrying the accounts
         // panel behind its other tab.
         accounts
+    }
+
+    /// The tag finder's scan is over: fold every account's findings into one
+    /// list (a keyword seen on two accounts is one entry), drop the keywords
+    /// that are tags already, propose a name and colour for each, and hand
+    /// the report to the Tags page — bringing Settings back if it was closed
+    /// meanwhile.
+    fn finish_tag_scan(&mut self, sender: &ComponentSender<Self>) {
+        let Some(scan) = self.tag_scan.take() else { return };
+        let many = scan.found.len() > 1;
+        let mut merged: Vec<(KeywordFinding, Vec<String>)> = Vec::new();
+        for (account_id, findings) in scan.found {
+            let label = self
+                .accounts
+                .iter()
+                .find(|a| a.id == account_id)
+                .map(|a| if a.name.trim().is_empty() { a.email.clone() } else { a.name.clone() })
+                .unwrap_or_default();
+            for f in findings {
+                if crate::worker::is_system_keyword(&f.keyword)
+                    || self.tags.iter().any(|t| t.keyword.eq_ignore_ascii_case(&f.keyword))
+                {
+                    continue;
+                }
+                // One entry per account: its folders, named by the account
+                // when more than one took part.
+                let places: Vec<String> = if f.folders.is_empty() {
+                    Vec::new()
+                } else if many {
+                    vec![format!("{label}: {}", f.folders.join(", "))]
+                } else {
+                    vec![f.folders.join(", ")]
+                };
+                match merged.iter_mut().find(|(m, _)| m.keyword.eq_ignore_ascii_case(&f.keyword)) {
+                    Some((m, p)) => {
+                        m.count += f.count;
+                        if m.name.is_none() {
+                            m.name = f.name.clone();
+                        }
+                        if m.color.is_none() {
+                            m.color = f.color.clone();
+                        }
+                        p.extend(places);
+                    }
+                    None => merged.push((f, places)),
+                }
+            }
+        }
+        let mut taken: Vec<String> = self.tags.iter().map(|t| t.color.clone()).collect();
+        let proposals: Vec<crate::ui::accounts::TagProposal> = merged
+            .into_iter()
+            .map(|(f, places)| {
+                let name = f.name.clone().unwrap_or_else(|| config::Tag::name_for_keyword(&f.keyword));
+                let color = f
+                    .color
+                    .clone()
+                    .unwrap_or_else(|| config::Tag::color_for_keyword(&f.keyword, &taken));
+                taken.push(color.clone());
+                crate::ui::accounts::TagProposal {
+                    tag: config::Tag { name, keyword: f.keyword, color },
+                    count: f.count,
+                    places,
+                }
+            })
+            .collect();
+        self.open_settings_window(sender, true, false);
+        if let Some(p) = &self.prefs {
+            p.emit(PrefInput::ShowPageById("tags".to_string()));
+        }
+        if let Some(a) = &self.accounts_win {
+            a.emit(crate::ui::accounts::AccountsInput::TagFindings(proposals));
+        }
     }
 
     /// Show Settings: the window kept from a previous open (its accounts
@@ -11565,7 +11770,7 @@ impl AppModel {
             BulkAction::Archive => FolderKind::Archive,
             BulkAction::Delete => FolderKind::Trash,
             BulkAction::Spam => FolderKind::Junk,
-            BulkAction::MoveToInbox => FolderKind::Inbox,
+            BulkAction::NotSpam | BulkAction::MoveToInbox => FolderKind::Inbox,
             // Non-removing actions never reach here (handled inline).
             BulkAction::MarkRead
             | BulkAction::MarkUnread
@@ -11613,7 +11818,12 @@ impl AppModel {
         }
         for ((account_id, src), (dest, uids, message_ids)) in groups {
             self.push_undo(account_id, &dest, &src, message_ids);
-            self.send_to(account_id, MailRequest::MoveMessages { path: src, uids, dest });
+            let req = if action == BulkAction::NotSpam {
+                MailRequest::MarkHamMany { path: src, uids, dest }
+            } else {
+                MailRequest::MoveMessages { path: src, uids, dest }
+            };
+            self.send_to(account_id, req);
         }
         self.update_busy_indicator();
         self.message_list.emit(MessageListInput::RemoveMany(removed_ids));
@@ -11999,11 +12209,21 @@ impl AppModel {
         self.counted_folders(account_id).iter().map(|f| self.folder_unread_of(f)).sum()
     }
 
-    /// The number behind the All Inboxes chip, the tray icon's dot and
-    /// menu, and the Background Apps status: every account's counted
-    /// unread mail.
+    /// The number behind the tray icon's dot and menu and the Background
+    /// Apps status: every account's counted unread mail.
     fn unified_unread(&self) -> u32 {
         self.accounts.iter().map(|a| self.counted_unread(a.id)).sum()
+    }
+
+    /// The number behind the unified Inboxes chip: the inboxes alone. A
+    /// filter's destination has its own row (under Filters, and in its
+    /// account), with its own chip, so it is not counted here as well.
+    fn inboxes_unread(&self) -> u32 {
+        self.accounts
+            .iter()
+            .filter_map(|a| self.inbox_of(a.id))
+            .map(|f| self.folder_unread_of(f))
+            .sum()
     }
 
     /// A watcher or sweep reported a changed unread count for `folder_id`.
@@ -13016,6 +13236,13 @@ fn register_icons() {
     gtk::Window::set_default_icon_name(crate::APP_ID);
 }
 
+/// A running tag-finder scan (see `AppMsg::FindTags`).
+struct TagScan {
+    gen: u32,
+    remaining: usize,
+    found: Vec<(u32, Vec<KeywordFinding>)>,
+}
+
 fn map_event(account_id: u32, event: WorkerEvent) -> AppMsg {
     match event {
         WorkerEvent::BulkComplete => AppMsg::BulkComplete,
@@ -13031,6 +13258,7 @@ fn map_event(account_id: u32, event: WorkerEvent) -> AppMsg {
             AppMsg::MessagesAppend { account_id, folder_id, messages }
         }
         WorkerEvent::Located { message_id, hit } => AppMsg::MidLocated { account_id, message_id, hit },
+        WorkerEvent::KeywordsFound(findings) => AppMsg::KeywordsFound { account_id, findings },
         WorkerEvent::Restored { folder_id, message_ids } => {
             AppMsg::UndoRestored { account_id, folder_id, message_ids }
         }
