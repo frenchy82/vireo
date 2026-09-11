@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.27.3-beta.5" date="2026-09-11" type="development">
+      <description>
+        <p>The narrow-window sidebar slides in from the left edge over the icon rail, which stays unchanged underneath.</p>
+      </description>
+    </release>
     <release version="1.27.3-beta.4" date="2026-09-11" type="development">
       <description>
         <p>The narrow-window sidebar floats out beside the icon rail as its own panel; the rail is never changed while it opens or closes.</p>

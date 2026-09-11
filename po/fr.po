@@ -16,11 +16,11 @@ msgstr ""
 "Plural-Forms: nplurals=2; plural=(n > 1);\n"
 "X-Generator: Poedit 3.9\n"
 
-msgid "Main Menu"
-msgstr "Menu principal"
-
 msgid "Refresh or long-press for Status Bar"
 msgstr "Actualiser ou appuyer longuement pour la barre d'état"
+
+msgid "Main Menu"
+msgstr "Menu principal"
 
 msgid "Expand sidebar"
 msgstr "Déplier la barre latérale"

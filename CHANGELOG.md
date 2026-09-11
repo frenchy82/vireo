@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.27.3-beta.5 — 2026-09-11
+
+The sidebar peek slides in over the rail.
+
+- **Panel over the rail.** The peek panel's split view now wraps the whole
+  account split view rather than its content slot, so the panel slides in
+  from the window's left edge and covers the rail and the panes instead of
+  floating out beside the rail (beta.4). The rail underneath is still its
+  own untouched widget, only covered.
+- **Hover-open waits for movement.** Hover-expand now opens on the first
+  pointer motion over the rail rather than on entering it: GTK synthesises
+  an enter when the rail reappears under a resting pointer as the panel
+  slides away, and opening on that would fold and float forever.
+
 ## 1.27.3-beta.4 — 2026-09-11
 
 The narrow-window sidebar peek is its own panel; the icon rail is never
