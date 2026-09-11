@@ -137,6 +137,9 @@ pub struct AppModel {
     window: adw::ApplicationWindow,
     prefs: Option<Controller<Preferences>>,
     accounts_win: Option<Controller<AccountsWindow>>,
+    /// What the accounts panel was built over (its init, printed), to tell
+    /// whether a reopened Settings window needs a fresh one.
+    accounts_seed: Option<String>,
     /// Standalone compose windows (multiple allowed at once). Pruned as they close.
     composers: Vec<ComposeHost>,
     /// The reader's inline reply/forward composer, if open.
@@ -215,10 +218,16 @@ pub struct AppModel {
     /// The lightbox picture + its scroller, for applying zoom sizes.
     lightbox_picture: Option<gtk::Picture>,
     lightbox_scroller: Option<gtk::ScrolledWindow>,
-    /// True when the unified "All Inboxes" view is active (no single folder).
+    /// True when a unified view is active (no single folder): the folders
+    /// `unified_view` names, merged into one list.
     unified: bool,
-    /// account_id → that account's latest inbox messages (for the unified view).
-    unified_by_account: HashMap<u32, Vec<Message>>,
+    /// Which folders the unified view merges: every account's Inbox for All
+    /// Inboxes, its Starred / Sent / Drafts for those rows, or every
+    /// filter rule's folder for the Filtered Folders row.
+    unified_view: UnifiedView,
+    /// (account, folder) → that folder's latest messages, for the unified
+    /// view's merge.
+    unified_slices: HashMap<(u32, u32), Vec<Message>>,
     /// Accounts whose inbox has been requested for the unified view since
     /// launch (the cache-primed slices still need their catch-up sync).
     unified_boot_requested: HashSet<u32>,
@@ -291,6 +300,26 @@ pub struct AppModel {
     rail_snapshot: std::rc::Rc<std::cell::RefCell<Option<gtk::gdk::Paintable>>>,
     /// Preference: hovering the icon rail opens the peek by itself.
     sidebar_hover_expand: bool,
+    /// Preference: accounts, folders and sections reopen as they were left.
+    remember_sidebar: bool,
+    /// Preference: the sidebar reopens in the icon rail if left there.
+    remember_rail: bool,
+    /// The sections' open state, as the sidebar last reported it,
+    /// persisted with the rest of the sidebar layout.
+    unified_expanded: bool,
+    filtered_expanded: bool,
+    tags_expanded: bool,
+    starred_expanded: bool,
+    sent_expanded: bool,
+    drafts_expanded: bool,
+    /// Account emails whose own Filtered Folders / Tags sections are open.
+    filtered_expanded_accounts: Vec<String>,
+    tags_expanded_accounts: Vec<String>,
+    /// Preference: the icon rail marks unread mail with a dot, not a count.
+    rail_dots: bool,
+    /// Preference: the sections the icon rail folds up when the sidebar
+    /// collapses.
+    rail_fold: config::RailFold,
     /// The app chrome's theme preference (follow system / light / dark).
     app_theme: config::AppTheme,
     /// Held so the in-flight collapse/expand width animation isn't dropped.
@@ -407,6 +436,16 @@ pub struct AppModel {
     /// Where the Filtered Folders and Tags sections sit (Settings → Sidebar).
     filtered_placement: config::SectionPlacement,
     tags_placement: config::SectionPlacement,
+    /// The unified section's Starred / Sent / Drafts rows (Settings →
+    /// Sidebar → Unified).
+    unified_kinds: config::UnifiedKinds,
+    /// Whether the unified section lists the tags.
+    unified_tags: bool,
+    /// Whether the account sections are shown at all.
+    show_accounts: bool,
+    /// The main menu's "Show Accounts" check item, kept in step with the
+    /// setting wherever it is changed.
+    show_accounts_action: gtk::gio::SimpleAction,
     /// Whether the sidebar's disclosure chevrons lead their rows.
     chevrons_left: bool,
     /// Console mode offered in the status bar (Settings → System & Appearance).
@@ -417,9 +456,10 @@ pub struct AppModel {
     filters: Vec<config::FilterRule>,
     /// Tags (#71): a name and colour per keyword.
     tags: Vec<config::Tag>,
-    /// The keyword whose messages the list shows (a sidebar tag row), if
-    /// that is the view — alongside `unified` and `selected`, never with.
-    tag_view: Option<String>,
+    /// The tag view, if that is the view — alongside `unified` and
+    /// `selected`, never with: the account it is scoped to (`None` spans
+    /// every account) and the keyword (`None` for every tag at once).
+    tag_view: Option<(Option<u32>, Option<String>)>,
     /// The tag colours as `.tag-<keyword>` classes, app-wide (the list's
     /// chips, the sidebar's rows, the menus' swatches).
     tag_provider: gtk::CssProvider,
@@ -534,10 +574,22 @@ struct PopOut {
     controller: Controller<MessageWindow>,
 }
 
+/// Which folders a unified view merges (see `AppModel::unified_view`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnifiedView {
+    /// Every account's folder of this kind.
+    Kind(FolderKind),
+    /// Every filter rule's folder listed under All Inboxes.
+    Filtered,
+}
+
 #[derive(Debug)]
 pub enum AppMsg {
     // User actions
-    UnifiedSelected,
+    /// A unified row was chosen: All Inboxes, the unified section's Starred
+    /// / Sent / Drafts row (every account's folder of that kind), or its
+    /// Filtered Folders row (every rule's folder).
+    UnifiedSelected(UnifiedView),
     /// Show the attachments gallery (sidebar "Attachments" row).
     ShowAttachments,
     /// Show the Outbox (queued, unsent messages).
@@ -736,6 +788,16 @@ pub enum AppMsg {
     SetShowUnified(bool),
     SetUnifiedChip(bool),
     SetUnifiedFiltered(bool),
+    /// The unified section's Starred / Sent / Drafts rows.
+    SetUnifiedKinds(config::UnifiedKinds),
+    /// Whether the unified section lists the tags.
+    SetUnifiedTags(bool),
+    /// Whether the account sections are shown at all.
+    SetShowAccounts(bool),
+    /// An account's own Filtered Folders / Tags section was opened or
+    /// folded — record it with the layout.
+    ToggleAccountFiltered(u32),
+    ToggleAccountTags(u32),
     SetChevronsLeft(bool),
     /// Where the Filtered Folders / Tags sections sit (Settings → Sidebar).
     SetFilteredPlacement(config::SectionPlacement),
@@ -744,6 +806,29 @@ pub enum AppMsg {
     ListCount(String),
     /// Preference: hovering the narrow-window rail floats the sidebar out.
     SetSidebarHoverExpand(bool),
+    /// Preference: accounts, folders and sections reopen as they were left.
+    SetRememberSidebar(bool),
+    /// Preference: the sidebar reopens in the icon rail if left there.
+    SetRememberRail(bool),
+    /// Build the Settings window ahead of its first open (see the handler).
+    PrewarmSettings,
+    /// Close the Settings window as the user would (the showcase's reopen
+    /// timing).
+    DebugCloseSettings,
+    /// The sidebar's All Inboxes / Filtered Folders / Tags sections were
+    /// opened or folded — record it with the layout.
+    SidebarSectionsOpen {
+        all_inboxes: bool,
+        filtered: bool,
+        tags: bool,
+        starred: bool,
+        sent: bool,
+        drafts: bool,
+    },
+    /// Preference: the icon rail shows unread dots rather than counts.
+    SetRailDots(bool),
+    /// Preference: which sections the icon rail folds up on collapse.
+    SetRailFold(config::RailFold),
     /// Preference: the app chrome's theme (follow system / light / dark).
     SetAppTheme(config::AppTheme),
     /// The cursor entered the sidebar pane — open the hover peek (rail +
@@ -863,7 +948,10 @@ pub enum AppMsg {
     /// The tags changed in Settings (#71).
     SetTags(Vec<config::Tag>),
     /// A tag row in the sidebar was chosen: list everything carrying it.
-    TagSelected(String),
+    /// A tag row was chosen: its keyword (`None` for the unified Tags row,
+    /// every tag at once), and the account it is scoped to (an account
+    /// section's own Tags row) or `None` for every account.
+    TagSelected { keyword: Option<String>, account: Option<u32> },
     /// Put a tag on one message, or take it off (row menu, palette, card).
     SetTag { message: Box<Message>, keyword: String, add: bool },
     /// The reader toolbar's tag menu: toggle a tag on the reader's target.
@@ -1580,7 +1668,23 @@ impl SimpleComponent for AppModel {
         install_scheme_css(&root);
 
         let mut sidebar_state = config::load_sidebar_state();
-        let icon_only = sidebar_state.icon_only;
+        // Settings → Sidebar: "Remember the icon rail" off starts every
+        // launch with the full sidebar; "Remember the sidebar layout" off
+        // starts with every section folded up — and every account, folded as
+        // it arrives (SetAccount) — keeping only the account order. The two
+        // are independent.
+        let remember_sidebar = config::load_remember_sidebar();
+        let remember_rail = config::load_remember_rail();
+        let icon_only = remember_rail && sidebar_state.icon_only;
+        if !remember_sidebar {
+            sidebar_state = config::SidebarState { order: sidebar_state.order, ..Default::default() };
+        }
+        let unified_expanded = sidebar_state.unified_expanded;
+        let filtered_expanded = sidebar_state.filtered_expanded;
+        let tags_expanded = sidebar_state.tags_expanded;
+        let starred_expanded = sidebar_state.starred_expanded;
+        let sent_expanded = sidebar_state.sent_expanded;
+        let drafts_expanded = sidebar_state.drafts_expanded;
 
         // Load accounts, then reconcile against GNOME Online Accounts: drop any
         // imported account GOA no longer has, pause any whose Mail service is
@@ -1606,6 +1710,8 @@ impl SimpleComponent for AppModel {
             sidebar_state.order.retain(|e| !goa_removed.contains(e));
             sidebar_state.collapsed.retain(|e| !goa_removed.contains(e));
             sidebar_state.folders_expanded.retain(|e| !goa_removed.contains(e));
+            sidebar_state.filtered_expanded_accounts.retain(|e| !goa_removed.contains(e));
+            sidebar_state.tags_expanded_accounts.retain(|e| !goa_removed.contains(e));
             config::save_sidebar_state(&sidebar_state);
         }
         if !goa_removed.is_empty() || goa_outcome.paused_changed {
@@ -1614,6 +1720,8 @@ impl SimpleComponent for AppModel {
         let order = sidebar_state.order;
         let collapsed = sidebar_state.collapsed;
         let folders_expanded = sidebar_state.folders_expanded;
+        let filtered_expanded_accounts = sidebar_state.filtered_expanded_accounts;
+        let tags_expanded_accounts = sidebar_state.tags_expanded_accounts;
         let tree_collapsed = sidebar_state.tree_collapsed;
 
         // Whether this run serves the built-in sample data (see spawn_workers):
@@ -1624,12 +1732,33 @@ impl SimpleComponent for AppModel {
         let sidebar = Sidebar::builder()
             .launch(SidebarInit {
                 collapsed: icon_only,
+                unified_expanded,
+                filtered_expanded,
+                tags_expanded,
+                starred_expanded,
+                sent_expanded,
+                drafts_expanded,
                 show_attachments,
                 show_contacts,
             })
             .forward(sender.input_sender(), |out| match out {
-                SidebarOutput::UnifiedSelected => AppMsg::UnifiedSelected,
-                SidebarOutput::TagSelected(keyword) => AppMsg::TagSelected(keyword),
+                SidebarOutput::UnifiedSelected => {
+                    AppMsg::UnifiedSelected(UnifiedView::Kind(FolderKind::Inbox))
+                }
+                SidebarOutput::UnifiedKindSelected(kind) => {
+                    AppMsg::UnifiedSelected(UnifiedView::Kind(kind))
+                }
+                SidebarOutput::UnifiedFilteredSelected => {
+                    AppMsg::UnifiedSelected(UnifiedView::Filtered)
+                }
+                SidebarOutput::UnifiedTagsSelected => {
+                    AppMsg::TagSelected { keyword: None, account: None }
+                }
+                SidebarOutput::TagSelected { keyword, account } => {
+                    AppMsg::TagSelected { keyword: Some(keyword), account }
+                }
+                SidebarOutput::ToggleAccountFiltered(id) => AppMsg::ToggleAccountFiltered(id),
+                SidebarOutput::ToggleAccountTags(id) => AppMsg::ToggleAccountTags(id),
                 SidebarOutput::AttachmentsSelected => AppMsg::ShowAttachments,
                 SidebarOutput::ContactsClicked => AppMsg::OpenContacts,
                 SidebarOutput::RefreshRequested => AppMsg::Refresh,
@@ -1642,6 +1771,9 @@ impl SimpleComponent for AppModel {
                 SidebarOutput::ToggleCollapse(id) => AppMsg::ToggleCollapse(id),
                 SidebarOutput::ToggleCustomFolders(id) => AppMsg::ToggleCustomFolders(id),
                 SidebarOutput::CollapsedChanged(collapsed) => AppMsg::SidebarCollapsed(collapsed),
+                SidebarOutput::SectionsOpen { all_inboxes, filtered, tags, starred, sent, drafts } => {
+                    AppMsg::SidebarSectionsOpen { all_inboxes, filtered, tags, starred, sent, drafts }
+                }
                 SidebarOutput::FolderNodeCollapsed { account_id, path, collapsed } => {
                     AppMsg::FolderNodeCollapsed { account_id, path, collapsed }
                 }
@@ -1781,6 +1913,12 @@ impl SimpleComponent for AppModel {
             settings.append(Some(i18n("Settings").as_str()), Some("win.accounts"));
             menu.append_section(None, &settings);
 
+            // The sidebar's account sections, for those who work from the
+            // unified section alone (also Settings → Sidebar).
+            let sidebar = gtk::gio::Menu::new();
+            sidebar.append(Some(i18n("Show Accounts").as_str()), Some("app.show-accounts"));
+            menu.append_section(None, &sidebar);
+
             let printing = gtk::gio::Menu::new();
             printing.append(Some(i18n("Print Preview…").as_str()), Some("win.print-preview"));
             printing.append(Some(i18n("Print Message…").as_str()), Some("win.print"));
@@ -1794,6 +1932,22 @@ impl SimpleComponent for AppModel {
             menu.append_section(None, &quit);
         }
 
+        let show_accounts = config::load_show_accounts();
+        let show_accounts_action = gtk::gio::SimpleAction::new_stateful(
+            "show-accounts",
+            None,
+            &show_accounts.to_variant(),
+        );
+        {
+            let s = sender.clone();
+            show_accounts_action.connect_change_state(move |action, value| {
+                if let Some(on) = value.and_then(|v| v.get::<bool>()) {
+                    action.set_state(&on.to_variant());
+                    s.input(AppMsg::SetShowAccounts(on));
+                }
+            });
+        }
+
         let reader_override = config::load_reader_override();
         let mut model = AppModel {
             workers: HashMap::new(),
@@ -1802,6 +1956,7 @@ impl SimpleComponent for AppModel {
             window: root.clone(),
             prefs: None,
             accounts_win: None,
+            accounts_seed: None,
             composers: Vec::new(),
             reader_compose: None,
             draining_composers: Vec::new(),
@@ -1868,7 +2023,8 @@ impl SimpleComponent for AppModel {
             },
             attachment_cache: crate::ram_cache::RamCache::new(ATTACHMENT_CACHE_BUDGET),
             unified: false,
-            unified_by_account: HashMap::new(),
+            unified_view: UnifiedView::Kind(FolderKind::Inbox),
+            unified_slices: HashMap::new(),
             unified_boot_requested: HashSet::new(),
             message_cache: HashMap::new(),
             indexed_folders: HashSet::new(),
@@ -1910,6 +2066,18 @@ impl SimpleComponent for AppModel {
             peek_rail_ghost: None,
             rail_snapshot: std::rc::Rc::new(std::cell::RefCell::new(None)),
             sidebar_hover_expand: config::load_sidebar_hover_expand(),
+            remember_sidebar,
+            remember_rail,
+            unified_expanded,
+            filtered_expanded,
+            tags_expanded,
+            starred_expanded,
+            sent_expanded,
+            drafts_expanded,
+            filtered_expanded_accounts,
+            tags_expanded_accounts,
+            rail_dots: config::load_rail_dots(),
+            rail_fold: config::load_rail_fold(),
             app_theme: config::load_app_theme(),
             current: None,
             allowed_senders: config::load_allowed_senders(),
@@ -1963,6 +2131,10 @@ impl SimpleComponent for AppModel {
             unified_filtered: config::load_unified_filtered(),
             filtered_placement: config::load_filtered_placement(),
             tags_placement: config::load_tags_placement(),
+            unified_kinds: config::load_unified_kinds(),
+            unified_tags: config::load_unified_tags(),
+            show_accounts,
+            show_accounts_action,
             chevrons_left: config::load_chevrons_left(),
             console_mode: config::load_console_mode(),
             read_mark: config::load_read_mark(),
@@ -2488,6 +2660,7 @@ impl SimpleComponent for AppModel {
         // within five seconds. Without this the ✕ there would be a hard kill.
         {
             let app = relm4::main_application();
+            app.add_action(&model.show_accounts_action);
             let window = root.clone();
             let quit = gtk::gio::SimpleAction::new("quit", None);
             quit.connect_activate(move |_, _| {
@@ -2506,6 +2679,14 @@ impl SimpleComponent for AppModel {
             });
             app.add_action(&quit);
             gtk::prelude::GtkApplicationExt::set_accels_for_action(&app, "app.quit", &["<Ctrl>q"]);
+            // Ctrl+Shift+A shows or hides the sidebar's account sections
+            // (the same switch as the main menu's and Settings'): activating
+            // the stateful action without a value toggles it.
+            gtk::prelude::GtkApplicationExt::set_accels_for_action(
+                &app,
+                "app.show-accounts",
+                &["<Ctrl><Shift>a"],
+            );
             // Ctrl+W closes the window only (issue #64): with "run in the
             // background" on, mail keeps arriving — unlike Ctrl+Q, which
             // quits outright. GTK's built-in window.close action does
@@ -2830,12 +3011,58 @@ impl SimpleComponent for AppModel {
                         });
                     });
                 }
+                // VIREO_SHOWCASE_UNIFIED=sent|starred|drafts opens that unified
+                // row at 3s, All Inboxes at 6s and the row again at 9s, so the
+                // timing logs show a cold and a warm open.
+                if let Ok(which) = std::env::var("VIREO_SHOWCASE_UNIFIED") {
+                    let pick = move || match which.as_str() {
+                        "starred" => SidebarInput::UnifiedKindRowSelected(FolderKind::Starred),
+                        "drafts" => SidebarInput::UnifiedKindRowSelected(FolderKind::Drafts),
+                        "filtered" => SidebarInput::UnifiedFilteredSelected,
+                        "tags" => SidebarInput::UnifiedTagsSelected,
+                        _ => SidebarInput::UnifiedKindRowSelected(FolderKind::Sent),
+                    };
+                    let sb = model.sidebar.sender().clone();
+                    let p = pick.clone();
+                    gtk::glib::timeout_add_seconds_local_once(3, move || {
+                        let _ = sb.send(p());
+                    });
+                    let sb = model.sidebar.sender().clone();
+                    gtk::glib::timeout_add_seconds_local_once(6, move || {
+                        let _ = sb.send(SidebarInput::SelectUnifiedRow);
+                    });
+                    let sb = model.sidebar.sender().clone();
+                    gtk::glib::timeout_add_seconds_local_once(9, move || {
+                        let _ = sb.send(pick());
+                    });
+                }
+                // VIREO_SHOWCASE_RAIL=1 collapses the sidebar to the rail
+                // at 3s (the user's own toggle, fold-ups and all).
+                if std::env::var("VIREO_SHOWCASE_RAIL").is_ok() {
+                    let sb = model.sidebar.sender().clone();
+                    gtk::glib::timeout_add_seconds_local_once(3, move || {
+                        let _ = sb.send(SidebarInput::ToggleCollapsed);
+                    });
+                }
+                // VIREO_SHOWCASE_TOGGLE=starred|sent|drafts toggles that
+                // unified row's list at 5s (what a long-press does).
+                if let Ok(which) = std::env::var("VIREO_SHOWCASE_TOGGLE") {
+                    let kind = match which.as_str() {
+                        "sent" => FolderKind::Sent,
+                        "drafts" => FolderKind::Drafts,
+                        _ => FolderKind::Starred,
+                    };
+                    let sb = model.sidebar.sender().clone();
+                    gtk::glib::timeout_add_seconds_local_once(5, move || {
+                        let _ = sb.send(SidebarInput::ToggleKindExpand(kind));
+                    });
+                }
                 // VIREO_SHOWCASE_FOLD_FILTERED folds All Inboxes' Filtered
                 // Folders section, to check its folded header.
                 if std::env::var("VIREO_SHOWCASE_FOLD_FILTERED").is_ok() {
                     let sb = model.sidebar.sender().clone();
                     gtk::glib::timeout_add_seconds_local_once(3, move || {
-                        let _ = sb.send(SidebarInput::ToggleUnifiedFoldersExpand);
+                        let _ = sb.send(SidebarInput::ToggleFilteredExpand(crate::ui::sidebar::Slot::Unified));
                     });
                 }
                 // VIREO_SHOWCASE_REPLY opens the inline reply composer on the
@@ -2897,6 +3124,18 @@ impl SimpleComponent for AppModel {
                             });
                         }
                     });
+                    // VIREO_SHOWCASE_SETTINGS_REOPEN=1 closes the window at
+                    // 5s and opens it again at 7s, to time a reopen.
+                    if std::env::var("VIREO_SHOWCASE_SETTINGS_REOPEN").is_ok() {
+                        let s = sender.clone();
+                        gtk::glib::timeout_add_seconds_local_once(5, move || {
+                            s.input(AppMsg::DebugCloseSettings);
+                        });
+                        let s = sender.clone();
+                        gtk::glib::timeout_add_seconds_local_once(7, move || {
+                            s.input(AppMsg::OpenAccounts);
+                        });
+                    }
                 }
                 let main: gtk::Window = root.clone().upcast();
                 let settings_window = move || {
@@ -3011,6 +3250,13 @@ impl SimpleComponent for AppModel {
             gtk::glib::timeout_add_seconds_local(30, move || {
                 s.input(AppMsg::SendDueScheduled);
                 gtk::glib::ControlFlow::Continue
+            });
+        }
+        {
+            // Settings, built hidden a moment after startup (see PrewarmSettings).
+            let s = sender.clone();
+            gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || {
+                s.input(AppMsg::PrewarmSettings);
             });
         }
         ComponentParts { model, widgets }
@@ -3144,11 +3390,19 @@ impl SimpleComponent for AppModel {
                 }
             }
 
-            AppMsg::UnifiedSelected => {
+            AppMsg::UnifiedSelected(view) => {
+                let t_open = std::time::Instant::now();
                 self.close_sidebar_peek();
                 self.leave_gallery();
                 self.showing_contacts = false;
                 self.showing_outbox = false;
+                // Another view's slices are another view's: start afresh
+                // (the loads below refill them).
+                if self.unified_view != view {
+                    self.unified_slices.clear();
+                    self.unified_boot_requested.clear();
+                }
+                self.unified_view = view;
                 self.unified = true;
                 self.tag_view = None;
                 self.selected = None;
@@ -3161,33 +3415,51 @@ impl SimpleComponent for AppModel {
                 self.message_list.emit(MessageListInput::SetSelected(None));
                 self.message_list.emit(MessageListInput::SetColorize(true));
                 self.message_list.emit(MessageListInput::ResetPaging);
-                self.message_list.emit(MessageListInput::SetShowRecipient(false));
+                // A Sent view's rows all come from you — name the recipients.
+                self.message_list.emit(MessageListInput::SetShowRecipient(
+                    view == UnifiedView::Kind(FolderKind::Sent),
+                ));
                 self.message_list.emit(MessageListInput::SetRestorable(false));
-                let reqs: Vec<(u32, u32, String)> = self
-                    .accounts
-                    .iter()
-                    .filter_map(|a| self.inbox_of(a.id).map(|f| (a.id, f.id, f.path.clone())))
-                    .collect();
-                // Keep every account's last known inbox and top it up from the
+                let reqs = self.unified_targets();
+                // Keep every account's last known slice and top it up from the
                 // folder caches, the way opening a single folder does. This used
                 // to clear the lot and wait: an account whose worker was slow to
                 // answer — busy backfilling a large mailbox, reconnecting, or
                 // offline — was simply absent from "All Inboxes", while its own
                 // Inbox, served from cache, still listed its mail. Each account's
                 // slice is replaced when its load lands.
-                for (account_id, folder_id, _) in &reqs {
+                for (account_id, folder_id, path) in &reqs {
+                    // A folder not seen since launch (only inboxes are primed
+                    // at startup): the on-disk index has it as last synced,
+                    // so the view opens at once — and after a restart — rather
+                    // than waiting on the worker.
+                    let seen = self
+                        .message_cache
+                        .get(&(*account_id, *folder_id))
+                        .is_some_and(|c| !c.is_empty());
+                    if !seen {
+                        let from_disk = self
+                            .cache
+                            .as_ref()
+                            .map(|c| c.load_messages(*account_id, path, *folder_id))
+                            .unwrap_or_default();
+                        if !from_disk.is_empty() {
+                            let from_disk = self.merge_local_tags(*account_id, from_disk);
+                            self.message_cache.insert((*account_id, *folder_id), from_disk);
+                        }
+                    }
                     if let Some(cached) = self.message_cache.get(&(*account_id, *folder_id)) {
                         if !cached.is_empty() {
-                            self.unified_by_account.insert(*account_id, cached.clone());
+                            self.unified_slices.insert((*account_id, *folder_id), cached.clone());
                         }
                     }
                 }
-                // Forget accounts that no longer have an inbox to contribute
-                // (removed or disabled since the last visit).
-                let live: std::collections::HashSet<u32> =
-                    reqs.iter().map(|(a, _, _)| *a).collect();
-                self.unified_by_account.retain(|a, _| live.contains(a));
-                if self.unified_by_account.is_empty() {
+                // Forget folders that no longer contribute (an account
+                // removed or disabled, a rule gone, since the last visit).
+                let live: std::collections::HashSet<(u32, u32)> =
+                    reqs.iter().map(|(a, f, _)| (*a, *f)).collect();
+                self.unified_slices.retain(|k, _| live.contains(k));
+                if self.unified_slices.is_empty() {
                     self.message_list
                         .emit(MessageListInput::SetLoading);
                 } else {
@@ -3199,6 +3471,11 @@ impl SimpleComponent for AppModel {
                     self.send_to(account_id, MailRequest::LoadMessages { folder_id, path });
                 }
                 self.push_index_complete();
+                tracing::info!(
+                    "unified {view:?}: opened in {:?} with {} cached messages",
+                    t_open.elapsed(),
+                    self.unified_slices.values().map(Vec::len).sum::<usize>()
+                );
             }
 
             AppMsg::FolderSelected { account_id, folder_id, name, path } => {
@@ -3407,6 +3684,59 @@ impl SimpleComponent for AppModel {
                 if self.sidebar_hover_expand != on {
                     self.sidebar_hover_expand = on;
                     self.save_settings();
+                }
+            }
+
+            AppMsg::SetRememberSidebar(on) => {
+                if self.remember_sidebar != on {
+                    self.remember_sidebar = on;
+                    self.save_settings();
+                }
+            }
+
+            AppMsg::SetRememberRail(on) => {
+                if self.remember_rail != on {
+                    self.remember_rail = on;
+                    self.save_settings();
+                }
+            }
+
+            AppMsg::SidebarSectionsOpen { all_inboxes, filtered, tags, starred, sent, drafts } => {
+                let now = (all_inboxes, filtered, tags, starred, sent, drafts);
+                let was = (
+                    self.unified_expanded,
+                    self.filtered_expanded,
+                    self.tags_expanded,
+                    self.starred_expanded,
+                    self.sent_expanded,
+                    self.drafts_expanded,
+                );
+                if now != was {
+                    self.unified_expanded = all_inboxes;
+                    self.filtered_expanded = filtered;
+                    self.tags_expanded = tags;
+                    self.starred_expanded = starred;
+                    self.sent_expanded = sent;
+                    self.drafts_expanded = drafts;
+                    self.save_sidebar_state();
+                }
+            }
+
+            AppMsg::SetRailDots(on) => {
+                if self.rail_dots != on {
+                    self.rail_dots = on;
+                    self.save_settings();
+                    self.rebuild_sidebar();
+                }
+            }
+
+            AppMsg::SetRailFold(fold) => {
+                if self.rail_fold != fold {
+                    self.rail_fold = fold;
+                    self.save_settings();
+                    // The sidebar folds (or reopens) the sections concerned
+                    // itself if the rail is up.
+                    self.rebuild_sidebar();
                 }
             }
 
@@ -4037,11 +4367,7 @@ impl SimpleComponent for AppModel {
 
             AppMsg::Refresh => {
                 if self.unified {
-                    let reqs: Vec<(u32, u32, String)> = self
-                        .accounts
-                        .iter()
-                        .filter_map(|a| self.inbox_of(a.id).map(|f| (a.id, f.id, f.path.clone())))
-                        .collect();
+                    let reqs = self.unified_targets();
                     for (account_id, folder_id, path) in reqs {
                         self.send_to(account_id, MailRequest::LoadMessages { folder_id, path });
                     }
@@ -4585,6 +4911,60 @@ impl SimpleComponent for AppModel {
                     self.save_settings();
                     // Adds or removes the Filtered Folders section.
                     self.rebuild_sidebar();
+                }
+            }
+
+            AppMsg::SetUnifiedKinds(kinds) => {
+                if self.unified_kinds != kinds {
+                    self.unified_kinds = kinds;
+                    self.save_settings();
+                    self.rebuild_sidebar();
+                }
+            }
+
+            AppMsg::SetUnifiedTags(show) => {
+                if self.unified_tags != show {
+                    self.unified_tags = show;
+                    self.save_settings();
+                    self.rebuild_sidebar();
+                }
+            }
+
+            AppMsg::SetShowAccounts(show) => {
+                if self.show_accounts != show {
+                    self.show_accounts = show;
+                    self.save_settings();
+                    self.rebuild_sidebar();
+                }
+                // Both places that offer the switch stay in step.
+                if self.show_accounts_action.state().and_then(|v| v.get::<bool>()) != Some(show) {
+                    self.show_accounts_action.set_state(&show.to_variant());
+                }
+                if let Some(p) = &self.prefs {
+                    p.emit(PrefInput::SetShowAccounts(show));
+                }
+            }
+
+            AppMsg::ToggleAccountFiltered(account_id) => {
+                // The sidebar animated the toggle locally; record the state.
+                if let Some(email) = self.email_of(account_id) {
+                    if let Some(pos) = self.filtered_expanded_accounts.iter().position(|e| *e == email) {
+                        self.filtered_expanded_accounts.remove(pos);
+                    } else {
+                        self.filtered_expanded_accounts.push(email);
+                    }
+                    self.save_sidebar_state();
+                }
+            }
+
+            AppMsg::ToggleAccountTags(account_id) => {
+                if let Some(email) = self.email_of(account_id) {
+                    if let Some(pos) = self.tags_expanded_accounts.iter().position(|e| *e == email) {
+                        self.tags_expanded_accounts.remove(pos);
+                    } else {
+                        self.tags_expanded_accounts.push(email);
+                    }
+                    self.save_sidebar_state();
                 }
             }
 
@@ -5299,14 +5679,14 @@ impl SimpleComponent for AppModel {
                 self.sweep_blacklisted();
             }
 
-            AppMsg::TagSelected(keyword) => {
+            AppMsg::TagSelected { keyword, account } => {
                 self.close_sidebar_peek();
                 self.leave_gallery();
                 self.showing_contacts = false;
                 self.showing_outbox = false;
                 self.unified = false;
                 self.selected = None;
-                self.tag_view = Some(keyword);
+                self.tag_view = Some((account, keyword));
                 self.current = None;
                 self.current_thread.clear();
                 self.attachments.clear();
@@ -5619,6 +5999,8 @@ impl SimpleComponent for AppModel {
                         self.account_order.retain(|e| e != email);
                         self.collapsed.retain(|e| e != email);
                         self.folders_expanded.retain(|e| e != email);
+                        self.filtered_expanded_accounts.retain(|e| e != email);
+                        self.tags_expanded_accounts.retain(|e| e != email);
                     }
                     self.save_sidebar_state();
                 }
@@ -5665,11 +6047,32 @@ impl SimpleComponent for AppModel {
                 }
             }
 
-            // Closing the combined Settings window drops both
-            // panels' components.
-            AppMsg::ClosePreferences => {
-                self.prefs = None;
-                self.accounts_win = None;
+            // Closing the combined Settings window hides it (the window's
+            // own hide-on-close); both panels stay for the next open, which
+            // then only rebuilds the accounts panel.
+            AppMsg::ClosePreferences => {}
+
+            // Build the Settings window ahead of its first open, hidden and
+            // realized, a moment after startup: its first appearance is
+            // then a present() rather than a build, a layout and a paint.
+            AppMsg::DebugCloseSettings => {
+                if let Some(p) = &self.prefs {
+                    p.widget().close();
+                }
+            }
+
+            AppMsg::PrewarmSettings => {
+                if self.prefs.is_none() {
+                    self.build_settings_window(&sender, self.settings_open_accounts);
+                    if let Some(p) = &self.prefs {
+                        let w = p.widget();
+                        WidgetExt::realize(w);
+                        // Measuring runs the first CSS pass and Pango layouts
+                        // now, so the first frame after present has less to do.
+                        let _ = w.measure(gtk::Orientation::Horizontal, -1);
+                        let _ = w.measure(gtk::Orientation::Vertical, 920);
+                    }
+                }
             }
 
             AppMsg::SettingsEditorOpen(open) => {
@@ -5682,6 +6085,13 @@ impl SimpleComponent for AppModel {
                 if let Some(existing) = self.accounts.iter_mut().find(|a| a.id == account.id) {
                     *existing = account;
                 } else {
+                    // Layout not remembered: an account starts folded up,
+                    // wherever it came from (config, GOA, the demo). Only
+                    // on arrival, so opening it by hand sticks for the
+                    // session.
+                    if !self.remember_sidebar && !self.collapsed.contains(&account.email) {
+                        self.collapsed.push(account.email.clone());
+                    }
                     self.accounts.push(account);
                     self.accounts.sort_by_key(|a| a.id);
                 }
@@ -5764,8 +6174,12 @@ impl SimpleComponent for AppModel {
                 // priming already painted its slice, and this is what brings
                 // in whatever changed since the app last ran.
                 if self.unified && self.unified_boot_requested.insert(account_id) {
-                    if let Some(inbox) = self.inbox_of(account_id) {
-                        let (folder_id, path) = (inbox.id, inbox.path.clone());
+                    let mine: Vec<(u32, u32, String)> = self
+                        .unified_targets()
+                        .into_iter()
+                        .filter(|(a, _, _)| *a == account_id)
+                        .collect();
+                    for (_, folder_id, path) in mine {
                         self.send_to(account_id, MailRequest::LoadMessages { folder_id, path });
                     }
                 }
@@ -5891,20 +6305,37 @@ impl SimpleComponent for AppModel {
                     }
                 }
                 // Cache for instant display when revisiting this folder.
+                // The worker answers a load from its cache first and from the
+                // server after, and the view was seeded from the same cache
+                // when it opened — so most arrivals change nothing. Only a
+                // changed list is worth re-threading and re-emitting: a
+                // rebuild of a large (or merged) list is not free, and it
+                // used to happen several times over per visit.
+                let unchanged = self.message_cache.get(&(account_id, folder_id)) == Some(&messages);
                 self.message_cache
                     .insert((account_id, folder_id), messages.clone());
-                // A sync can add a reply to a conversation already assembled, so
-                // what was stored is no longer necessarily the conversation.
-                self.forget_threads(account_id);
-                self.push_thread_links();
+                if !unchanged {
+                    // A sync can add a reply to a conversation already
+                    // assembled, so what was stored is no longer necessarily
+                    // the conversation.
+                    self.forget_threads(account_id);
+                    self.push_thread_links();
+                }
                 if self.unified {
-                    // Accept only each account's inbox; merge all by recency.
-                    if self.inbox_of(account_id).map(|f| f.id) == Some(folder_id) {
-                        self.unified_by_account.insert(account_id, messages);
-                        self.emit_unified();
+                    // Accept only the folders the view merges, by recency.
+                    if self.is_unified_target(account_id, folder_id) {
+                        let same_slice = unchanged
+                            && self
+                                .unified_slices
+                                .get(&(account_id, folder_id))
+                                .is_some_and(|s| *s == messages);
+                        if !same_slice {
+                            self.unified_slices.insert((account_id, folder_id), messages);
+                            self.emit_unified();
+                        }
                     }
                 } else if let Some(sel) = self.selected.as_ref() {
-                    if sel.account_id == account_id && sel.folder_id == folder_id {
+                    if sel.account_id == account_id && sel.folder_id == folder_id && !unchanged {
                         self.message_list
                             .emit(MessageListInput::SetMessages { messages });
                     }
@@ -5964,9 +6395,9 @@ impl SimpleComponent for AppModel {
                 entry.extend(fresh.iter().cloned());
                 // Feed the visible list so search covers the new messages live.
                 if self.unified {
-                    if self.inbox_of(account_id).map(|f| f.id) == Some(folder_id) {
-                        self.unified_by_account
-                            .entry(account_id)
+                    if self.is_unified_target(account_id, folder_id) {
+                        self.unified_slices
+                            .entry((account_id, folder_id))
                             .or_default()
                             .extend(fresh.iter().cloned());
                         self.message_list
@@ -6546,10 +6977,17 @@ impl AppModel {
             self.tray_mail,
             self.show_remote_banner,
             self.sidebar_hover_expand,
+            self.remember_sidebar,
+            self.remember_rail,
+            self.rail_dots,
+            self.rail_fold,
             self.app_theme,
             self.show_unified_pref,
             self.unified_chip,
             self.unified_filtered,
+            self.unified_kinds,
+            self.unified_tags,
+            self.show_accounts,
             self.filtered_placement,
             self.tags_placement,
             self.chevrons_left,
@@ -6806,10 +7244,9 @@ impl AppModel {
 
     fn current_index_complete(&self) -> bool {
         if self.unified {
-            self.accounts.iter().all(|a| {
-                self.inbox_of(a.id)
-                    .map_or(true, |f| self.indexed_folders.contains(&(a.id, f.id)))
-            })
+            self.unified_targets()
+                .iter()
+                .all(|(a, f, _)| self.indexed_folders.contains(&(*a, *f)))
         } else if let Some(sel) = &self.selected {
             self.indexed_folders.contains(&(sel.account_id, sel.folder_id))
         } else {
@@ -6899,7 +7336,7 @@ impl AppModel {
                 let messages = cache.load_messages(account_id, &inbox.path, inbox.id);
                 if !messages.is_empty() {
                     self.message_cache.insert((account_id, inbox.id), messages.clone());
-                    self.unified_by_account.insert(account_id, messages);
+                    self.unified_slices.insert((account_id, inbox.id), messages);
                 }
             }
             // The folders counting filters file into (#116) as well, so the
@@ -6974,7 +7411,7 @@ impl AppModel {
         self.selected = None;
         self.unified = false;
         self.tag_view = None;
-        self.unified_by_account.clear();
+        self.unified_slices.clear();
         self.message_cache.clear();
         self.body_cache.clear();
         self.attachments.clear();
@@ -7222,6 +7659,14 @@ impl AppModel {
             folders_expanded: self.folders_expanded.clone(),
             icon_only: self.sidebar_collapsed,
             tree_collapsed: self.tree_collapsed.clone(),
+            unified_expanded: self.unified_expanded,
+            filtered_expanded: self.filtered_expanded,
+            tags_expanded: self.tags_expanded,
+            starred_expanded: self.starred_expanded,
+            sent_expanded: self.sent_expanded,
+            drafts_expanded: self.drafts_expanded,
+            filtered_expanded_accounts: self.filtered_expanded_accounts.clone(),
+            tags_expanded_accounts: self.tags_expanded_accounts.clone(),
         });
     }
 
@@ -7711,13 +8156,17 @@ impl AppModel {
                     .iter()
                     .filter_map(|k| k.strip_prefix(&prefix).map(String::from))
                     .collect();
+                let filtered = self.account_filtered_folders(account.id);
                 Some(SectionData {
                     collapsed: self.collapsed.contains(email),
                     custom_expanded: self.folders_expanded.contains(email),
+                    filtered_expanded: self.filtered_expanded_accounts.contains(email),
+                    tags_expanded: self.tags_expanded_accounts.contains(email),
                     color,
                     emoji,
                     account,
                     folders,
+                    filtered,
                     tree_collapsed,
                 })
             })
@@ -7728,18 +8177,26 @@ impl AppModel {
         // single-account — its default selection then landed on that account's
         // inbox (possibly inside a collapsed section, so nothing visibly
         // highlighted) instead of the "All Inboxes" the app should open with.
-        let show_unified = self.show_unified_pref
-            && (self.config.iter().filter(|c| c.enabled).count() > 1
-                // The demo has no config-file accounts, but its two mock accounts
-                // deserve the same All Inboxes opening as a real multi-account setup.
-                || (demo_mode() && self.accounts.len() > 1));
+        let multi_account = self.config.iter().filter(|c| c.enabled).count() > 1
+            // The demo has no config-file accounts, but its two mock accounts
+            // deserve the same All Inboxes opening as a real multi-account setup.
+            || (demo_mode() && self.accounts.len() > 1);
+        let show_unified = self.show_unified_pref && multi_account;
+        // The other unified rows are as pointless with one account.
+        let unified_kinds =
+            if multi_account { self.unified_kinds } else { config::UnifiedKinds::NONE };
         let unified_unread = self.unified_unread();
         let unified_folders = self.unified_folder_refs();
         self.sidebar.emit(SidebarInput::SetContents {
             sections,
             show_unified,
+            unified_kinds,
+            unified_tags: self.unified_tags,
+            show_accounts: self.show_accounts,
             unified_chip: self.unified_chip,
             chevrons_left: self.chevrons_left,
+            rail_dots: self.rail_dots,
+            rail_fold: self.rail_fold,
             unified_unread,
             unified_folders,
             tags: self.tags.clone(),
@@ -9603,9 +10060,12 @@ impl AppModel {
                 }
             }
         }
-        self.unified_by_account
-            .get(&account_id)
-            .and_then(|msgs| msgs.iter().find(|m| m.id == id).cloned())
+        self.unified_slices
+            .iter()
+            .filter(|((a, _), _)| *a == account_id)
+            .flat_map(|(_, msgs)| msgs.iter())
+            .find(|m| m.id == id)
+            .cloned()
     }
 
     /// Explain how to set up the system keyring (Secret Service) so passwords
@@ -9875,11 +10335,9 @@ impl AppModel {
                 m.unread = false;
             }
         }
-        if self.inbox_of(account_id).map(|f| f.id) == Some(folder_id) {
-            if let Some(msgs) = self.unified_by_account.get_mut(&account_id) {
-                for m in msgs {
-                    m.unread = false;
-                }
+        if let Some(msgs) = self.unified_slices.get_mut(&(account_id, folder_id)) {
+            for m in msgs {
+                m.unread = false;
             }
         }
         self.folder_unread.insert((account_id, folder_id), 0);
@@ -9947,9 +10405,11 @@ impl AppModel {
     /// slices arrive independently (cache seed, then each account's load), so the
     /// whole merged list is re-emitted each time one of them changes.
     fn emit_unified(&self) {
+        let t = std::time::Instant::now();
         let mut merged: Vec<Message> =
-            self.unified_by_account.values().flatten().cloned().collect();
+            self.unified_slices.values().flatten().cloned().collect();
         merged.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        tracing::debug!("unified: merged {} messages in {:?}", merged.len(), t.elapsed());
         self.message_list.emit(MessageListInput::SetMessages { messages: merged });
     }
 
@@ -9958,18 +10418,31 @@ impl AppModel {
     /// out; Gmail's per-label copies of one message collapse to one row,
     /// the inbox copy where there is one (its actions land where expected).
     fn emit_tag_view(&self) {
-        let Some(kw) = self.tag_view.as_deref() else { return };
+        let Some((scope, kw)) = self.tag_view.clone() else { return };
+        let in_scope = |account_id: u32| scope.map_or(true, |id| id == account_id);
+        // One keyword, or — the unified Tags row — every configured tag.
+        let keywords: Vec<String> = match kw {
+            Some(k) => vec![k],
+            None => self.tags.iter().map(|t| t.keyword.clone()).collect(),
+        };
         let mut out: Vec<Message> = Vec::new();
+        let mut seen_rows: std::collections::HashSet<(u32, u32, u32)> =
+            std::collections::HashSet::new();
         if let Some(cache) = self.cache.as_ref() {
-            for account in &self.accounts {
+            for account in self.accounts.iter().filter(|a| in_scope(a.id)) {
                 let Some(folders) = self.folders.get(&account.id) else { continue };
-                for (path, mut m) in cache.messages_with_keyword(account.id, kw) {
-                    let Some(f) = folders.iter().find(|f| f.path == path) else { continue };
-                    if matches!(f.kind, FolderKind::Trash | FolderKind::Junk) {
-                        continue;
+                for kw in &keywords {
+                    for (path, mut m) in cache.messages_with_keyword(account.id, kw) {
+                        let Some(f) = folders.iter().find(|f| f.path == path) else { continue };
+                        if matches!(f.kind, FolderKind::Trash | FolderKind::Junk) {
+                            continue;
+                        }
+                        m.folder_id = f.id;
+                        // A message with several tags answers several keywords.
+                        if seen_rows.insert((m.account_id, m.folder_id, m.uid)) {
+                            out.push(m);
+                        }
                     }
-                    m.folder_id = f.id;
-                    out.push(m);
                 }
             }
         }
@@ -9977,13 +10450,20 @@ impl AppModel {
         // the folders loaded so far instead.
         if out.is_empty() && demo_mode() && self.config.is_empty() {
             for ((account_id, folder_id), messages) in &self.message_cache {
-                if matches!(
-                    self.folder_kind(*account_id, *folder_id),
-                    Some(FolderKind::Trash | FolderKind::Junk)
-                ) {
+                if !in_scope(*account_id)
+                    || matches!(
+                        self.folder_kind(*account_id, *folder_id),
+                        Some(FolderKind::Trash | FolderKind::Junk)
+                    )
+                {
                     continue;
                 }
-                out.extend(messages.iter().filter(|m| m.has_keyword(kw)).cloned());
+                out.extend(
+                    messages
+                        .iter()
+                        .filter(|m| keywords.iter().any(|k| m.has_keyword(k)))
+                        .cloned(),
+                );
             }
         }
         let inbox_first = |m: &Message| {
@@ -10048,8 +10528,8 @@ impl AppModel {
                 c.keywords = keywords.clone();
             }
         }
-        if let Some(msgs) = self.unified_by_account.get_mut(&aid) {
-            for c in msgs.iter_mut().filter(|c| same(c) && c.folder_id == fid) {
+        if let Some(msgs) = self.unified_slices.get_mut(&(aid, fid)) {
+            for c in msgs.iter_mut().filter(|c| same(c)) {
                 c.keywords = keywords.clone();
             }
         }
@@ -10069,7 +10549,12 @@ impl AppModel {
             p.controller.emit(MessageWindowInput::SetKeywords(keywords));
         }
         // In this tag's own view an untagged message has no row to keep.
-        if !add && self.tag_view.as_deref().is_some_and(|v| v.eq_ignore_ascii_case(keyword)) {
+        if !add
+            && self
+                .tag_view
+                .as_ref()
+                .is_some_and(|(_, v)| v.as_deref().is_some_and(|v| v.eq_ignore_ascii_case(keyword)))
+        {
             self.message_list.emit(MessageListInput::Remove(id));
         }
     }
@@ -10154,100 +10639,20 @@ impl AppModel {
     /// Open (or focus) the combined Settings window on the
     /// requested panel. When `add_new`, jump straight to the "add account"
     /// form — used by the empty-state "Add first account" button.
-    fn open_settings_window(
-        &mut self,
-        sender: &ComponentSender<Self>,
-        on_accounts: bool,
-        add_new: bool,
-    ) {
-        // Already open? Bring it forward and switch panels instead of
-        // opening another.
-        if let Some(p) = self.prefs.as_ref().filter(|p| p.widget().is_visible()) {
-            // Asked for Accounts: switch to it. Otherwise leave the window
-            // on whatever category it is showing.
-            if on_accounts {
-                p.emit(PrefInput::ShowAccounts(true));
-            }
-            p.widget().present();
-            if add_new {
-                if let Some(a) = &self.accounts_win {
-                    a.emit(crate::ui::accounts::AccountsInput::AddAccount);
-                }
-            }
-            return;
-        }
-        // Pass accounts in display order, with passwords prefilled from the keyring
-        // so the editor shows them when editing.
-        let order = self.ordered_emails();
-        let mut accounts: Vec<AccountConfig> = Vec::new();
-        for email in &order {
-            if let Some(a) = self.config.iter().find(|c| &c.email == email) {
-                accounts.push(a.clone());
-            }
-        }
-        for c in &self.config {
-            if !accounts.iter().any(|a| a.email == c.email) {
-                accounts.push(c.clone());
-            }
-        }
-        for a in &mut accounts {
-            if a.password.is_empty() {
-                a.password = config::load_password(&a.email).unwrap_or_default();
-            }
-            if a.smtp_separate && a.smtp_password.is_empty() {
-                a.smtp_password = config::load_smtp_password(&a.email).unwrap_or_default();
-            }
-            // Aliases with their own SMTP (#34): prefill too, so editing keeps
-            // the stored password (and an email rename can re-store it under
-            // the new address).
-            let email = a.email.clone();
-            for alias in &mut a.aliases {
-                if alias.has_own_smtp() && alias.smtp_password.is_empty() {
-                    alias.smtp_password =
-                        config::load_alias_smtp_password(&email, &alias.address())
-                            .unwrap_or_default();
-                }
-            }
-        }
-        // Demo mode: the sample accounts exist only at the backend layer, so
-        // the Accounts panel would sit empty in screenshots — hand it
-        // matching stand-in configs instead.
-        if accounts.is_empty() && demo_mode() {
-            accounts = demo_account_configs();
-        }
-        // The accounts panel component (embedded behind the "Accounts" tab).
-        let accounts = AccountsWindow::builder()
-            .launch(crate::ui::accounts::AccountsInit {
-                accounts,
-                allowed_senders: self.allowed_senders.clone(),
-                blacklist: self.blacklist.clone(),
-                filters: self.filters.clone(),
-                tags: self.tags.clone(),
-            })
-            .forward(sender.input_sender(), |out| match out {
-                AccountsOutput::Saved { original_email, account } => {
-                    AppMsg::AccountSaved { original_email, account }
-                }
-                AccountsOutput::Removed { email } => AppMsg::AccountRemoved { email },
-                AccountsOutput::Reordered(emails) => AppMsg::AccountsReordered(emails),
-                AccountsOutput::EnabledChanged { email, enabled } => {
-                    AppMsg::AccountEnabledChanged { email, enabled }
-                }
-                AccountsOutput::ImportGoa(account) => AppMsg::ImportGoaAccount(account),
-                AccountsOutput::EditorOpen(open) => AppMsg::SettingsEditorOpen(open),
-                AccountsOutput::AddSender(addr) => AppMsg::AddSender(addr),
-                AccountsOutput::RemoveSender(addr) => AppMsg::RemoveSender(addr),
-                AccountsOutput::AddBlacklist(addr) => AppMsg::AddBlacklist(addr),
-                AccountsOutput::RemoveBlacklist(addr) => AppMsg::RemoveBlacklist(addr),
-                AccountsOutput::SetFilters(rules) => AppMsg::SetFilters(rules),
-                AccountsOutput::SetTags(tags) => AppMsg::SetTags(tags),
-            });
-        if add_new {
-            accounts.emit(crate::ui::accounts::AccountsInput::AddAccount);
-        }
-
-        // The host window: the preferences component, carrying the accounts
-        // panel behind its other tab.
+    /// Build the Settings window and its accounts panel, hidden. It is
+    /// kept for the life of the app once built: `open_settings_window`
+    /// presents it, and closing it hides it, so opening never waits on
+    /// hundreds of rows being built and laid out again.
+    fn build_settings_window(&mut self, sender: &ComponentSender<Self>, on_accounts: bool) {
+        let t_open = std::time::Instant::now();
+        // Pass accounts in display order. Passwords stay in the keyring until
+        // an account's editor opens (the panel fetches them then, off the
+        // main thread): reading every account's secrets up front cost a
+        // keyring round trip or three per account, which is what made this
+        // window slow to appear.
+        let init = self.accounts_panel_init();
+        self.accounts_seed = Some(format!("{init:?}"));
+        let accounts = Self::launch_accounts_panel(init, sender);
         let init = PrefInit {
             auto_remote_content: self.auto_remote_content,
             show_remote_banner: self.show_remote_banner,
@@ -10277,6 +10682,9 @@ impl AppModel {
             show_unified: self.show_unified_pref,
             unified_chip: self.unified_chip,
             unified_filtered: self.unified_filtered,
+            unified_kinds: self.unified_kinds,
+            unified_tags: self.unified_tags,
+            show_accounts: self.show_accounts,
             filtered_placement: self.filtered_placement,
             tags_placement: self.tags_placement,
             chevrons_left: self.chevrons_left,
@@ -10284,6 +10692,10 @@ impl AppModel {
             read_mark: self.read_mark,
             settings_open_accounts: self.settings_open_accounts,
             sidebar_hover_expand: self.sidebar_hover_expand,
+            remember_sidebar: self.remember_sidebar,
+            remember_rail: self.remember_rail,
+            rail_dots: self.rail_dots,
+            rail_fold: self.rail_fold,
             card_actions_hover: self.card_actions_hover,
             card_actions_auto: self.card_actions_auto,
             list_palette: self.list_palette,
@@ -10365,6 +10777,9 @@ impl AppModel {
                 PrefOutput::SetShowUnified(show) => AppMsg::SetShowUnified(show),
                 PrefOutput::SetUnifiedChip(show) => AppMsg::SetUnifiedChip(show),
                 PrefOutput::SetUnifiedFiltered(show) => AppMsg::SetUnifiedFiltered(show),
+                PrefOutput::SetUnifiedKinds(kinds) => AppMsg::SetUnifiedKinds(kinds),
+                PrefOutput::SetUnifiedTags(show) => AppMsg::SetUnifiedTags(show),
+                PrefOutput::SetShowAccounts(show) => AppMsg::SetShowAccounts(show),
                 PrefOutput::SetFilteredPlacement(p) => AppMsg::SetFilteredPlacement(p),
                 PrefOutput::SetTagsPlacement(p) => AppMsg::SetTagsPlacement(p),
                 PrefOutput::SetChevronsLeft(left) => AppMsg::SetChevronsLeft(left),
@@ -10377,6 +10792,10 @@ impl AppModel {
                 PrefOutput::SetSidebarHoverExpand(on) => {
                     AppMsg::SetSidebarHoverExpand(on)
                 }
+                PrefOutput::SetRememberSidebar(on) => AppMsg::SetRememberSidebar(on),
+                PrefOutput::SetRememberRail(on) => AppMsg::SetRememberRail(on),
+                PrefOutput::SetRailDots(on) => AppMsg::SetRailDots(on),
+                PrefOutput::SetRailFold(fold) => AppMsg::SetRailFold(fold),
                 PrefOutput::SetAppTheme(theme) => AppMsg::SetAppTheme(theme),
                 PrefOutput::SetSettingsOpenAccounts(on) => {
                     AppMsg::SetSettingsOpenAccounts(on)
@@ -10396,7 +10815,6 @@ impl AppModel {
                 PrefOutput::SetOverrideColors(on) => AppMsg::SetOverrideColors(on),
                 PrefOutput::Closed => AppMsg::ClosePreferences,
             });
-        prefs.widget().present();
         accounts.emit(crate::ui::accounts::AccountsInput::SetFolderChoices(
             self.folder_choice_map(),
         ));
@@ -10426,7 +10844,146 @@ impl AppModel {
             }
         }
         self.accounts_win = Some(accounts);
+        tracing::debug!("settings window: built in {:?}", t_open.elapsed());
         self.prefs = Some(prefs);
+    }
+
+    /// A fresh accounts panel over the current accounts (in display
+    /// order), filters, tags and sender lists. Passwords stay in the keyring
+    /// until an account's editor opens (the panel fetches them then, off
+    /// the main thread): reading every account's secrets up front cost a
+    /// keyring round trip or three per account, which is what made this
+    /// window slow to appear with many accounts.
+    fn accounts_panel_init(&self) -> crate::ui::accounts::AccountsInit {
+        let order = self.ordered_emails();
+        let mut accounts: Vec<AccountConfig> = Vec::new();
+        for email in &order {
+            if let Some(a) = self.config.iter().find(|c| &c.email == email) {
+                accounts.push(a.clone());
+            }
+        }
+        for c in &self.config {
+            if !accounts.iter().any(|a| a.email == c.email) {
+                accounts.push(c.clone());
+            }
+        }
+        // Demo mode: the sample accounts exist only at the backend layer, so
+        // the Accounts panel would sit empty in screenshots — hand it
+        // matching stand-in configs instead.
+        if accounts.is_empty() && demo_mode() {
+            accounts = demo_account_configs();
+        }
+        // The accounts panel component (embedded behind the "Accounts" tab).
+        crate::ui::accounts::AccountsInit {
+                accounts,
+                allowed_senders: self.allowed_senders.clone(),
+                blacklist: self.blacklist.clone(),
+                filters: self.filters.clone(),
+                tags: self.tags.clone(),
+            }
+    }
+
+    /// Launch an accounts panel over `init`.
+    fn launch_accounts_panel(
+        init: crate::ui::accounts::AccountsInit,
+        sender: &ComponentSender<Self>,
+    ) -> Controller<AccountsWindow> {
+        let accounts = AccountsWindow::builder()
+            .launch(init)
+            .forward(sender.input_sender(), |out| match out {
+                AccountsOutput::Saved { original_email, account } => {
+                    AppMsg::AccountSaved { original_email, account }
+                }
+                AccountsOutput::Removed { email } => AppMsg::AccountRemoved { email },
+                AccountsOutput::Reordered(emails) => AppMsg::AccountsReordered(emails),
+                AccountsOutput::EnabledChanged { email, enabled } => {
+                    AppMsg::AccountEnabledChanged { email, enabled }
+                }
+                AccountsOutput::ImportGoa(account) => AppMsg::ImportGoaAccount(account),
+                AccountsOutput::EditorOpen(open) => AppMsg::SettingsEditorOpen(open),
+                AccountsOutput::AddSender(addr) => AppMsg::AddSender(addr),
+                AccountsOutput::RemoveSender(addr) => AppMsg::RemoveSender(addr),
+                AccountsOutput::AddBlacklist(addr) => AppMsg::AddBlacklist(addr),
+                AccountsOutput::RemoveBlacklist(addr) => AppMsg::RemoveBlacklist(addr),
+                AccountsOutput::SetFilters(rules) => AppMsg::SetFilters(rules),
+                AccountsOutput::SetTags(tags) => AppMsg::SetTags(tags),
+            });
+
+        // The host window: the preferences component, carrying the accounts
+        // panel behind its other tab.
+        accounts
+    }
+
+    /// Show Settings: the window kept from a previous open (its accounts
+    /// panel rebuilt over the current accounts) or a newly built one.
+    fn open_settings_window(
+        &mut self,
+        sender: &ComponentSender<Self>,
+        on_accounts: bool,
+        add_new: bool,
+    ) {
+        let t_open = std::time::Instant::now();
+        let hidden = self.prefs.as_ref().is_some_and(|p| !p.widget().is_visible());
+        if self.prefs.is_none() {
+            self.build_settings_window(sender, on_accounts);
+        } else if hidden {
+            // Accounts, filters, tags and senders may have changed since: a
+            // fresh panel over today's state — or the kept one, when
+            // nothing did, with any editor it was left in closed.
+            let init = self.accounts_panel_init();
+            let seed = format!("{init:?}");
+            let page = if on_accounts {
+                "accounts".to_string()
+            } else {
+                self.last_settings_page.clone().unwrap_or_else(|| "general".to_string())
+            };
+            if self.accounts_seed.as_deref() == Some(seed.as_str()) {
+                if let Some(a) = &self.accounts_win {
+                    a.emit(crate::ui::accounts::AccountsInput::CloseEditor);
+                }
+            } else {
+                let accounts = Self::launch_accounts_panel(init, sender);
+                self.accounts_seed = Some(seed);
+                if let Some(p) = &self.prefs {
+                    p.emit(PrefInput::SetAccountsPanel {
+                        panel: accounts.widget().clone().upcast(),
+                        sender: accounts.sender().clone(),
+                    });
+                }
+                self.accounts_win = Some(accounts);
+            }
+            if let Some(p) = &self.prefs {
+                p.emit(PrefInput::EditorOpen(false));
+                p.emit(PrefInput::ShowPageById(page));
+            }
+        } else if on_accounts {
+            // Already showing: switch to Accounts if asked, else leave the
+            // window on whatever category it is showing.
+            if let Some(p) = &self.prefs {
+                p.emit(PrefInput::ShowAccounts(true));
+            }
+        }
+        if let Some(p) = &self.prefs {
+            p.widget().present();
+        }
+        if add_new {
+            if let Some(a) = &self.accounts_win {
+                a.emit(crate::ui::accounts::AccountsInput::AddAccount);
+            }
+        }
+        tracing::debug!("settings window: presented in {:?}", t_open.elapsed());
+        {
+            let t = t_open;
+            gtk::glib::idle_add_local_once(move || {
+                tracing::debug!("settings window: first idle after open at {:?}", t.elapsed());
+            });
+            if let Some(p) = &self.prefs {
+                p.widget().add_tick_callback(move |_, _| {
+                    tracing::debug!("settings window: first frame at {:?}", t.elapsed());
+                    gtk::glib::ControlFlow::Break
+                });
+            }
+        }
     }
 
     /// Confirm and remove an account (drops its keyring password too).
@@ -10880,7 +11437,7 @@ impl AppModel {
         if let Some(p) = self.popouts.get(&(m.account_id, m.id)) {
             p.window.close();
         }
-        if let Some(msgs) = self.unified_by_account.get_mut(&m.account_id) {
+        if let Some(msgs) = self.unified_slices.get_mut(&(m.account_id, m.folder_id)) {
             msgs.retain(|x| x.uid != m.uid);
         }
         if let Some(msgs) = self.message_cache.get_mut(&(m.account_id, m.folder_id)) {
@@ -11116,10 +11673,63 @@ impl AppModel {
 
     /// An account's Inbox folder, if known.
     fn inbox_of(&self, account_id: u32) -> Option<&Folder> {
-        self.folders
-            .get(&account_id)?
-            .iter()
-            .find(|f| f.kind == FolderKind::Inbox)
+        self.folder_of_kind(account_id, FolderKind::Inbox)
+    }
+
+    /// An account's folder of a kind, if it has one (the first, for the
+    /// special kinds a server lists once).
+    fn folder_of_kind(&self, account_id: u32, kind: FolderKind) -> Option<&Folder> {
+        self.folders.get(&account_id)?.iter().find(|f| f.kind == kind)
+    }
+
+    /// The folders the open unified view merges: (account, folder id, path).
+    fn unified_targets(&self) -> Vec<(u32, u32, String)> {
+        match self.unified_view {
+            UnifiedView::Kind(kind) => self
+                .accounts
+                .iter()
+                .filter_map(|a| self.folder_of_kind(a.id, kind).map(|f| (a.id, f.id, f.path.clone())))
+                .collect(),
+            UnifiedView::Filtered => self
+                .unified_folder_refs()
+                .into_iter()
+                .map(|r| (r.account_id, r.folder.id, r.folder.path))
+                .collect(),
+        }
+    }
+
+    /// Whether a folder is one the open unified view merges.
+    fn is_unified_target(&self, account_id: u32, folder_id: u32) -> bool {
+        match self.unified_view {
+            UnifiedView::Kind(kind) => {
+                self.folder_of_kind(account_id, kind).is_some_and(|f| f.id == folder_id)
+            }
+            UnifiedView::Filtered => self
+                .unified_folder_refs()
+                .iter()
+                .any(|r| r.account_id == account_id && r.folder.id == folder_id),
+        }
+    }
+
+    /// The folders an account's own "Filtered Folders" section lists: the
+    /// destination of every one of its rules, in rule order, without
+    /// repeats — whether or not the rule opted into the unified section.
+    /// An inbox destination is the account's Inbox row already.
+    fn account_filtered_folders(&self, account_id: u32) -> Vec<Folder> {
+        let mut out: Vec<Folder> = Vec::new();
+        let Some(folders) = self.folders.get(&account_id) else { return out };
+        let Some(email) = self.email_of(account_id) else { return out };
+        let rules = self.filters.iter().filter(|r| r.account_email.eq_ignore_ascii_case(&email));
+        for r in rules {
+            let Some(f) = folders.iter().find(|f| f.path == r.dest_path) else { continue };
+            if f.kind == FolderKind::Inbox || out.iter().any(|o| o.id == f.id) {
+                continue;
+            }
+            let mut folder = f.clone();
+            folder.unread = self.folder_unread_of(f);
+            out.push(folder);
+        }
+        out
     }
 
     /// Server-side unread count for an account's inbox.
@@ -11221,7 +11831,7 @@ impl AppModel {
         else {
             return;
         };
-        let open = (self.unified && folder.kind == FolderKind::Inbox)
+        let open = (self.unified && self.is_unified_target(account_id, folder_id))
             || self
                 .selected
                 .as_ref()
@@ -11264,9 +11874,11 @@ impl AppModel {
                 }
             }
         }
-        if let Some(msgs) = self.unified_by_account.get_mut(&account_id) {
-            if let Some(m) = msgs.iter_mut().find(|m| m.id == message_id) {
-                m.unread = unread;
+        for ((aid, _), msgs) in self.unified_slices.iter_mut() {
+            if *aid == account_id {
+                if let Some(m) = msgs.iter_mut().find(|m| m.id == message_id) {
+                    m.unread = unread;
+                }
             }
         }
     }
@@ -11625,6 +12237,7 @@ const SHORTCUT_HELP: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+P", i18n_noop("Print the message you are reading")),
             ("Ctrl+Shift+P", i18n_noop("Preview it as a PDF first")),
             ("Ctrl+Shift+S", i18n_noop("Reveal the status bar (also: long-press Refresh)")),
+            ("Ctrl+Shift+A", i18n_noop("Show or hide the accounts in the sidebar")),
             ("Ctrl+Shift+C", i18n_noop("Console mode (when enabled in Settings)")),
             ("Ctrl+W", i18n_noop("Close the window (background sync keeps running)")),
             ("Ctrl+Q", i18n_noop("Quit Vireo entirely")),

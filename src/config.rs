@@ -852,6 +852,22 @@ struct PrivacyFile {
     /// full sidebar out over the panes without needing the expand button.
     #[serde(default)]
     sidebar_hover_expand: bool,
+    /// Reopen with the accounts, folders and sections as they were left.
+    /// Off starts every launch with everything folded up.
+    #[serde(default = "default_on")]
+    remember_sidebar: bool,
+    /// Reopen collapsed to the icon rail if that is how it was left. Off
+    /// starts every launch with the full sidebar.
+    #[serde(default = "default_on")]
+    remember_rail: bool,
+    /// Icon rail: a dot for unread mail in place of the count. On by
+    /// default, as are the fold-ups below.
+    #[serde(default = "default_on")]
+    rail_dots: bool,
+    /// Icon rail: the sections folded up by themselves when the sidebar
+    /// collapses, one switch each.
+    #[serde(default)]
+    rail_fold: RailFold,
     /// The app chrome's theme: follow the system, or force light/dark.
     #[serde(default)]
     app_theme: AppTheme,
@@ -899,6 +915,18 @@ struct PrivacyFile {
     /// section of its own. Off hides that section whatever the rules say.
     #[serde(default = "default_unified_filtered")]
     unified_filtered: bool,
+    /// The unified section's Starred / Sent / Drafts rows, one switch each
+    /// (All Inboxes is `show_unified` above).
+    #[serde(default)]
+    unified_kinds: UnifiedKinds,
+    /// Whether the unified section lists the tags (every account's mail with
+    /// the tag). Off hides that section; each account keeps its own.
+    #[serde(default = "default_on")]
+    unified_tags: bool,
+    /// Whether the account sections are shown at all. Off leaves the unified
+    /// section alone, for those who only ever work from it.
+    #[serde(default = "default_on")]
+    show_accounts: bool,
     /// Where the Filtered Folders section sits (#71 follow-up): inside All
     /// Inboxes, or in the scrolling sidebar above or below the accounts.
     #[serde(default)]
@@ -1037,6 +1065,9 @@ impl Default for PrivacyFile {
             show_unified: default_show_unified(),
             unified_chip: default_unified_chip(),
             unified_filtered: default_unified_filtered(),
+            unified_kinds: UnifiedKinds::default(),
+            unified_tags: true,
+            show_accounts: true,
             filtered_placement: SectionPlacement::default(),
             tags_placement: SectionPlacement::default(),
             chevrons_left: default_chevrons_left(),
@@ -1081,6 +1112,10 @@ impl Default for PrivacyFile {
             spellcheck: default_spellcheck(),
             spellcheck_langs: String::new(),
             sidebar_hover_expand: false,
+            remember_sidebar: true,
+            remember_rail: true,
+            rail_dots: true,
+            rail_fold: RailFold::default(),
             app_theme: AppTheme::default(),
             preview_lines: default_preview_lines(),
             single_key_shortcuts: false,
@@ -1213,6 +1248,63 @@ pub fn load_unified_chip() -> bool {
 
 pub fn load_unified_filtered() -> bool {
     load_privacy().unified_filtered
+}
+
+pub fn load_unified_kinds() -> UnifiedKinds {
+    load_privacy().unified_kinds
+}
+
+pub fn load_unified_tags() -> bool {
+    load_privacy().unified_tags
+}
+
+pub fn load_show_accounts() -> bool {
+    load_privacy().show_accounts
+}
+
+/// Which of the unified section's folder rows are shown besides All
+/// Inboxes: each combines that folder across every account, and opens to
+/// the accounts' own. All on until switched off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnifiedKinds {
+    #[serde(default = "default_on")]
+    pub starred: bool,
+    #[serde(default = "default_on")]
+    pub sent: bool,
+    #[serde(default = "default_on")]
+    pub drafts: bool,
+}
+
+impl Default for UnifiedKinds {
+    fn default() -> Self {
+        UnifiedKinds { starred: true, sent: true, drafts: true }
+    }
+}
+
+impl UnifiedKinds {
+    pub const NONE: UnifiedKinds = UnifiedKinds { starred: false, sent: false, drafts: false };
+
+    pub fn any(self) -> bool {
+        self.starred || self.sent || self.drafts
+    }
+
+    /// Whether the row for `kind` is on (only Starred, Sent and Drafts have
+    /// one; anything else is `false`).
+    pub fn has(self, kind: crate::models::FolderKind) -> bool {
+        use crate::models::FolderKind::*;
+        match kind {
+            Starred => self.starred,
+            Sent => self.sent,
+            Drafts => self.drafts,
+            _ => false,
+        }
+    }
+
+    /// The kinds with a row, in sidebar order.
+    pub fn listed(self) -> Vec<crate::models::FolderKind> {
+        use crate::models::FolderKind::*;
+        [Starred, Sent, Drafts].into_iter().filter(|k| self.has(*k)).collect()
+    }
 }
 
 pub fn load_filtered_placement() -> SectionPlacement {
@@ -1674,6 +1766,101 @@ pub fn load_sidebar_hover_expand() -> bool {
     load_privacy().sidebar_hover_expand
 }
 
+pub fn load_remember_sidebar() -> bool {
+    load_privacy().remember_sidebar
+}
+
+pub fn load_remember_rail() -> bool {
+    load_privacy().remember_rail
+}
+
+pub fn load_rail_dots() -> bool {
+    load_privacy().rail_dots
+}
+
+pub fn load_rail_fold() -> RailFold {
+    load_privacy().rail_fold
+}
+
+/// "Fold up expanded items" (Settings → Sidebar → Icon rail): while the
+/// sidebar is collapsed to its icon rail, the items ticked here show folded
+/// up and stay so — their saved expansion is untouched and returns when the
+/// sidebar expands. Each item has its own switch under the master; all are
+/// on until switched off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RailFold {
+    /// The master switch: off, nothing folds for the rail.
+    #[serde(default = "default_on")]
+    pub enabled: bool,
+    /// Every account's folder list.
+    #[serde(default = "default_on")]
+    pub accounts: bool,
+    /// The per-account inbox list under All Inboxes.
+    #[serde(default = "default_on")]
+    pub all_inboxes: bool,
+    /// The unified Starred / Sent / Drafts rows' account lists.
+    #[serde(default = "default_on")]
+    pub starred: bool,
+    #[serde(default = "default_on")]
+    pub sent: bool,
+    #[serde(default = "default_on")]
+    pub drafts: bool,
+    /// The Filtered Folders section.
+    #[serde(default = "default_on")]
+    pub filtered: bool,
+    /// The Tags section.
+    #[serde(default = "default_on")]
+    pub tags: bool,
+}
+
+fn default_on() -> bool {
+    true
+}
+
+impl Default for RailFold {
+    fn default() -> Self {
+        RailFold {
+            enabled: true,
+            accounts: true,
+            all_inboxes: true,
+            starred: true,
+            sent: true,
+            drafts: true,
+            filtered: true,
+            tags: true,
+        }
+    }
+}
+
+impl RailFold {
+    /// Whether the accounts fold for the rail.
+    pub fn folds_accounts(self) -> bool {
+        self.enabled && self.accounts
+    }
+
+    /// Whether the unified row for `kind` folds for the rail (Inbox is All
+    /// Inboxes; only Starred, Sent and Drafts have rows besides it).
+    pub fn folds_kind(self, kind: crate::models::FolderKind) -> bool {
+        use crate::models::FolderKind::*;
+        self.enabled
+            && match kind {
+                Inbox => self.all_inboxes,
+                Starred => self.starred,
+                Sent => self.sent,
+                Drafts => self.drafts,
+                _ => false,
+            }
+    }
+
+    pub fn folds_filtered(self) -> bool {
+        self.enabled && self.filtered
+    }
+
+    pub fn folds_tags(self) -> bool {
+        self.enabled && self.tags
+    }
+}
+
 pub fn load_app_theme() -> AppTheme {
     load_privacy().app_theme
 }
@@ -1770,10 +1957,17 @@ pub fn save_privacy(
     tray_mail: bool,
     show_remote_banner: bool,
     sidebar_hover_expand: bool,
+    remember_sidebar: bool,
+    remember_rail: bool,
+    rail_dots: bool,
+    rail_fold: RailFold,
     app_theme: AppTheme,
     show_unified: bool,
     unified_chip: bool,
     unified_filtered: bool,
+    unified_kinds: UnifiedKinds,
+    unified_tags: bool,
+    show_accounts: bool,
     filtered_placement: SectionPlacement,
     tags_placement: SectionPlacement,
     chevrons_left: bool,
@@ -1837,10 +2031,17 @@ pub fn save_privacy(
         tray_mail,
         show_remote_banner,
         sidebar_hover_expand,
+        remember_sidebar,
+        remember_rail,
+        rail_dots,
+        rail_fold,
         app_theme,
         show_unified,
         unified_chip,
         unified_filtered,
+        unified_kinds,
+        unified_tags,
+        show_accounts,
         filtered_placement,
         tags_placement,
         chevrons_left,
@@ -1878,6 +2079,28 @@ struct SidebarFile {
     /// Collapsed folder-tree nodes, as "email\tpath" entries.
     #[serde(default)]
     tree_collapsed: Vec<String>,
+    /// The three sections' open state; open when the file predates them,
+    /// which is how they always started.
+    #[serde(default = "default_on")]
+    unified_expanded: bool,
+    #[serde(default = "default_on")]
+    filtered_expanded: bool,
+    #[serde(default = "default_on")]
+    tags_expanded: bool,
+    /// The unified Starred / Sent / Drafts rows' account lists; closed
+    /// until opened.
+    #[serde(default)]
+    starred_expanded: bool,
+    #[serde(default)]
+    sent_expanded: bool,
+    #[serde(default)]
+    drafts_expanded: bool,
+    /// Account emails whose own Filtered Folders / Tags sections are open
+    /// (closed by default, like their custom folders).
+    #[serde(default)]
+    filtered_expanded_accounts: Vec<String>,
+    #[serde(default)]
+    tags_expanded_accounts: Vec<String>,
 }
 
 fn sidebar_path() -> Option<PathBuf> {
@@ -1897,6 +2120,19 @@ pub struct SidebarState {
     pub icon_only: bool,
     /// Collapsed folder-tree nodes, as "email\tpath" entries.
     pub tree_collapsed: Vec<String>,
+    /// Whether the per-account inbox list under All Inboxes is open.
+    pub unified_expanded: bool,
+    /// Whether the Filtered Folders section is open.
+    pub filtered_expanded: bool,
+    /// Whether the Tags section is open.
+    pub tags_expanded: bool,
+    /// The unified Starred / Sent / Drafts rows' account lists.
+    pub starred_expanded: bool,
+    pub sent_expanded: bool,
+    pub drafts_expanded: bool,
+    /// Account emails whose own Filtered Folders / Tags sections are open.
+    pub filtered_expanded_accounts: Vec<String>,
+    pub tags_expanded_accounts: Vec<String>,
 }
 
 pub fn load_sidebar_state() -> SidebarState {
@@ -1913,6 +2149,14 @@ pub fn load_sidebar_state() -> SidebarState {
             folders_expanded: s.folders_expanded,
             icon_only: s.icon_only,
             tree_collapsed: s.tree_collapsed,
+            unified_expanded: s.unified_expanded,
+            filtered_expanded: s.filtered_expanded,
+            tags_expanded: s.tags_expanded,
+            starred_expanded: s.starred_expanded,
+            sent_expanded: s.sent_expanded,
+            drafts_expanded: s.drafts_expanded,
+            filtered_expanded_accounts: s.filtered_expanded_accounts,
+            tags_expanded_accounts: s.tags_expanded_accounts,
         })
         .unwrap_or_default()
 }
@@ -1930,6 +2174,14 @@ pub fn save_sidebar_state(state: &SidebarState) {
         folders_expanded: state.folders_expanded.clone(),
         icon_only: state.icon_only,
         tree_collapsed: state.tree_collapsed.clone(),
+        unified_expanded: state.unified_expanded,
+        filtered_expanded: state.filtered_expanded,
+        tags_expanded: state.tags_expanded,
+        starred_expanded: state.starred_expanded,
+        sent_expanded: state.sent_expanded,
+        drafts_expanded: state.drafts_expanded,
+        filtered_expanded_accounts: state.filtered_expanded_accounts.clone(),
+        tags_expanded_accounts: state.tags_expanded_accounts.clone(),
     };
     match toml::to_string_pretty(&file) {
         Ok(toml) => {
