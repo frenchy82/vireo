@@ -30,6 +30,37 @@ const COMPOSE_MIN_WIDTH: i32 = 360;
 /// Fallback fold threshold when the toolbar could not be measured at init.
 const COMPOSE_ACTIONS_BREAKPOINT: f64 = 620.0;
 
+/// The width a header bar's rows need side by side: the natural widths of
+/// its centre box's children (start row, title, end row) summed — what the
+/// bar itself reports doubles the wider side to keep the title centred.
+/// `None` when the bar's insides are not the expected shape.
+fn header_rows_width(header: &gtk::Widget) -> Option<i32> {
+    fn find_center_box(w: &gtk::Widget, depth: u32) -> Option<gtk::Widget> {
+        if w.type_().name() == "GtkCenterBox" {
+            return Some(w.clone());
+        }
+        if depth == 0 {
+            return None;
+        }
+        let mut c = w.first_child();
+        while let Some(child) = c {
+            if let Some(found) = find_center_box(&child, depth - 1) {
+                return Some(found);
+            }
+            c = child.next_sibling();
+        }
+        None
+    }
+    let cb = find_center_box(header, 6)?;
+    let mut total = 0;
+    let mut c = cb.first_child();
+    while let Some(w) = c {
+        total += w.measure(gtk::Orientation::Horizontal, -1).1;
+        c = w.next_sibling();
+    }
+    Some(total)
+}
+
 /// Size the pane for its host. Both hosts impose a definite height now — the
 /// reader-covering overlay inline (it fills the whole pane), the window itself
 /// popped out — so the editor always expands to fill whatever it is given.
@@ -137,6 +168,9 @@ pub struct ComposeInit {
     /// subject row and shows just the editor — popping out to a window brings
     /// the full fields back.
     pub compact: bool,
+    /// Start as plain text (#180): no formatting toolbar, and the message
+    /// goes out as text/plain only.
+    pub plain: bool,
 }
 
 pub struct Compose {
@@ -185,6 +219,9 @@ pub struct Compose {
     /// OpenPGP (#133): sign the message; encrypt it to every recipient.
     sign: bool,
     encrypt: bool,
+    /// Plain text (#180): the formatting toolbar is hidden and the message
+    /// is sent as text/plain only, whatever the editor holds.
+    plain: bool,
     /// Send Later (#145): when set, Send queues the message for this time.
     send_at: Option<i64>,
     /// Cloud attachments (#144): the accounts files can be uploaded to, the
@@ -239,6 +276,8 @@ pub enum ComposeInput {
     DeleteDraft,
     /// The OpenPGP Sign toggle (#133).
     ToggleSign(bool),
+    /// The Plain text toggle (#180).
+    TogglePlain(bool),
     /// The OpenPGP Encrypt toggle; encrypting turns signing on too.
     ToggleEncrypt(bool),
     /// The editor's HTML + plain text came back asynchronously — finish sending.
@@ -326,11 +365,11 @@ impl Component for Compose {
                         set_label: &i18n("Cancel"),
                         connect_clicked => ComposeInput::Cancel,
                     },
+                    // Save Draft stays, label and all, however narrow the
+                    // pane: it is the one action worth a click in a hurry.
                     pack_start = &gtk::Button {
                         set_label: &i18n("Save Draft"),
                         set_tooltip_text: Some(i18n("Save to Drafts").as_str()),
-                        #[watch]
-                        set_visible: !model.narrow,
                         connect_clicked => ComposeInput::SaveDraft,
                     },
                     // Only while editing an existing draft: the message is
@@ -388,7 +427,7 @@ impl Component for Compose {
                                         add_css_class: "flat",
                                         add_css_class: "context-menu-item",
                                         #[wrap(Some)]
-                                        set_child = &gtk::Label { set_label: &i18n("Tomorrow morning (8:00)"), set_halign: gtk::Align::Start },
+                                        set_child = &gtk::Label { set_label: &i18n_f("Tomorrow morning ({time})", &[("time", &crate::datefmt::clock_label(8))]), set_halign: gtk::Align::Start },
                                         connect_clicked[sender] => move |b| {
                                             b.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>().map(|p| p.popdown());
                                             sender.input(ComposeInput::SendAt(preset_time(1, 8)));
@@ -398,7 +437,7 @@ impl Component for Compose {
                                         add_css_class: "flat",
                                         add_css_class: "context-menu-item",
                                         #[wrap(Some)]
-                                        set_child = &gtk::Label { set_label: &i18n("Tomorrow afternoon (13:00)"), set_halign: gtk::Align::Start },
+                                        set_child = &gtk::Label { set_label: &i18n_f("Tomorrow afternoon ({time})", &[("time", &crate::datefmt::clock_label(13))]), set_halign: gtk::Align::Start },
                                         connect_clicked[sender] => move |b| {
                                             b.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>().map(|p| p.popdown());
                                             sender.input(ComposeInput::SendAt(preset_time(1, 13)));
@@ -408,7 +447,7 @@ impl Component for Compose {
                                         add_css_class: "flat",
                                         add_css_class: "context-menu-item",
                                         #[wrap(Some)]
-                                        set_child = &gtk::Label { set_label: &i18n("Monday morning (8:00)"), set_halign: gtk::Align::Start },
+                                        set_child = &gtk::Label { set_label: &i18n_f("Monday morning ({time})", &[("time", &crate::datefmt::clock_label(8))]), set_halign: gtk::Align::Start },
                                         connect_clicked[sender] => move |b| {
                                             b.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>().map(|p| p.popdown());
                                             sender.input(ComposeInput::SendAt(next_monday(8)));
@@ -458,6 +497,18 @@ impl Component for Compose {
                         set_visible: crate::pgp::available() && !model.narrow,
                         connect_toggled[sender] => move |b| {
                             sender.input(ComposeInput::ToggleSign(b.is_active()));
+                        },
+                    },
+                    // Plain text (#180): send without formatting.
+                    #[name = "plain_btn"]
+                    pack_end = &gtk::ToggleButton {
+                        set_icon_name: "co.hyprlab.Vireo-text-x-generic-symbolic",
+                        set_tooltip_text: Some(i18n("Plain text: send without formatting").as_str()),
+                        set_active: model.plain,
+                        #[watch]
+                        set_visible: !model.narrow,
+                        connect_toggled[sender] => move |b| {
+                            sender.input(ComposeInput::TogglePlain(b.is_active()));
                         },
                     },
                     pack_end = &gtk::Button {
@@ -642,6 +693,7 @@ impl Component for Compose {
             windowed,
             can_toggle,
             compact,
+            plain,
         } = init;
         let in_reply_to = prefill.in_reply_to.clone();
         let references = prefill.references.clone();
@@ -669,6 +721,9 @@ impl Component for Compose {
             content.push_str(&sig_html(&current_sig));
         }
         let editor = RichEditor::new(&content);
+        if plain {
+            editor.set_formatting_visible(false);
+        }
         // "Send as Attachment Instead" on an inline image: the editor lifts
         // it to a temp file and it joins the attachment chips here.
         {
@@ -704,6 +759,7 @@ impl Component for Compose {
             narrow: false,
             fields_dirty: false,
             sign: false,
+            plain,
             encrypt: false,
             send_at,
             cloud_accounts: crate::cloud::load_enabled_accounts(),
@@ -738,8 +794,17 @@ impl Component for Compose {
                 if measured.replace(true) {
                     return;
                 }
+                // Not the bar's own natural width: a header bar keeps its
+                // title centred, so it asks for twice its wider side, and
+                // this bar's end row is much wider than its start — every
+                // button added there counted double and the fold came far
+                // too soon. The centre box's rows, summed, are what has to
+                // fit.
                 let full = header.measure(gtk::Orientation::Horizontal, -1).1;
-                let threshold = if full <= 0 { COMPOSE_ACTIONS_BREAKPOINT } else { full as f64 + 24.0 };
+                let rows = header_rows_width(&header);
+                tracing::debug!("compose fold: header natural {full}, rows {rows:?}");
+                let need = rows.unwrap_or(full);
+                let threshold = if need <= 0 { COMPOSE_ACTIONS_BREAKPOINT } else { need as f64 + 24.0 };
                 let bp = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
                     adw::BreakpointConditionLengthType::MaxWidth,
                     threshold,
@@ -1027,6 +1092,18 @@ impl Component for Compose {
                     );
                 }
                 let mut host = Vec::new();
+                {
+                    // Through its button, so the toggled handler keeps the
+                    // model and the button agreeing.
+                    let plain = widgets.plain_btn.clone();
+                    host.push(
+                        MenuEntry::new(
+                            &if self.plain { i18n("Send with formatting") } else { i18n("Send as plain text") },
+                            move || plain.set_active(!plain.is_active()),
+                        )
+                        .icon("co.hyprlab.Vireo-text-x-generic-symbolic"),
+                    );
+                }
                 if self.can_toggle {
                     host.push(if self.windowed {
                         entry(i18n("Collapse into reader"), "view-restore", || ComposeInput::ToggleWindowed)
@@ -1364,6 +1441,10 @@ impl Component for Compose {
             }
 
             ComposeInput::ToggleSign(on) => self.sign = on,
+            ComposeInput::TogglePlain(on) => {
+                self.plain = on;
+                self.editor.set_formatting_visible(!on);
+            }
             ComposeInput::ToggleEncrypt(on) => {
                 self.encrypt = on;
                 if on && !self.sign {
@@ -1426,6 +1507,9 @@ impl Component for Compose {
             }
 
             ComposeInput::SendBody { html, text, to, cc, bcc, reply_to, subject, from_account_id, from_alias } => {
+                // Plain text (#180): no HTML part, so the mail goes as
+                // text/plain only.
+                let html = if self.plain { String::new() } else { html };
                 let out = self
                     .build_outgoing(from_account_id, from_alias, to, cc, bcc, reply_to, subject, text, html);
                 let _ = sender.output(ComposeOutput::Send(Box::new(out)));
@@ -1459,6 +1543,7 @@ impl Component for Compose {
             }
 
             ComposeInput::SaveDraftBody { html, text, to, cc, bcc, reply_to, subject, from_account_id, from_alias } => {
+                let html = if self.plain { String::new() } else { html };
                 let out = self
                     .build_outgoing(from_account_id, from_alias, to, cc, bcc, reply_to, subject, text, html);
                 let _ = sender.output(ComposeOutput::SaveDraft(Box::new(out)));

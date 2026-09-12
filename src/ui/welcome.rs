@@ -43,6 +43,8 @@ pub enum WelcomeInput {
     ImportGoa(usize),
     RescanGoa,
     Finish,
+    /// The hero page's language drop-down moved to choice `n`.
+    LanguageChanged(u32),
 }
 
 #[derive(Debug)]
@@ -55,6 +57,9 @@ pub enum WelcomeOutput {
     Prefs(WelcomePrefs),
     /// The wizard is done (window already closing).
     Done,
+    /// A language was picked on the first page: its locale code, "" for
+    /// the system's. The app saves it and comes back in that language.
+    Language(String),
 }
 
 #[derive(Debug)]
@@ -223,7 +228,7 @@ fn entrance(widgets: &[gtk::Widget]) {
 
 /// Hero and shrunk geometry for the floating wordmark.
 const HERO_TOP: i32 = 150;
-const HERO_SIZE: f64 = 300.0;
+const HERO_SIZE: f64 = 240.0;
 const SMALL_TOP: f64 = 6.0;
 const SMALL_BOTTOM: f64 = 16.0;
 const SMALL_SIZE: f64 = 100.0;
@@ -325,6 +330,39 @@ impl Component for Welcome {
         hero.set_halign(gtk::Align::Center);
         let tag = tagline(&i18n("A clean, fast home for your mail.\nLet's set things up — it takes about a minute."));
         tag.set_margin_top(16);
+        // The interface language, first of all (#179): System, English and
+        // every shipped translation. A pick restarts Vireo into it, so the
+        // rest of the wizard reads in the chosen language.
+        let lang_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        lang_row.set_halign(gtk::Align::Center);
+        // 64px below the tagline: the hero's 18px spacing plus this.
+        lang_row.set_margin_top(46);
+        let lang_label = gtk::Label::new(Some(i18n("Language").as_str()));
+        // On the yellow, text is always dark (the theme's dim grey turns
+        // white in dark mode).
+        lang_label.add_css_class("welcome-hint");
+        lang_row.append(&lang_label);
+        let choices = crate::ui::preferences::language_choices();
+        let choice_labels: Vec<&str> = choices.iter().map(|(l, _)| l.as_str()).collect();
+        let lang = gtk::DropDown::from_strings(&choice_labels);
+        lang.set_valign(gtk::Align::Center);
+        let current = crate::config::load_language();
+        lang.set_selected(choices.iter().position(|(_, c)| *c == current).unwrap_or(0) as u32);
+        {
+            let s = sender.clone();
+            lang.connect_selected_notify(move |d| s.input(WelcomeInput::LanguageChanged(d.selected())));
+        }
+        lang_row.append(&lang);
+        // Fair warning: a pick restarts the app.
+        let lang_note = gtk::Label::new(Some(
+            i18n("Choosing another language restarts Vireo: it closes for a moment and this wizard comes back in that language.").as_str(),
+        ));
+        lang_note.add_css_class("welcome-hint");
+        lang_note.add_css_class("caption");
+        lang_note.set_wrap(true);
+        lang_note.set_justify(gtk::Justification::Center);
+        lang_note.set_max_width_chars(46);
+        lang_note.set_margin_top(2);
         let start = pill(&i18n("Get Started"));
         start.set_margin_top(10);
         {
@@ -332,6 +370,8 @@ impl Component for Welcome {
             start.connect_clicked(move |_| s.input(WelcomeInput::Next));
         }
         hero.append(&tag);
+        hero.append(&lang_row);
+        hero.append(&lang_note);
         hero.append(&start);
         let hero_page = page(&hero);
         hero_page.set_valign(gtk::Align::Start);
@@ -340,8 +380,16 @@ impl Component for Welcome {
         entrance(&[
             wordmark_overlay.clone().upcast(),
             tag.clone().upcast(),
+            lang_row.clone().upcast(),
+            lang_note.clone().upcast(),
             start.clone().upcast(),
         ]);
+        // VIREO_SHOWCASE_WIZARD_LANG=<n> picks choice n on the drop-down
+        // after 4 s, what a click there does (for testing the restart).
+        if let Some(n) = std::env::var("VIREO_SHOWCASE_WIZARD_LANG").ok().and_then(|v| v.parse::<u32>().ok()) {
+            let lang = lang.clone();
+            gtk::glib::timeout_add_seconds_local_once(4, move || lang.set_selected(n));
+        }
 
         // ---- Page 2: account ----
         let acct = gtk::Box::new(gtk::Orientation::Vertical, 14);
@@ -677,6 +725,11 @@ impl Component for Welcome {
         root: &Self::Root,
     ) {
         match message {
+            WelcomeInput::LanguageChanged(i) => {
+                if let Some((_, code)) = crate::ui::preferences::language_choices().get(i as usize) {
+                    let _ = sender.output(WelcomeOutput::Language(code.clone()));
+                }
+            }
             WelcomeInput::Next => {
                 // position() is fractional mid-scroll; round to the page the
                 // user sees as current, so rapid clicks don't repeat a page.

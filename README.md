@@ -450,6 +450,11 @@ upstream — their work ships in the app and is credited in the About window:
   English despite having the translation.
 - [**Laszlo Lang**](https://github.com/7system7) ([#169](https://github.com/hyprlab/vireo/pull/169)) — the
   Hungarian translation.
+- [**Ilya Semenkovich**](https://github.com/iliasen) ([#176](https://github.com/hyprlab/vireo/pull/176)) — the
+  Russian translation, and two reader tooltips that could not be translated.
+- [**Paulo Fino**](https://github.com/somepaulo) ([#178](https://github.com/hyprlab/vireo/pull/178),
+  [#179](https://github.com/hyprlab/vireo/issues/179)) — the Portuguese (Portugal)
+  translation, and the request for a language chooser.
 - [**Anton Palgunov**](https://github.com/Toxblh) ([#7](https://github.com/hyprlab/vireo/pull/7),
   [#8](https://github.com/hyprlab/vireo/pull/8)) — sender avatars from GNOME
   Contacts photos, and GNOME Online Accounts refinements: custom server ports
@@ -479,7 +484,12 @@ consolidation proposal, picture avatars and the reply-target and menu
 reports, [**7system7**](https://github.com/7system7) for the preview
 charset and tag-refresh reports, [**Peter Weiss**](https://github.com/peterweissdk)
 for the Move To button and [**frenchy82**](https://github.com/frenchy82) for
-Not Spam, all in 1.27; and to everyone who files issues and ideas.
+Not Spam, all in 1.27; to [**yioannides**](https://github.com/yioannides)
+for the Inboxes and notification report, [**Peter Weiss**](https://github.com/peterweissdk)
+for conversation moves, [**taprobane99**](https://github.com/taprobane99)
+for the clock-format report and [**somePaulo**](https://github.com/somepaulo)
+for the language chooser, plain-text composing and monospace requests,
+all in 1.28; and to everyone who files issues and ideas.
 
 Pull requests are welcome. There's no CLA — by opening one you agree your
 contribution ships under the [AGPL-3.0-or-later](LICENSE), and it may be adapted

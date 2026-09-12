@@ -22,9 +22,26 @@ const DOMAIN: &str = "vireo";
 /// Bind the text domain. Called once, first thing in `main`, before GTK
 /// (which would otherwise set the locale without our domain in place).
 pub fn init() {
+    // A language chosen in Settings (#179) goes to gettext through
+    // LANGUAGE, which it consults on every lookup, ahead of the locale.
+    // Under the C locale gettext ignores LANGUAGE, so a system without a
+    // locale of its own still gets the chosen language via C.UTF-8 for
+    // messages. Single-threaded here, so setting the environment is safe.
+    let chosen = crate::config::load_language();
+    apply_language(&chosen);
     // SAFETY: called once at the very start of main, before any other
     // thread exists (setlocale is not thread-safe).
     unsafe { gettextrs::setlocale(LocaleCategory::LcAll, "") };
+    if !chosen.is_empty() {
+        let bare = ["LC_ALL", "LC_MESSAGES", "LANG"]
+            .iter()
+            .filter_map(|k| std::env::var(k).ok())
+            .find(|v| !v.is_empty())
+            .is_none_or(|v| v == "C" || v == "POSIX");
+        if bare {
+            unsafe { gettextrs::setlocale(LocaleCategory::LcMessages, "C.UTF-8") };
+        }
+    }
     let Some(dir) = locale_dir() else { return };
     let bound = gettextrs::bindtextdomain(DOMAIN, dir.clone())
         .and_then(|_| gettextrs::bind_textdomain_codeset(DOMAIN, "UTF-8"))
@@ -32,6 +49,29 @@ pub fn init() {
     match bound {
         Ok(_) => tracing::debug!("translations bound to {}", dir.display()),
         Err(e) => tracing::debug!("translations not bound: {e}"),
+    }
+}
+
+/// What LANGUAGE was before this app set it, kept in the environment so a
+/// restarted instance (which inherits the environment) can put it back:
+/// otherwise a language once chosen followed the app through every
+/// restart, even after the choice went back to the system's.
+const LANGUAGE_ORIG: &str = "VIREO_LANGUAGE_ORIG";
+
+/// Point gettext at `code` ("" = the system's): restore the LANGUAGE the
+/// session had, then set the choice over it.
+pub fn apply_language(code: &str) {
+    if let Some(orig) = std::env::var_os(LANGUAGE_ORIG) {
+        if orig.is_empty() {
+            std::env::remove_var("LANGUAGE");
+        } else {
+            std::env::set_var("LANGUAGE", orig);
+        }
+    } else {
+        std::env::set_var(LANGUAGE_ORIG, std::env::var_os("LANGUAGE").unwrap_or_default());
+    }
+    if !code.is_empty() {
+        std::env::set_var("LANGUAGE", code);
     }
 }
 

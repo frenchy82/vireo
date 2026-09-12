@@ -157,6 +157,9 @@ msgstr "Már a névjegyek között van ({name})"
 msgid "Could not add contact: {e}"
 msgstr "A névjegy nem adható hozzá: {e}"
 
+msgid "The language applies the next time Vireo starts."
+msgstr ""
+
 msgid "Save Attachment"
 msgstr "Melléklet mentése"
 
@@ -1816,13 +1819,16 @@ msgstr "Küldés később"
 msgid "Send now"
 msgstr "Küldés most"
 
-msgid "Tomorrow morning (8:00)"
+#, fuzzy
+msgid "Tomorrow morning ({time})"
 msgstr "Holnap délelőtt (8:00)"
 
-msgid "Tomorrow afternoon (13:00)"
+#, fuzzy
+msgid "Tomorrow afternoon ({time})"
 msgstr "Holnap délután (13:00)"
 
-msgid "Monday morning (8:00)"
+#, fuzzy
+msgid "Monday morning ({time})"
 msgstr "Hétfő délelőtt (8:00)"
 
 msgid "Pick a date and time…"
@@ -1833,6 +1839,10 @@ msgstr "Titkosítás OpenPGP-vel minden címzett kulcsára"
 
 msgid "Sign with your OpenPGP key"
 msgstr "Aláírás a saját OpenPGP-kulccsal"
+
+#, fuzzy
+msgid "Plain text: send without formatting"
+msgstr "Beillesztés formázással"
 
 msgid "Attach files"
 msgstr "Fájlok csatolása"
@@ -1875,6 +1885,14 @@ msgstr "Továbbiak"
 
 msgid "Show Cc, Bcc and Reply-To"
 msgstr "Másolat, titkos másolat és válaszcím megjelenítése"
+
+#, fuzzy
+msgid "Send with formatting"
+msgstr "Beillesztés formázással"
+
+#, fuzzy
+msgid "Send as plain text"
+msgstr "Beillesztés egyszerű szövegként"
 
 msgid "Upload to Cloud Storage"
 msgstr "Feltöltés felhőtárhelyre"
@@ -2159,6 +2177,9 @@ msgstr ""
 
 msgid "Copied"
 msgstr "Másolva"
+
+msgid "Double-click to open in a new window"
+msgstr ""
 
 #. Same order as the reader toolbar and the list's
 #. Actions Palette, View Source closing the line.
@@ -2478,6 +2499,9 @@ msgstr "2026. aug. 23."
 msgid "2026 Aug 23"
 msgstr "2026. aug. 23."
 
+msgid "System"
+msgstr "Rendszer"
+
 msgid "12-hour (5:40 PM)"
 msgstr "12 órás (17:40)"
 
@@ -2543,9 +2567,6 @@ msgstr "Adatvédelem"
 
 msgid "Date and Time"
 msgstr "Dátum és idő"
-
-msgid "System"
-msgstr "Rendszer"
 
 msgid "Backup"
 msgstr "Biztonsági mentés"
@@ -2984,6 +3005,22 @@ msgstr ""
 "hogy minden üzenet azonos fekete vagy fehér színnel jelenjen meg az olvasó "
 "hátterén. A képek megmaradnak; a hivatkozások kiemelőszínt kapnak."
 
+msgid "Plain-text messages in monospace"
+msgstr ""
+
+msgid ""
+"Show messages sent as plain text in a fixed-width font, so columns and code "
+"line up. Formatted messages are not affected."
+msgstr ""
+
+#, fuzzy
+msgid "Monospace font"
+msgstr "Üzenet betűtípusa"
+
+#, fuzzy
+msgid "The system's monospace font unless another is chosen."
+msgstr "A kezelőfelület betűtípusa, hacsak nincs más kiválasztva."
+
 msgid "Message card actions"
 msgstr "Üzenetkártya-műveletek"
 
@@ -3049,6 +3086,16 @@ msgstr ""
 "Az üzenetbe beillesztés eltávolítja a vágólap formázását. Kikapcsolva a "
 "beillesztés megőrzi a formázást. A szerkesztő jobb kattintásos menüje mindig "
 "mindkettőt felajánlja."
+
+#, fuzzy
+msgid "Compose in plain text"
+msgstr "Beillesztés egyszerű szövegként"
+
+msgid ""
+"New messages, replies and forwards start as plain text, sent without "
+"formatting. The composer's Plain text button switches either way for one "
+"message."
+msgstr ""
 
 msgid "Spelling"
 msgstr "Helyesírás"
@@ -3147,6 +3194,11 @@ msgstr "Dátumformátum"
 
 msgid "Clock"
 msgstr "Óra"
+
+msgid ""
+"The language Vireo is shown in. \"System\" follows the desktop, with English "
+"where no translation exists. A change applies the next time Vireo starts."
+msgstr ""
 
 msgid "Keep running in the background"
 msgstr "Futás a háttérben"
@@ -3470,6 +3522,11 @@ msgid ""
 msgstr ""
 "Tiszta, gyors otthon levelei számára.\n"
 "Állítsuk be — körülbelül egy percet vesz igénybe."
+
+msgid ""
+"Choosing another language restarts Vireo: it closes for a moment and this "
+"wizard comes back in that language."
+msgstr ""
 
 msgid "Get Started"
 msgstr "Kezdés"

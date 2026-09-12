@@ -20,6 +20,8 @@ pub struct PrefInit {
     pub sender_logos: bool,
     pub date_style: DateStyle,
     pub clock_style: ClockStyle,
+    /// The chosen interface language code; empty = the system's (#179).
+    pub language: String,
     pub fetch_interval_secs: u64,
     pub push: bool,
     pub palette_collapse_secs: u64,
@@ -65,6 +67,12 @@ pub struct PrefInit {
     pub reader_font: String,
     /// Ignore the senders' text and background colours (#56).
     pub override_colors: bool,
+    /// Plain-text messages in monospace (#181), and the font ("" = the
+    /// desktop's monospace font).
+    pub plain_monospace: bool,
+    pub plain_font: String,
+    /// New messages start as plain text (#180).
+    pub compose_plain: bool,
     pub app_theme: AppTheme,
     pub notifications: bool,
     pub notification_content: bool,
@@ -144,6 +152,50 @@ const DATE_STYLES: &[(&str, DateStyle)] = &[
 ];
 
 /// Clock options, in combo order.
+/// The Language row's choices: (label, locale code). The system's own
+/// first, then English (the source language), then every catalogue in
+/// po/LINGUAS by its own name (#179).
+pub fn language_choices() -> Vec<(String, String)> {
+    let mut out = vec![(i18n("System"), String::new()), ("English".to_string(), "en".to_string())];
+    for code in include_str!("../../po/LINGUAS").lines() {
+        let code = code.trim();
+        if code.is_empty() || code.starts_with('#') || code == "en" {
+            continue;
+        }
+        out.push((native_language_name(code).to_string(), code.to_string()));
+    }
+    out
+}
+
+/// A language's name in itself, for the Language row.
+fn native_language_name(code: &str) -> &str {
+    match code {
+        "fr" => "Français",
+        "hu" => "Magyar",
+        "ru" => "Русский",
+        "de" => "Deutsch",
+        "es" => "Español",
+        "it" => "Italiano",
+        "pt" => "Português",
+        "pt_PT" => "Português (Portugal)",
+        "pt_BR" => "Português (Brasil)",
+        "nl" => "Nederlands",
+        "pl" => "Polski",
+        "cs" => "Čeština",
+        "sv" => "Svenska",
+        "da" => "Dansk",
+        "nb" | "no" => "Norsk",
+        "fi" => "Suomi",
+        "tr" => "Türkçe",
+        "uk" => "Українська",
+        "ja" => "日本語",
+        "zh_CN" => "简体中文",
+        "zh_TW" => "繁體中文",
+        "ko" => "한국어",
+        other => other,
+    }
+}
+
 const CLOCK_STYLES: &[(&str, ClockStyle)] = &[
     (i18n_noop("Follow system"), ClockStyle::System),
     (i18n_noop("12-hour (5:40 PM)"), ClockStyle::Twelve),
@@ -509,6 +561,7 @@ pub enum PrefInput {
     ToggleSenderLogos(bool),
     ChangeDateStyle(u32),
     ChangeClockStyle(u32),
+    ChangeLanguage(u32),
     ToggleThreading(bool),
     ToggleThreadsExpanded(bool),
     ToggleThreadNewestFirst(bool),
@@ -592,6 +645,9 @@ pub enum PrefInput {
     ToggleOverrideFonts(bool),
     ChangeReaderFont(String),
     ToggleOverrideColors(bool),
+    TogglePlainMonospace(bool),
+    ChangePlainFont(String),
+    ToggleComposePlain(bool),
     ChangeAppTheme(u32),
     ChangeSettingsOpen(u32),
     /// Switch the window to the Accounts panel (true) or Preferences (false).
@@ -625,6 +681,8 @@ pub enum PrefOutput {
     SetSenderLogos(bool),
     SetDateStyle(DateStyle),
     SetClockStyle(ClockStyle),
+    /// The interface language code chosen, "" for the system's (#179).
+    SetLanguage(String),
     SetThreading(bool),
     SetThreadsExpanded(bool),
     SetThreadNewestFirst(bool),
@@ -686,6 +744,9 @@ pub enum PrefOutput {
     SetOverrideFonts(bool),
     SetReaderFont(String),
     SetOverrideColors(bool),
+    SetPlainMonospace(bool),
+    SetPlainFont(String),
+    SetComposePlain(bool),
     Closed,
 }
 
@@ -1561,6 +1622,37 @@ impl Component for Preferences {
                                         },
                                     },
 
+                                    #[name = "plain_mono_row"]
+                                    adw::SwitchRow {
+                                        set_title: &i18n("Plain-text messages in monospace"),
+                                        set_subtitle: &i18n("Show messages sent as plain text in a fixed-width \
+                                                       font, so columns and code line up. Formatted \
+                                                       messages are not affected."),
+                                        connect_active_notify[sender] => move |row| {
+                                            sender.input(PrefInput::TogglePlainMonospace(row.is_active()));
+                                        },
+                                    },
+
+                                    #[name = "plain_font_row"]
+                                    adw::ActionRow {
+                                        set_title: &i18n("Monospace font"),
+                                        set_subtitle: &i18n("The system's monospace font unless another is chosen."),
+                                        #[name = "plain_font_button"]
+                                        add_suffix = &gtk::FontDialogButton {
+                                            set_valign: gtk::Align::Center,
+                                            set_dialog: &gtk::FontDialog::new(),
+                                            set_level: gtk::FontLevel::Font,
+                                            set_use_font: true,
+                                            connect_font_desc_notify[sender] => move |button| {
+                                                let font = button
+                                                    .font_desc()
+                                                    .map(|d| d.to_string())
+                                                    .unwrap_or_default();
+                                                sender.input(PrefInput::ChangePlainFont(font));
+                                            },
+                                        },
+                                    },
+
                                     #[name = "card_actions_row"]
                                     adw::ComboRow {
                                         set_title: &i18n("Message card actions"),
@@ -1640,6 +1732,18 @@ impl Component for Preferences {
                                                        the editor always offers both."),
                                         connect_active_notify[sender] => move |row| {
                                             sender.input(PrefInput::TogglePastePlain(row.is_active()));
+                                        },
+                                    },
+
+                                    #[name = "compose_plain_row"]
+                                    adw::SwitchRow {
+                                        set_title: &i18n("Compose in plain text"),
+                                        set_subtitle: &i18n("New messages, replies and forwards start as plain \
+                                                       text, sent without formatting. The composer's \
+                                                       Plain text button switches either way for one \
+                                                       message."),
+                                        connect_active_notify[sender] => move |row| {
+                                            sender.input(PrefInput::ToggleComposePlain(row.is_active()));
                                         },
                                     },
                                 },
@@ -1770,6 +1874,17 @@ impl Component for Preferences {
                             add_named[Some("system")] = &adw::PreferencesPage {
                                 add = &adw::PreferencesGroup {
                                     set_title: &i18n("System"),
+
+                                    #[name = "language_row"]
+                                    adw::ComboRow {
+                                        set_title: &i18n("Language"),
+                                        set_subtitle: &i18n("The language Vireo is shown in. \"System\" follows \
+                                                       the desktop, with English where no translation exists. \
+                                                       A change applies the next time Vireo starts."),
+                                        connect_selected_notify[sender] => move |row| {
+                                            sender.input(PrefInput::ChangeLanguage(row.selected()));
+                                        },
+                                    },
 
                                     #[name = "background_row"]
                                     adw::SwitchRow {
@@ -1972,10 +2087,19 @@ impl Component for Preferences {
             &widgets.tray_icon_row,
             &widgets.date_style_row,
             &widgets.clock_style_row,
+            &widgets.language_row,
             &widgets.chevron_side_row,
         ] {
             no_truncate(row);
         }
+
+        // Language combo: the system's, then every catalogue shipped.
+        let choices = language_choices();
+        let lang_labels: Vec<&str> = choices.iter().map(|(l, _)| l.as_str()).collect();
+        widgets.language_row.set_model(Some(&gtk::StringList::new(&lang_labels)));
+        widgets.language_row.set_selected(
+            choices.iter().position(|(_, c)| *c == init.language).unwrap_or(0) as u32,
+        );
 
         widgets.auto_remote_content_row.set_active(init.auto_remote_content);
         widgets.show_remote_banner_row.set_active(init.show_remote_banner);
@@ -2183,6 +2307,7 @@ impl Component for Preferences {
             widen_combo_value(&widgets.default_from_row, 50);
         }
         widgets.paste_plain_row.set_active(init.paste_plain);
+        widgets.compose_plain_row.set_active(init.compose_plain);
         widgets.spellcheck_row.set_active(init.spellcheck);
         // The language dropdown offers exactly what checking can use: the
         // installed dictionaries, behind a "System language" default. Typed
@@ -2324,6 +2449,24 @@ impl Component for Preferences {
         }
         widgets.override_fonts_row.set_active(init.override_fonts);
         widgets.override_colors_row.set_active(init.override_colors);
+        // Plain-text messages in monospace (#181): the font button shows
+        // the desktop's monospace font until another is chosen.
+        {
+            let desc = if init.plain_font.trim().is_empty() {
+                crate::desktop::monospace_font()
+            } else {
+                init.plain_font.clone()
+            };
+            widgets
+                .plain_font_button
+                .set_font_desc(&gtk::pango::FontDescription::from_string(&desc));
+            widgets.plain_font_row.set_sensitive(init.plain_monospace);
+            let font_row = widgets.plain_font_row.clone();
+            widgets.plain_mono_row.connect_active_notify(move |row| {
+                font_row.set_sensitive(row.is_active());
+            });
+        }
+        widgets.plain_mono_row.set_active(init.plain_monospace);
 
         // Hover-palette delay spinner (0–3000ms, step 50).
         // Actions Palette timeout: 1–30 seconds.
@@ -2441,6 +2584,11 @@ impl Component for Preferences {
             PrefInput::ChangeClockStyle(i) => {
                 if let Some((_, style)) = CLOCK_STYLES.get(i as usize) {
                     let _ = sender.output(PrefOutput::SetClockStyle(*style));
+                }
+            }
+            PrefInput::ChangeLanguage(i) => {
+                if let Some((_, code)) = language_choices().get(i as usize) {
+                    let _ = sender.output(PrefOutput::SetLanguage(code.clone()));
                 }
             }
             PrefInput::ToggleAvatars(on) => {
@@ -2802,6 +2950,15 @@ impl Component for Preferences {
             }
             PrefInput::ToggleOverrideColors(on) => {
                 let _ = sender.output(PrefOutput::SetOverrideColors(on));
+            }
+            PrefInput::TogglePlainMonospace(on) => {
+                let _ = sender.output(PrefOutput::SetPlainMonospace(on));
+            }
+            PrefInput::ChangePlainFont(font) => {
+                let _ = sender.output(PrefOutput::SetPlainFont(font));
+            }
+            PrefInput::ToggleComposePlain(on) => {
+                let _ = sender.output(PrefOutput::SetComposePlain(on));
             }
         }
     }

@@ -21,6 +21,9 @@ const CONTRIBUTORS: &[(&str, &str)] = &[
     ("Yiannis Ioannides", "yioannides"),
     ("p-mitana", "p-mitana"),
     ("Laszlo Lang", "7system7"),
+    ("Ilya Semenkovich", "iliasen"),
+    ("Paulo Fino", "somepaulo"),
+    ("taprobane99", "taprobane99"),
     ("Peter Weiss", "peterweissdk"),
 ];
 
@@ -556,6 +559,8 @@ pub struct AppModel {
     /// folder's account.
     compose_default_from: String,
     paste_plain: bool,
+    /// New messages start as plain text (#180).
+    compose_plain: bool,
     spellcheck: bool,
     spellcheck_langs: String,
     /// How email content is themed (message content only, not the app UI).
@@ -566,6 +571,10 @@ pub struct AppModel {
     reader_font: String,
     /// Ignore the senders' text and background colours (#56).
     override_colors: bool,
+    /// Plain-text messages in monospace (#181), and the font ("" = the
+    /// desktop's monospace font).
+    plain_monospace: bool,
+    plain_font: String,
     /// The repeating auto-fetch timer, if armed.
     auto_fetch_source: Option<gtk::glib::SourceId>,
     notifications: Controller<NotificationCenter>,
@@ -825,6 +834,11 @@ pub enum AppMsg {
     SetSenderLogos(bool),
     SetDateStyle(crate::config::DateStyle),
     SetClockStyle(crate::config::ClockStyle),
+    /// Settings: the interface language code, "" for the system's (#179).
+    SetLanguage(String),
+    /// The welcome wizard's first page picked a language: save it and
+    /// come back in it.
+    WizardLanguage(String),
     SetThreading(bool),
     SetThreadExpansion(bool),
     SetConfirmThreadDelete(bool),
@@ -947,6 +961,11 @@ pub enum AppMsg {
     SetOverrideFonts(bool),
     SetReaderFont(String),
     SetOverrideColors(bool),
+    /// Settings: plain-text messages in monospace (#181), and the font.
+    SetPlainMonospace(bool),
+    SetPlainFont(String),
+    /// Settings: new messages start as plain text (#180).
+    SetComposePlain(bool),
     /// Fetch a message's body again: its OpenPGP verdict changed (#133).
     ReloadBody(Box<crate::models::Message>),
     /// Select a settings category by id (the showcase hook).
@@ -2118,6 +2137,7 @@ impl SimpleComponent for AppModel {
         }
 
         let reader_override = config::load_reader_override();
+        let plain_style = config::load_plain_style();
         let mut model = AppModel {
             workers: HashMap::new(),
             mid_searches: HashMap::new(),
@@ -2357,12 +2377,15 @@ impl SimpleComponent for AppModel {
             reply_fields: config::load_reply_fields(),
             compose_default_from: config::load_compose_default_from(),
             paste_plain: config::load_paste_plain(),
+            compose_plain: config::load_compose_plain(),
             spellcheck: config::load_spellcheck(),
             spellcheck_langs: config::load_spellcheck_langs(),
             message_theme: config::load_message_theme(),
             override_fonts: reader_override.0,
             reader_font: reader_override.1,
             override_colors: reader_override.2,
+            plain_monospace: plain_style.0,
+            plain_font: plain_style.1,
             auto_fetch_source: None,
             notifications,
             welcome: None,
@@ -2426,13 +2449,21 @@ impl SimpleComponent for AppModel {
         // With no accounts, no worker events will populate the sidebar, so render
         // its empty state (the "Add first account" prompt) up front — and greet
         // a first run with the welcome wizard (src/ui/welcome.rs).
-        if model.config.is_empty() || std::env::var("VIREO_WELCOME").is_ok() {
+        // A restart the wizard's language pick asked for: the wizard comes
+        // back once, whatever mode this is; the flag must not reach a
+        // later restart (the icon change's), so it is cleared here.
+        let wizard_again = std::env::var_os(crate::WIZARD_AGAIN_VAR).is_some();
+        if wizard_again {
+            std::env::remove_var(crate::WIZARD_AGAIN_VAR);
+        }
+        if model.config.is_empty() || std::env::var("VIREO_WELCOME").is_ok() || wizard_again {
             model.rebuild_sidebar();
             // VIREO_WELCOME=1 forces the wizard over an existing config, for
             // design review and screenshots. A wizard already completed once
             // (Start Reading pressed, even with no account added) doesn't
             // come back on its own — a restart right after it must not loop.
             if std::env::var("VIREO_WELCOME").is_ok()
+                || wizard_again
                 || (!demo_mode() && !config::wizard_completed())
             {
                 model.open_wizard(&sender);
@@ -4425,18 +4456,21 @@ impl SimpleComponent for AppModel {
                 self.thread_painted = true;
                 self.thread_related_pending = false;
                 self.remember_thread();
-                // The new message is what the sync brought: bring it into
-                // view — at the top with newest first, appended otherwise.
-                // The render keeps the reader's place through its saved
-                // anchor; pointing that at the new card is the scroll.
-                let newest = self
-                    .current_thread
-                    .iter()
-                    .filter(|tm| !existing.iter().any(|e| (e.account_id, e.id) == (tm.account_id, tm.id)))
-                    .max_by_key(|tm| tm.timestamp)
-                    .map(|tm| (tm.account_id, tm.id));
-                if let Some((account_id, id)) = newest {
-                    self.message_view.emit(MessageViewInput::RevealCard { account_id, id });
+                // What is on screen stays where it is: the render keeps the
+                // reader's place through its saved anchor, and when none is
+                // recorded yet (no scroll since the conversation opened) the
+                // card that was at the top of the pane is pinned there — so
+                // with newest first, the new card slots in above it unseen,
+                // and is marked read only once the user scrolls up to it.
+                let top = if self.thread_newest_first {
+                    existing.iter().max_by_key(|tm| tm.timestamp)
+                } else {
+                    existing.first()
+                }
+                .map(|tm| (tm.account_id, tm.id))
+                .or_else(|| self.current.as_ref().map(|c| (c.account_id, c.id)));
+                if let Some((account_id, id)) = top {
+                    self.message_view.emit(MessageViewInput::HoldPlace { account_id, id });
                 }
                 let to_load: Vec<MissingBody> = self
                     .current_thread
@@ -4955,6 +4989,57 @@ impl SimpleComponent for AppModel {
                     self.date_style = style;
                     self.save_settings();
                     self.apply_date_style();
+                }
+            }
+
+            AppMsg::SetLanguage(code) => {
+                // The combo also notifies as its model is set; only a real
+                // change is saved and announced.
+                if config::load_language() != code {
+                    config::save_language(&code);
+                    self.notifications.emit(NotifyInput::Push {
+                        text: i18n("The language applies the next time Vireo starts."),
+                        error: false,
+                        connectivity: false,
+                    });
+                }
+            }
+
+            AppMsg::WizardLanguage(code) => {
+                // The drop-down also notifies as it is set up; only a real
+                // change counts. Saved, then Vireo restarts through the same
+                // helper the icon change uses, so every window — the wizard
+                // first, since it is not completed yet — comes up in the
+                // chosen language. Should the helper fail, the wizard alone
+                // is rebuilt in it (gettext reads LANGUAGE on every lookup).
+                if config::load_language() == code {
+                    return;
+                }
+                config::save_language(&code);
+                tracing::info!("wizard: language {code:?} saved, restarting");
+                // The instance that comes back must open the wizard again,
+                // review mode or not: the helper drops the review switch on
+                // purpose, so a one-shot flag of its own goes along (init
+                // takes it and clears it, so it never outlives that start).
+                std::env::set_var(crate::WIZARD_AGAIN_VAR, "1");
+                match crate::app_icon::launch_restart_helper() {
+                    Ok(()) => {
+                        // The quit action's own teardown, inline: nothing to
+                        // look up, nothing to wait for.
+                        tracing::info!("wizard: restart helper up, exiting");
+                        let (w, h, maximized) = crate::config::load_window_state();
+                        crate::config::save_window_state(w, h, maximized);
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        std::env::remove_var(crate::WIZARD_AGAIN_VAR);
+                        tracing::warn!("restart for the wizard's language failed: {e}");
+                        crate::i18n::apply_language(&code);
+                        if let Some(old) = self.welcome.take() {
+                            old.widget().set_visible(false);
+                        }
+                        self.open_wizard(&sender);
+                    }
                 }
             }
 
@@ -5653,6 +5738,26 @@ impl SimpleComponent for AppModel {
                     self.reader_font = font;
                     self.save_settings();
                     self.push_reader_style();
+                }
+            }
+            AppMsg::SetPlainMonospace(on) => {
+                if self.plain_monospace != on {
+                    self.plain_monospace = on;
+                    self.save_settings();
+                    self.push_reader_style();
+                }
+            }
+            AppMsg::SetPlainFont(font) => {
+                if self.plain_font != font {
+                    self.plain_font = font;
+                    self.save_settings();
+                    self.push_reader_style();
+                }
+            }
+            AppMsg::SetComposePlain(on) => {
+                if self.compose_plain != on {
+                    self.compose_plain = on;
+                    self.save_settings();
                 }
             }
             AppMsg::SetOverrideColors(on) => {
@@ -7552,7 +7657,14 @@ impl AppModel {
                 self.reader_font.clone()
             }
         });
-        config::ReaderStyle { font, colors: self.override_colors }
+        let plain_font = self.plain_monospace.then(|| {
+            if self.plain_font.trim().is_empty() {
+                crate::desktop::monospace_font()
+            } else {
+                self.plain_font.clone()
+            }
+        });
+        config::ReaderStyle { font, colors: self.override_colors, plain_font }
     }
 
     /// Hand the current reader style to the reader and every popped-out window.
@@ -7588,6 +7700,8 @@ impl AppModel {
             self.override_fonts,
             self.reader_font.clone(),
             self.override_colors,
+            self.plain_monospace,
+            self.plain_font.clone(),
             self.notifications_enabled,
             self.notification_content,
             self.show_attachments,
@@ -7604,6 +7718,7 @@ impl AppModel {
             self.reply_fields,
             &self.compose_default_from,
             self.paste_plain,
+            self.compose_plain,
             self.spellcheck,
             self.spellcheck_langs.clone(),
             self.preview_lines,
@@ -8259,6 +8374,7 @@ impl AppModel {
                 WelcomeOutput::ImportGoa(account) => AppMsg::ImportGoaAccount(account),
                 WelcomeOutput::Prefs(p) => AppMsg::ApplyWelcomePrefs(p),
                 WelcomeOutput::Done => AppMsg::PresentWindow,
+                WelcomeOutput::Language(code) => AppMsg::WizardLanguage(code),
             });
         welcome.widget().set_transient_for(Some(&self.window));
         welcome.widget().set_modal(true);
@@ -10036,6 +10152,7 @@ impl AppModel {
             windowed,
             can_toggle,
             compact: false,
+            plain: self.compose_plain,
         };
         (id, init)
     }
@@ -11708,6 +11825,7 @@ impl AppModel {
             sender_logos: self.sender_logos,
             date_style: self.date_style,
             clock_style: self.clock_style,
+            language: config::load_language(),
             fetch_interval_secs: self.fetch_interval_secs,
             push: self.push,
             palette_collapse_secs: self.palette_collapse_secs,
@@ -11722,6 +11840,9 @@ impl AppModel {
             override_fonts: self.override_fonts,
             reader_font: self.reader_font.clone(),
             override_colors: self.override_colors,
+            plain_monospace: self.plain_monospace,
+            plain_font: self.plain_font.clone(),
+            compose_plain: self.compose_plain,
             notifications: self.notifications_enabled,
             notification_content: self.notification_content,
             show_attachments: self.show_attachments,
@@ -11793,6 +11914,7 @@ impl AppModel {
                 PrefOutput::SetSenderLogos(on) => AppMsg::SetSenderLogos(on),
                 PrefOutput::SetDateStyle(style) => AppMsg::SetDateStyle(style),
                 PrefOutput::SetClockStyle(style) => AppMsg::SetClockStyle(style),
+                PrefOutput::SetLanguage(code) => AppMsg::SetLanguage(code),
                 PrefOutput::SetThreading(on) => AppMsg::SetThreading(on),
                 PrefOutput::SetThreadExpansion(on) => AppMsg::SetThreadExpansion(on),
                 PrefOutput::SetConfirmThreadDelete(on) => {
@@ -11864,6 +11986,9 @@ impl AppModel {
                 PrefOutput::SetOverrideFonts(on) => AppMsg::SetOverrideFonts(on),
                 PrefOutput::SetReaderFont(font) => AppMsg::SetReaderFont(font),
                 PrefOutput::SetOverrideColors(on) => AppMsg::SetOverrideColors(on),
+                PrefOutput::SetPlainMonospace(on) => AppMsg::SetPlainMonospace(on),
+                PrefOutput::SetPlainFont(font) => AppMsg::SetPlainFont(font),
+                PrefOutput::SetComposePlain(on) => AppMsg::SetComposePlain(on),
                 PrefOutput::Closed => AppMsg::ClosePreferences,
             });
         accounts.emit(crate::ui::accounts::AccountsInput::SetFolderChoices(

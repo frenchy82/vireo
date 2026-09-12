@@ -154,6 +154,9 @@ msgstr ""
 msgid "Could not add contact: {e}"
 msgstr ""
 
+msgid "The language applies the next time Vireo starts."
+msgstr ""
+
 msgid "Save Attachment"
 msgstr ""
 
@@ -1683,13 +1686,13 @@ msgstr ""
 msgid "Send now"
 msgstr ""
 
-msgid "Tomorrow morning (8:00)"
+msgid "Tomorrow morning ({time})"
 msgstr ""
 
-msgid "Tomorrow afternoon (13:00)"
+msgid "Tomorrow afternoon ({time})"
 msgstr ""
 
-msgid "Monday morning (8:00)"
+msgid "Monday morning ({time})"
 msgstr ""
 
 msgid "Pick a date and time…"
@@ -1699,6 +1702,9 @@ msgid "Encrypt with OpenPGP to every recipient's key"
 msgstr ""
 
 msgid "Sign with your OpenPGP key"
+msgstr ""
+
+msgid "Plain text: send without formatting"
 msgstr ""
 
 msgid "Attach files"
@@ -1741,6 +1747,12 @@ msgid "More"
 msgstr ""
 
 msgid "Show Cc, Bcc and Reply-To"
+msgstr ""
+
+msgid "Send with formatting"
+msgstr ""
+
+msgid "Send as plain text"
 msgstr ""
 
 msgid "Upload to Cloud Storage"
@@ -2005,6 +2017,9 @@ msgid ""
 msgstr ""
 
 msgid "Copied"
+msgstr ""
+
+msgid "Double-click to open in a new window"
 msgstr ""
 
 #. Same order as the reader toolbar and the list's
@@ -2302,6 +2317,9 @@ msgstr ""
 msgid "2026 Aug 23"
 msgstr ""
 
+msgid "System"
+msgstr ""
+
 msgid "12-hour (5:40 PM)"
 msgstr ""
 
@@ -2366,9 +2384,6 @@ msgid "Privacy"
 msgstr ""
 
 msgid "Date and Time"
-msgstr ""
-
-msgid "System"
 msgstr ""
 
 msgid "Backup"
@@ -2766,6 +2781,20 @@ msgid ""
 "take the accent colour."
 msgstr ""
 
+msgid "Plain-text messages in monospace"
+msgstr ""
+
+msgid ""
+"Show messages sent as plain text in a fixed-width font, so columns and code "
+"line up. Formatted messages are not affected."
+msgstr ""
+
+msgid "Monospace font"
+msgstr ""
+
+msgid "The system's monospace font unless another is chosen."
+msgstr ""
+
 msgid "Message card actions"
 msgstr ""
 
@@ -2816,6 +2845,15 @@ msgstr ""
 msgid ""
 "Pasting into a message strips the clipboard's formatting. Off, a paste keeps "
 "its formatting. Right-clicking the editor always offers both."
+msgstr ""
+
+msgid "Compose in plain text"
+msgstr ""
+
+msgid ""
+"New messages, replies and forwards start as plain text, sent without "
+"formatting. The composer's Plain text button switches either way for one "
+"message."
 msgstr ""
 
 msgid "Spelling"
@@ -2893,6 +2931,11 @@ msgid "Date format"
 msgstr ""
 
 msgid "Clock"
+msgstr ""
+
+msgid ""
+"The language Vireo is shown in. \"System\" follows the desktop, with English "
+"where no translation exists. A change applies the next time Vireo starts."
 msgstr ""
 
 msgid "Keep running in the background"
@@ -3189,6 +3232,11 @@ msgstr ""
 msgid ""
 "A clean, fast home for your mail.\n"
 "Let's set things up — it takes about a minute."
+msgstr ""
+
+msgid ""
+"Choosing another language restarts Vireo: it closes for a moment and this "
+"wizard comes back in that language."
 msgstr ""
 
 msgid "Get Started"

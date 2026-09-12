@@ -93,9 +93,10 @@ pub struct MessageView {
     /// document (scroll resets to 0) and can reflow everything above — an
     /// element anchor survives that where a raw pixel offset lands short.
     saved_anchor: Option<(u32, u32, u32)>,
-    /// The saved anchor is a card to reveal (a reply that just arrived):
-    /// the render lands it below the page's top gutter, not flush at the
-    /// top the way a place the user scrolled to is restored.
+    /// The saved anchor was set by the app, not by a scroll: the render
+    /// lands it below the page's top gutter (where an unscrolled pane has
+    /// its first card), not flush at the top the way a place the user
+    /// scrolled to is restored.
     anchor_gutter: bool,
     /// What each message's frame measured last time it was shown, so reopening a
     /// conversation lays out right away instead of settling into place.
@@ -457,9 +458,12 @@ pub enum MessageViewInput {
     /// the viewport top and the offset into it — kept so a re-render can put
     /// the reader back where they were.
     ScrollAnchor { account_id: u32, id: u32, offset: u32 },
-    /// Bring this card into view at the next render, with the gutter above
-    /// it (a reply that just arrived for the conversation on screen).
-    RevealCard { account_id: u32, id: u32 },
+    /// Keep the pane where it is through the next render (a reply just
+    /// arrived for the conversation on screen): when no scrolled-to place
+    /// is recorded yet, the card at the top of the pane is pinned there,
+    /// below the gutter, so a card inserted above it does not move what is
+    /// on screen. A recorded place is kept as it is.
+    HoldPlace { account_id: u32, id: u32 },
 }
 
 /// How a click on a conversation card changes the selection, mirroring what the
@@ -1805,9 +1809,11 @@ impl Component for MessageView {
                 self.saved_anchor = Some((account_id, id, offset));
                 self.anchor_gutter = false;
             }
-            MessageViewInput::RevealCard { account_id, id } => {
-                self.saved_anchor = Some((account_id, id, 0));
-                self.anchor_gutter = true;
+            MessageViewInput::HoldPlace { account_id, id } => {
+                if self.saved_anchor.is_none() {
+                    self.saved_anchor = Some((account_id, id, 0));
+                    self.anchor_gutter = true;
+                }
             }
             MessageViewInput::CardContact { account_id, id } => {
                 if let Some(m) = self
@@ -2084,7 +2090,7 @@ impl MessageView {
                 sections.push_str(&format!(
                     "<section class=\"vireo-msg{sel}{unread_cls}\" data-key=\"{aid}:{id}\">\
                        <header class=\"vireo-msg-hdr\" data-key=\"{aid}:{id}\" \
-                         title=\"Double-click to open in a new window\">\
+                         title=\"{hdr_title}\">\
                          <div class=\"vireo-hdr-line\">\
                            {ava}{dot}<span class=\"vireo-from\">{from}</span>{verify}{addr}\
                            <span class=\"vireo-tags\" data-key=\"{aid}:{id}\">{tags}</span>\
@@ -2095,6 +2101,9 @@ impl MessageView {
                        </header>{body}</section>",
                     aid = m.account_id,
                     id = m.id,
+                    hdr_title = gtk::glib::markup_escape_text(
+                        &i18n("Double-click to open in a new window")
+                    ),
                     tags = LIVE_TAGS.with(|t| tag_chips_html(&t.borrow(), &m.keywords)),
                     // The ⋯ toggle that expands/collapses the action row when
                     // the hidden-until-hover preference is on; CSS keeps it
@@ -2102,9 +2111,10 @@ impl MessageView {
                     acts_toggle = if !thread.is_empty() {
                         format!(
                             "<button type=\"button\" class=\"vireo-acts-toggle\" \
-                             title=\"Actions\" data-key=\"{aid}:{id}\">{svg}</button>",
+                             title=\"{acts_title}\" data-key=\"{aid}:{id}\">{svg}</button>",
                             aid = m.account_id,
                             id = m.id,
+                            acts_title = gtk::glib::markup_escape_text(&i18n("Actions")),
                             // The same ⋯ the list's Actions Palette toggle uses.
                             svg = inline_icon_svg("view-more-horizontal-symbolic"),
                         )
@@ -4044,6 +4054,18 @@ fn reader_style_css(style: &crate::config::ReaderStyle, dark: bool, accent: &str
             code = of(":is(pre,code,kbd,samp,tt)"),
         ));
     }
+    // Plain-text messages (#181): their parts are wrapped in `.vireo-plain`
+    // when the body is rendered, so the fixed-width font lands on exactly
+    // them. After the message font above, and one class more specific, so
+    // it wins where both apply.
+    if let Some(font) = &style.plain_font {
+        let (family, size, face) = css_font(font);
+        css.push_str(&format!(
+            "{p},{p} :not(#vireo-a):not(#vireo-b):not(#vireo-c)\
+             {{font-family:{family} !important;font-size:{size} !important;{face}}}",
+            p = of(".vireo-plain"),
+        ));
+    }
     if style.colors {
         let fg = if dark { "#e6e6e6" } else { "#1a1a1a" };
         css.push_str(&format!(
@@ -4915,7 +4937,7 @@ fn body_html(body: &str) -> String {
             "<!doctype html><html><head><meta charset=\"utf-8\"><style>\
              body{{margin:0;padding:20px;font:14px/1.5 system-ui,sans-serif;\
              white-space:pre-wrap;word-wrap:break-word}}\
-             </style></head><body>{}</body></html>",
+             </style></head><body class=\"vireo-plain\">{}</body></html>",
             body.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
         )
     }
@@ -5086,7 +5108,7 @@ mod tests {
     /// and code kept monospaced.
     #[test]
     fn reader_font_lands_after_the_senders_css() {
-        let style = crate::config::ReaderStyle { font: Some("DejaVu Serif 12".into()), colors: false };
+        let style = crate::config::ReaderStyle { font: Some("DejaVu Serif 12".into()), colors: false, plain_font: None };
         let body = "<html><head><style>p{font-family:Comic Sans MS}</style></head>\
                     <body><p style=\"font-size:30px\">x</p></body></html>";
         let frame = message_frame(body, true, false, (1, 1), None, &style, "#3584e4");
@@ -5106,7 +5128,7 @@ mod tests {
     /// skipped, since the sender's colours are not shown anyway.
     #[test]
     fn reader_colours_force_text_and_links() {
-        let style = crate::config::ReaderStyle { font: None, colors: true };
+        let style = crate::config::ReaderStyle { font: None, colors: true, plain_font: None };
         let body = r#"<p style="color:#000;background:#ff0">x <a href="https://e.example">l</a></p>"#;
         let light = message_frame(body, true, false, (1, 1), None, &style, "#3584e4");
         assert!(light.contains("color:#1a1a1a !important;-webkit-text-fill-color:#1a1a1a !important;background-color:transparent !important;background-image:none !important"), "{light}");
@@ -5150,7 +5172,7 @@ mod tests {
         let mut b = msg_for_print();
         b.id = 2;
         b.body = "<p>two</p>".into();
-        let style = crate::config::ReaderStyle { font: Some("Cantarell 11".into()), colors: false };
+        let style = crate::config::ReaderStyle { font: Some("Cantarell 11".into()), colors: false, plain_font: None };
         let mut escaped = std::collections::HashSet::new();
         escaped.insert((a.account_id, a.id));
         let doc = MessageView::conversation_document(

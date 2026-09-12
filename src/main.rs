@@ -13,6 +13,7 @@ mod config;
 mod console_log;
 mod contacts;
 mod datefmt;
+mod desktop;
 mod goa;
 mod i18n;
 mod logo;
@@ -49,6 +50,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Command-line flag for starting without a window (used by the autostart entry
 /// the background portal writes).
 pub const HIDDEN_FLAG: &str = "--hidden";
+/// Set in the environment before the restart the welcome wizard's language
+/// pick asks for, so the instance that comes back opens the wizard again
+/// (the restart helper keeps it; app init clears it).
+pub const WIZARD_AGAIN_VAR: &str = "VIREO_WIZARD_AGAIN";
 
 /// Whether this run started hidden. Read once the UI is built, to keep the first
 /// activation from presenting the window that was deliberately not shown.
