@@ -1,5 +1,119 @@
 # Changelog
 
+## 1.28.0-beta.1 — 2026-09-12
+
+First preview of 1.28.0: an arrangeable reader toolbar, a slide-over
+sidebar that stays open, notification clicks that land in Inboxes and
+open at once, conversations that move as one and take in new replies
+while open, and the Hungarian translation.
+
+- **Reader toolbar layout** (Settings → Appearance → Toolbar). The
+  reading pane's header buttons are arrangeable in two groups, plus a
+  "Not shown" zone. Default: left = Reply, Reply All, Forward, Star,
+  Archive, Delete; right = Tags, Read/Unread, Spam, Move To, Find in
+  Message, Print. Only the right group folds into the ⋯ overflow menu on
+  a narrow pane (in its own order); the left group stays at every width,
+  and the fold threshold is recomputed from the button count. Stored in
+  `~/.config/vireo/toolbar.toml` (`left` / `right` key lists;
+  `config::ReaderToolbar`, `App::relayout_reader_toolbar`). The editor
+  (`ToolbarEditor` in preferences.rs, three `ChipFlow` drop zones: a
+  widget that lays chips out wrapping and eases each to its slot) opens
+  a gap the size of the dragged chip under the pointer and slides the
+  others aside; every drop autosaves. Right-clicking the header's empty
+  space offers "Customize Toolbar…", which opens that page. The section
+  is a raised card on the Appearance page.
+- **Sidebar peek stays open.** The narrow-window slide-over panel folded
+  back one second after the pointer left the rail or the panel, and the
+  panel's menu popover is its own surface, so opening it counted as
+  leaving: the panel slid away under the menu. The leave timer is gone;
+  a click outside the panel (the scrim), a swipe or a navigation closes
+  it. The hover-expand preference's text says so.
+- **Hungarian** (PR #169, Laszlo Lang). `po/hu.po`, 953 of the strings
+  up to 1.27.0, merged against the current template; `po/LINGUAS` lists
+  `hu`, so the launcher and metainfo carry it. French caught up with the
+  1.27.0 strings (PR #172, frenchy82). The strings this cycle adds are
+  untranslated in both.
+- **Notification clicks** (#170). A click on a new-mail notification
+  opened the message's folder and, when that account's section was
+  folded in the sidebar, highlighted nothing. Now: mail that landed in
+  an inbox opens in the unified Inboxes whenever the sidebar has that
+  row (`App::open_unified`, the old `UnifiedSelected` body); otherwise,
+  or for mail a filter filed elsewhere, its folder opens and the sidebar
+  unfolds the account (`Sidebar::reveal_account`, on every programmatic
+  folder highlight, so "Go to Message" from the gallery gets it too).
+  Underneath, four things were fixed:
+  - The list builds its rows on an idle since the coalesced-rebuild
+    speed-up, so a `SelectAndLoad` queued in the same pass as the
+    folder's list found no rows and the notified message was never
+    selected. It now waits for the queued rebuild (`pending_select`); a
+    reply inside a conversation, which has no row of its own, selects
+    its thread head (`thread_head_for`).
+  - An inbox open in the unified view was skipped when its unread count
+    moved, on the assumption that the worker's IDLE would deliver the
+    new list; only push accounts IDLE, so a polled account's Inboxes
+    slice waited a poll interval for mail its chip already counted
+    (`sync_background_folder` no longer skips open folders).
+  - The message took seconds to show: the account's worker serves one
+    request at a time, and the body request sat behind the inbox list
+    fetch opening Inboxes asked for, and behind the unread sweep that
+    IDLE waking ran inline (an EXAMINE and a SEARCH per folder, 13
+    folders at 165 ms a round trip). The notification handler asks for
+    the body first; the IMAP worker moves reader loads (body, bodies,
+    source, attachment downloads) ahead of queued list fetches
+    (`reorder_reader_loads`, never past a move, a flag change or a
+    reconnect); and the sweep keeps its place in `sweep_pending`, stops
+    before the next folder whenever a request is waiting, and runs from
+    the idle chain after the new mail's body prefetch (`sweep_due`)
+    rather than inline.
+  - After the message was read, the Inboxes chip came back for a
+    moment: lists and counts the worker had fetched ahead of the queued
+    STORE still reported it unread. A read/unread change now stays in
+    `pending_seen` until the worker reports it stored (new
+    `WorkerEvent::SeenSettled` from the IMAP, Graph and POP3 workers;
+    entries expire after 20 s); meanwhile that folder's server-reported
+    counts are ignored and a fetched list has the pending state overlaid.
+- **Conversations move as one** (#171). With a conversation open in the
+  reading pane, the Move To… picker starts with a "Whole conversation"
+  switch showing the member count, on by default; picking a folder then
+  moves every member the way a dragged multi-selection does
+  (`drop_move`: grouped by source folder, undoable, members from
+  another account reported). Move To… is also in the message list's
+  right-click menu (row and multi-selection, between Mark as Spam and
+  Archive; the list hands the click's point over in window coordinates
+  and the app anchors the picker on the window), on the row's action
+  palette, and on the reader card's action row (the page reports the
+  button's place in CSS pixels with its width, so a zoomed page still
+  lands it). A drag that starts on a conversation row carries every
+  member, as its Delete does (`ThreadDragKeys`, published with the row
+  keys; a multi-selection of several conversations expands each). The
+  picker has 10px above its contents.
+- **Reader cards.** A right-click anywhere on a card — its header, or its
+  body frame, which never reports events to the page — opens that
+  message's full menu, the list row's: reply, star, read, tags, spam,
+  Move To…, archive, delete, contacts, source. WebKit's context-menu
+  signal says what was hit but not where, so a capture-phase gesture on
+  the webview records the pointer and the page is asked which card holds
+  it (`elementFromPoint`, in CSS pixels); links, selected text, images
+  and editable fields keep WebKit's own menus. Reply, Reply All and
+  Forward from that menu open the pane's inline composer, like the
+  card's own buttons. The card's action buttons are centred flex boxes:
+  the read toggle's nested spans rode the button's text line and sat
+  high.
+- **A reply arriving for the open conversation** used to mark its row
+  and nothing else. After each rebuild the list compares the selected
+  head's conversation with the one it last handed the app
+  (`emitted_thread`) and reports growth (`MessageListOutput::ThreadGrew`);
+  the app merges the new members into the painted conversation,
+  chronologically, with bodies from the cache and the rest requested
+  (the Body handler repaints as they land), and points the reader's
+  saved anchor at the new card (`MessageViewInput::RevealCard`), so with
+  newest first the pane scrolls to the top and otherwise to the appended
+  card. A revealed card — that one, the unread mark on open, the newest
+  message — now lands below the page's top gutter rather than flush at
+  the viewport edge; a place the user scrolled to is still restored
+  exactly. `VIREO_DEMO_ARRIVAL=<secs>` has the demo's mock worker deliver
+  such a reply.
+
 ## 1.27.4-beta.1 — 2026-09-11
 
 Catch-up with stable 1.27.3: the beta channel carries exactly the 1.27.3

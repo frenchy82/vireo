@@ -2,6 +2,26 @@
 
 Vireo is a clean, fast, GNOME-native email client built with Rust and libadwaita for Wayland desktops. Privacy-first: no telemetry, remote content blocked by default, and credentials kept in the system keyring.
 
+## What's new in 1.28.0-beta.1
+
+First preview of 1.28.0.
+
+**Arrange the reader toolbar.** Settings, Appearance, Toolbar lets you drag the reading pane's buttons between a left group, a right group and "Not shown", in the order you want. On a narrow pane only the right group folds into the ⋯ menu; the left group is always there. Right-click the empty part of the toolbar for "Customize Toolbar…".
+
+**The slide-over sidebar stays open.** In a narrow window the sidebar panel no longer folds away when the pointer leaves it, so its menu can be used. Click outside the panel to close it.
+
+**Notifications open the right place, fast.** Clicking a new-mail notification now opens the message in Inboxes when the sidebar has that row, or in the account's own Inbox with the account unfolded so the highlight shows. The message itself appears at once instead of waiting behind the folder's sync, and Inboxes picks up new mail on polled accounts without waiting for the next poll. The unread count no longer flickers back after the message is read. Reported by [@yioannides](https://github.com/yioannides) (#170).
+
+**Move a whole conversation.** With a conversation open, Move To… offers a "Whole conversation" switch, on by default, so one pick files every message in it. Dragging a conversation row to a folder now takes the whole conversation too, as deleting it does. Requested by [@peterweissdk](https://github.com/peterweissdk) (#171).
+
+**Move To… everywhere.** It is in the message list's right-click menu, on the row's action palette and on each reader card's action row, as well as the toolbar.
+
+**Right-click a message card.** Anywhere on a card in the reading pane, its header or its text, opens the same menu a message has in the list: reply, star, read, tags, spam, move, archive, delete, add the sender, view source. Replies from it open in the pane.
+
+**New replies join the open conversation.** When a reply arrives for the conversation you are reading, it appears in the reading pane and scrolls into view, at the top with newest first. You no longer have to click away and back.
+
+**Hungarian.** Vireo speaks Hungarian, by [@7system7](https://github.com/7system7) (#169). French caught up with the 1.27.0 strings, by [@frenchy82](https://github.com/frenchy82) (#172).
+
 ## What's new in 1.27.4-beta.1
 
 Catch-up with stable 1.27.3: the same code and documentation, on the beta channel.

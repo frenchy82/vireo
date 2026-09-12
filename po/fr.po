@@ -304,6 +304,15 @@ msgstr "Aperçu avant impression"
 msgid "Message Source"
 msgstr "Code source du message"
 
+msgid "Remove Star"
+msgstr "Retirer l'étoile"
+
+msgid "Star"
+msgstr "Ajouter une étoile"
+
+msgid "Add Sender to Contacts"
+msgstr "Ajouter l'expéditeur aux contacts"
+
 msgid "Delete {n} messages"
 msgstr "Supprimer {n} messages"
 
@@ -2067,14 +2076,25 @@ msgstr "Ajouter un numéro de téléphone"
 msgid "Add website"
 msgstr "Ajouter un site web"
 
+#, fuzzy
+msgid "Whole conversation"
+msgstr "Afficher la conversation"
+
+#, fuzzy
+msgid "{n} message"
+msgid_plural "{n} messages"
+msgstr[0] "{n} messages"
+msgstr[1] "{n} messages"
+
 msgid "Search folders"
 msgstr "Rechercher des dossiers"
 
 msgid "Mark as read"
 msgstr "Marquer comme lu"
 
-msgid "Star"
-msgstr "Ajouter une étoile"
+#, fuzzy
+msgid "Move to…"
+msgstr "Déplacer vers…"
 
 msgid "Not spam"
 msgstr "Marquer comme acceptable"
@@ -2118,17 +2138,11 @@ msgstr "Supprimer les marquages"
 msgid "Star Conversation"
 msgstr "Marquer la conversation"
 
-msgid "Remove Star"
-msgstr "Retirer l'étoile"
-
 msgid "Mark All as Read"
 msgstr "Tout marquer comme lu"
 
 msgid "Mark All as Unread"
 msgstr "Marquer tout comme non lu"
-
-msgid "Add Sender to Contacts"
-msgstr "Ajouter l'expéditeur aux contacts"
 
 msgid "Fetch the sender's key"
 msgstr "Récupérer la clé de l'expéditeur"
@@ -2230,6 +2244,10 @@ msgstr "Marquer comme lu ou non lu"
 
 msgid "Flag this message"
 msgstr "Marquer ce message"
+
+#, fuzzy
+msgid "Move this message to a folder"
+msgstr "Enregistrer chaque pièce jointe dans un dossier"
 
 msgid "Archive this message"
 msgstr "Archiver ce message"
