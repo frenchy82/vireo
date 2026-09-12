@@ -362,6 +362,9 @@ pub enum WorkerEvent {
     /// list changes, but a path stays true for as long as the folder exists.
     /// The app resolves it against whatever list it currently holds.
     FolderUnreadByPath { path: String, unread: u32 },
+    /// A `SetSeen` has been stored (or failed): the app stops holding its own
+    /// read state for that message over what the server reports.
+    SeenSettled { path: String, uid: u32 },
     /// `path` is the folder the body was read from. A UID is unique only within
     /// its folder, so without it a background prefetch's body can be applied to a
     /// different message that happens to share the number.
@@ -615,6 +618,67 @@ async fn run(
     }
 }
 
+/// A request that puts mail in front of the reader: what the user is
+/// waiting on right now.
+fn is_reader_load(req: &MailRequest) -> bool {
+    matches!(
+        req,
+        MailRequest::LoadBody { .. }
+            | MailRequest::LoadBodies { .. }
+            | MailRequest::LoadSource { .. }
+            | MailRequest::LoadAttachments { download: true, .. }
+    )
+}
+
+/// A folder list fetch: work the reader's loads may go ahead of.
+fn is_list_load(req: &MailRequest) -> bool {
+    matches!(req, MailRequest::LoadMessages { .. } | MailRequest::SyncFolder { .. })
+}
+
+/// Take everything else already queued behind `first` and move the reader's
+/// loads ahead of the list syncs they sit behind, keeping every other order.
+///
+/// The worker serves one request at a time, so a message opened right after
+/// a view that loads its folder (a notification click into Inboxes, which
+/// asks every account for its inbox, then opens the mail) waited for the
+/// whole list fetch — and the IDLE hand-off before it — before its body was
+/// even asked for. The body is what the user is looking at; the list can
+/// follow. A reader load only overtakes list fetches: it never passes a
+/// move, a flag change or a reconnect, so what it reads is what the
+/// requests before it left.
+fn reorder_reader_loads(
+    first: MailRequest,
+    rx: &mut mpsc::UnboundedReceiver<MailRequest>,
+    backlog: &mut std::collections::VecDeque<MailRequest>,
+) -> MailRequest {
+    let mut queue: Vec<MailRequest> = Vec::with_capacity(backlog.len() + 2);
+    queue.push(first);
+    queue.extend(backlog.drain(..));
+    while let Ok(req) = rx.try_recv() {
+        queue.push(req);
+    }
+    if queue.len() > 1 {
+        let mut ordered: Vec<MailRequest> = Vec::with_capacity(queue.len());
+        for req in queue {
+            if is_reader_load(&req) {
+                // Slot in ahead of the run of list fetches at the tail.
+                let mut at = ordered.len();
+                while at > 0 && is_list_load(&ordered[at - 1]) {
+                    at -= 1;
+                }
+                ordered.insert(at, req);
+            } else {
+                ordered.push(req);
+            }
+        }
+        queue = ordered;
+    }
+    let mut it = queue.into_iter();
+    let first = it.next().expect("queue holds at least the request taken");
+    backlog.extend(it);
+    first
+}
+
 // ---------------------------------------------------------------------------
 // IMAP path
 // ---------------------------------------------------------------------------
@@ -725,6 +789,9 @@ async fn run_imap(
     // older build carries only its In-Reply-To, and threading reads References.
     let mut refs_repair: std::collections::VecDeque<(u32, String)> =
         std::collections::VecDeque::new();
+    // Requests already queued when one was taken, reordered so the reader's
+    // loads come before list syncs (see `reorder_reader_loads`).
+    let mut backlog: std::collections::VecDeque<MailRequest> = std::collections::VecDeque::new();
     // IMAP IDLE push: watch the most recently loaded folder for new mail.
     // The account's own setting wins over the global switch (#91).
     let push_enabled = account.push.unwrap_or_else(crate::config::load_push);
@@ -747,6 +814,11 @@ async fn run_imap(
     // folders that changed between sweeps.
     let mut sweep_baseline: std::collections::HashMap<String, (u32, Option<u32>)> =
         std::collections::HashMap::new();
+    // The unread sweep's place (folders still to count) and whether one is
+    // owed: IDLE waking, or a sweep a request interrupted. It runs from the
+    // idle chain below, after the new mail's body prefetch, never inline.
+    let mut sweep_pending: Vec<crate::models::Folder> = Vec::new();
+    let mut sweep_due = false;
     // Set after prefetching; triggers one re-sync (to catch mail that arrived
     // while the connection was busy) before settling into the long IDLE.
     let mut pending_resync = false;
@@ -830,15 +902,18 @@ async fn run_imap(
                     // folder a watcher. Also the first accurate (searched,
                     // not STATUSed) chip pass for servers where STATUS lies.
                     if let Some(sess) = session.as_mut() {
-                        let changed = refresh_unread_counts(
+                        let (changed, complete) = refresh_unread_counts(
                             account_id,
                             sess,
                             cache.as_ref(),
                             idle_folder.as_ref().map(|(_, p)| p.as_str()),
                             &mut sweep_baseline,
+                            &mut sweep_pending,
+                            &rx,
                             &emit,
                         )
                         .await;
+                        sweep_due = !complete;
                         last_unread_sweep = Some(std::time::Instant::now());
                         watch_changed_folders(&mut watchers, &account, &changed, &emit);
                         auto_empty_imap(account_id, &account, sess, cache.as_ref(), &mut last_auto_empty, &emit)
@@ -856,7 +931,7 @@ async fn run_imap(
         // push is on — re-sync once to catch any mail that arrived while busy, then
         // sit in a long IMAP IDLE for instant delivery. Without push, block for the
         // next request.
-        let req = match rx.try_recv() {
+        let req = match backlog.pop_front().map_or_else(|| rx.try_recv(), Ok) {
             Ok(req) => req,
             Err(mpsc::error::TryRecvError::Disconnected) => break,
             Err(mpsc::error::TryRecvError::Empty) => {
@@ -873,6 +948,28 @@ async fn run_imap(
                         &emit,
                     )
                     .await;
+                    continue;
+                } else if sweep_due && session.is_some() {
+                    // The unread chips' re-count, owed since IDLE last woke
+                    // (or left half done by a request): folder by folder,
+                    // yielding to whatever arrives, its place kept.
+                    let sess = session.as_mut().unwrap();
+                    let (changed, complete) = refresh_unread_counts(
+                        account_id,
+                        sess,
+                        cache.as_ref(),
+                        idle_folder.as_ref().map(|(_, p)| p.as_str()),
+                        &mut sweep_baseline,
+                        &mut sweep_pending,
+                        &rx,
+                        &emit,
+                    )
+                    .await;
+                    watch_changed_folders(&mut watchers, &account, &changed, &emit);
+                    if complete {
+                        sweep_due = false;
+                        last_unread_sweep = Some(std::time::Instant::now());
+                    }
                     continue;
                 } else if !prefetch.is_empty() {
                     run_one_prefetch(
@@ -1009,22 +1106,13 @@ async fn run_imap(
                             // IDLE surfaces — on new mail, and on the quiet
                             // timeout, which is the only clock a push-only
                             // (manual-fetch) account has.
+                            // Owed, not run here: the idle chain runs it
+                            // after the new mail's body is prefetched, and
+                            // any request that arrives meanwhile goes first.
                             if last_unread_sweep
                                 .map_or(true, |t| t.elapsed() >= UNREAD_SWEEP_MIN)
                             {
-                                if let Some(sess) = session.as_mut() {
-                                    let changed = refresh_unread_counts(
-                                        account_id,
-                                        sess,
-                                        cache.as_ref(),
-                                        Some(fpath.as_str()),
-                                        &mut sweep_baseline,
-                                        &emit,
-                                    )
-                                    .await;
-                                    last_unread_sweep = Some(std::time::Instant::now());
-                                    watch_changed_folders(&mut watchers, &account, &changed, &emit);
-                                }
+                                sweep_due = true;
                             }
                             continue;
                         }
@@ -1038,6 +1126,7 @@ async fn run_imap(
                 }
             }
         };
+        let req = reorder_reader_loads(req, &mut rx, &mut backlog);
 
         if matches!(req, MailRequest::Reconnect) {
             session = connect_and_list(account_id, &account, cache.as_ref(), &emit).await;
@@ -1374,6 +1463,7 @@ async fn run_imap(
                 } else if let Some(c) = cache.as_ref() {
                     c.set_unread(account_id, &path, uid, !seen);
                 }
+                emit(WorkerEvent::SeenSettled { path, uid });
             }
 
             MailRequest::SetFlagged {
@@ -1449,15 +1539,18 @@ async fn run_imap(
 
             MailRequest::RefreshUnread => {
                 let sess = session.as_mut().unwrap();
-                let changed = refresh_unread_counts(
+                let (changed, complete) = refresh_unread_counts(
                     account_id,
                     sess,
                     cache.as_ref(),
                     idle_folder.as_ref().map(|(_, p)| p.as_str()),
                     &mut sweep_baseline,
+                    &mut sweep_pending,
+                    &rx,
                     &emit,
                 )
                 .await;
+                sweep_due = !complete;
                 last_unread_sweep = Some(std::time::Instant::now());
                 watch_changed_folders(&mut watchers, &account, &changed, &emit);
                 auto_empty_imap(account_id, &account, sess, cache.as_ref(), &mut last_auto_empty, &emit)
@@ -5200,17 +5293,35 @@ async fn refresh_keywords(
     changed
 }
 
+/// Re-count every folder's unread chip (EXAMINE + SEARCH each), one folder
+/// at a time — and only while nothing is waiting on the worker. Each folder
+/// costs two round trips, so a dozen folders on a slow link hold the
+/// session for seconds; a message the user just opened would wait behind
+/// the whole walk (a notification click did exactly that). `pending` is the
+/// walk's place: empty starts a fresh pass over the cached folder list, and
+/// what is left when a request interrupts is resumed by the next call.
+/// Returns the folders whose counts moved and whether the pass finished.
 async fn refresh_unread_counts(
     account_id: u32,
     session: &mut ImapSession,
     cache: Option<&Cache>,
     selected: Option<&str>,
     baseline: &mut std::collections::HashMap<String, (u32, Option<u32>)>,
+    pending: &mut Vec<crate::models::Folder>,
+    rx: &mpsc::UnboundedReceiver<MailRequest>,
     emit: &impl Fn(WorkerEvent),
-) -> Vec<(FolderKind, String)> {
+) -> (Vec<(FolderKind, String)>, bool) {
     let mut changed = Vec::new();
-    let folders = cache.map(|c| c.load_folders(account_id)).unwrap_or_default();
-    for f in &folders {
+    if pending.is_empty() {
+        *pending = cache.map(|c| c.load_folders(account_id)).unwrap_or_default();
+        pending.reverse(); // popped from the back, so walked in list order
+    }
+    while let Some(f) = pending.last().cloned() {
+        if !rx.is_empty() {
+            tracing::debug!("sweep: paused with {} folders left", pending.len());
+            return (changed, false);
+        }
+        pending.pop();
         if Some(f.path.as_str()) == selected {
             continue;
         }
@@ -5237,7 +5348,7 @@ async fn refresh_unread_counts(
             changed.iter().map(|(_, p)| p.as_str()).collect::<Vec<_>>()
         );
     }
-    changed
+    (changed, true)
 }
 
 /// Whether a folder's sidebar chip counts every message rather than unread
@@ -7203,6 +7314,7 @@ async fn run_pop3(
                 if let Some(c) = cache.as_ref() {
                     c.set_unread(account_id, INBOX, uid, !seen);
                 }
+                emit(WorkerEvent::SeenSettled { path: INBOX.to_string(), uid });
             }
             MailRequest::SetFlagged { uid, flagged, .. } => {
                 if let Some(c) = cache.as_ref() {
@@ -7434,7 +7546,7 @@ async fn pop3_delete(account: &AccountConfig, uid: u32) -> Result<(), String> {
 async fn run_mock(
     account_id: u32,
     mut rx: mpsc::UnboundedReceiver<MailRequest>,
-    emit: impl Fn(WorkerEvent),
+    emit: impl Fn(WorkerEvent) + Clone + 'static,
 ) {
     let backend = MockBackend::new();
 
@@ -7442,6 +7554,22 @@ async fn run_mock(
         emit(WorkerEvent::Account(account));
     }
     emit(WorkerEvent::Folders(backend.folders(account_id)));
+    // VIREO_DEMO_ARRIVAL=<secs>: a reply lands in account 1's Inbox
+    // conversation after that long, as a sync would bring it — for
+    // watching an open conversation take in a new message.
+    if account_id == 1 {
+        if let Some(secs) =
+            std::env::var("VIREO_DEMO_ARRIVAL").ok().and_then(|v| v.parse::<u64>().ok())
+        {
+            let emit = emit.clone();
+            let mut messages = backend.messages(1);
+            tokio::task::spawn_local(async move {
+                tokio::time::sleep(Duration::from_secs(secs)).await;
+                messages.insert(0, crate::backend::demo_arrival());
+                emit(WorkerEvent::Messages { folder_id: 1, messages });
+            });
+        }
+    }
 
     while let Some(req) = rx.recv().await {
         match req {
@@ -8774,6 +8902,7 @@ async fn run_graph(
                     &emit,
                 )
                 .await;
+                emit(WorkerEvent::SeenSettled { path, uid });
             }
 
             MailRequest::SetFlagged { path, uid, flagged } => {

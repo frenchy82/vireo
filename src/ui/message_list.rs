@@ -61,6 +61,11 @@ impl MessageRow {
             let s = sender.clone();
             tag.connect_clicked(move |b| s.input(MessageRowInput::OpenTagMenu(b.clone())));
         }
+        let moveto = button("co.hyprlab.Vireo-folder-symbolic", i18n("Move to…"));
+        {
+            let s = sender.clone();
+            moveto.connect_clicked(move |b| s.input(MessageRowInput::OpenMoveMenu(b.clone())));
+        }
         let archive = button("co.hyprlab.Vireo-mail-archive-symbolic", i18n("Archive"));
         action(&archive, RowAction::Archive);
         let delete = button("co.hyprlab.Vireo-user-trash-symbolic", i18n("Delete"));
@@ -78,7 +83,7 @@ impl MessageRow {
         action(&contact, RowAction::AddContact);
         let source = button("co.hyprlab.Vireo-code-symbolic", i18n("View Source"));
         action(&source, RowAction::ViewSource);
-        for b in [&reply, &reply_all, &forward, &read, &star, &tag, &archive, &delete, &spam, &contact, &source] {
+        for b in [&reply, &reply_all, &forward, &read, &star, &tag, &moveto, &archive, &delete, &spam, &contact, &source] {
             inner.append(b);
         }
         self.palette_buttons.replace(Some(PaletteButtons { read, star, tag }));
@@ -185,6 +190,7 @@ pub struct RowInit {
     /// Shared with the list so a drag can turn the ListBox's selected row
     /// *indices* into message ids and carry the whole selection (#23).
     pub drag_keys: DragKeys,
+    pub thread_drag: ThreadDragKeys,
     /// Show who the message went to instead of who sent it — a Sent folder's
     /// rows all say "me" otherwise (#27).
     pub show_recipient: bool,
@@ -220,6 +226,12 @@ const SWIPE_ARM: f64 = 72.0;
 /// The shown rows' (account, folder, uid, id) keys, in list order — rebuilt with
 /// the list and read live when a drag starts.
 pub type DragKeys = std::rc::Rc<std::cell::RefCell<Vec<(u32, u32, u32, u32)>>>;
+
+/// Every member of each conversation, keyed by its head's (account, id) —
+/// so a drag that starts on a conversation row carries the whole thread,
+/// as its Delete does (#171). Published with `DragKeys`.
+pub type ThreadDragKeys =
+    std::rc::Rc<std::cell::RefCell<std::collections::HashMap<(u32, u32), Vec<(u32, u32, u32, u32)>>>>;
 
 /// The message-list pane's floor: exactly what a conversation-member card
 /// needs to show a row's full Actions Palette — the tightest real constraint
@@ -351,6 +363,8 @@ pub struct MessageRow {
     thread_starred: bool,
     /// Shared row keys, so a drag from this row can carry the whole selection.
     drag_keys: DragKeys,
+    /// Shared conversation members, so a drag from a head row carries its thread.
+    thread_drag: ThreadDragKeys,
     /// Drives the row's own Revealer — false only for the brief window a
     /// newly-expanded reply is sliding open, or a collapsing one is sliding
     /// shut before it's removed from the list.
@@ -390,6 +404,8 @@ pub enum MessageRowInput {
     SetKeywords(Vec<String>),
     /// The palette's tag button: pop the tag menu on it.
     OpenTagMenu(gtk::Button),
+    /// The palette's Move to… button: the list opens the folder picker under it.
+    OpenMoveMenu(gtk::Button),
     SetHasAttachment(bool),
     /// The pointer entered/left the row — fade the chevron in/out.
     SetRowHover(bool),
@@ -439,6 +455,8 @@ pub enum MessageRowInput {
 #[derive(Debug)]
 pub enum MessageRowOutput {
     Action { action: RowAction, message: Box<Message> },
+    /// Move to… pressed on the palette: open the picker at window point (x, y).
+    MoveTo { message: Box<Message>, x: f64, y: f64 },
     /// A tag toggled from the palette's tag menu (#71).
     SetTag { message: Box<Message>, keyword: String, add: bool },
     ToggleThread((u32, String)),
@@ -825,13 +843,20 @@ impl FactoryComponent for MessageRow {
                     }
                     false
                 },
-                connect_prepare[aid = self.msg.account_id, fid = self.msg.folder_id, uid = self.msg.uid, id = self.msg.id, keys = self.drag_keys.clone()] => move |src, _, _| {
+                connect_prepare[aid = self.msg.account_id, fid = self.msg.folder_id, uid = self.msg.uid, id = self.msg.id, keys = self.drag_keys.clone(), threads = self.thread_drag.clone()] => move |src, _, _| {
                     let mut items = drag_selection(src, &keys);
                     // Dragging a row outside the selection (or before the list has
                     // published its keys) moves just that row.
                     if !items.iter().any(|k| k.0 == aid && k.3 == id) {
                         items = vec![(aid, fid, uid, id)];
                     }
+                    // A conversation row stands for its whole thread (#171):
+                    // every member goes along, as with its Delete.
+                    let threads = threads.borrow();
+                    items = items
+                        .into_iter()
+                        .flat_map(|k| threads.get(&(k.0, k.3)).cloned().unwrap_or_else(|| vec![k]))
+                        .collect();
                     let mut payload = String::from("vireo-move");
                     for (a, f, u, i) in items {
                         payload.push_str(&format!("\t{a}\t{f}\t{u}\t{i}"));
@@ -1367,6 +1392,7 @@ impl FactoryComponent for MessageRow {
             thread_unread,
             thread_starred,
             drag_keys,
+            thread_drag,
             show_recipient,
             revealed,
             swipe_reversed,
@@ -1406,6 +1432,7 @@ impl FactoryComponent for MessageRow {
             thread_unread,
             thread_starred,
             drag_keys,
+            thread_drag,
             revealed,
             index: index.clone(),
             palette_target: std::cell::Cell::new(0),
@@ -1468,6 +1495,23 @@ impl FactoryComponent for MessageRow {
                     });
                 });
                 show_context_menu(&btn, (btn.width() / 2) as f64, btn.height() as f64, vec![entries]);
+            }
+            MessageRowInput::OpenMoveMenu(btn) => {
+                // Under the button's middle, in window coordinates: the
+                // picker is anchored on the window by the app.
+                let point = btn.root().and_then(|root| {
+                    let root: gtk::Widget = root.upcast();
+                    btn.compute_point(
+                        &root,
+                        &gtk::graphene::Point::new(btn.width() as f32 / 2.0, btn.height() as f32),
+                    )
+                });
+                let (x, y) = point.map_or((0.0, 0.0), |p| (p.x() as f64, p.y() as f64));
+                let _ = sender.output(MessageRowOutput::MoveTo {
+                    message: Box::new(self.msg.clone()),
+                    x,
+                    y,
+                });
             }
             MessageRowInput::SetStarred(starred) => self.msg.starred = starred,
             MessageRowInput::SetHasAttachment(has) => self.msg.has_attachment = has,
@@ -2088,6 +2132,11 @@ pub struct MessageList {
     /// copy, fresh thread links, a view switch's flag changes) collapse into
     /// one rebuild instead of one each.
     rebuild_queued: Option<bool>,
+    /// A `SelectAndLoad` that arrived while a rebuild was queued: the rows it
+    /// must find are not built yet, so it waits for that rebuild and runs
+    /// after it (a notification click follows the folder's list into the
+    /// channel in the same pass, and the list is only built on the idle).
+    pending_select: Option<(u32, u32)>,
     /// All messages for the current folder (full searchable index).
     all: Vec<Message>,
     /// Every folder's messages (all accounts), supplied by the app while a search
@@ -2145,9 +2194,14 @@ pub struct MessageList {
     /// The shown rows' (account, folder, uid, id) keys, handed to every row so a
     /// drag can carry the whole selection (#23).
     drag_keys: DragKeys,
+    thread_drag: ThreadDragKeys,
     /// Every selected message key, so the whole selection survives list rebuilds
     /// (background syncs) until the user clicks away.
     selected_ids: Vec<(u32, u32)>,
+    /// The conversation the last `Selected` carried, as keys: after a
+    /// rebuild, a selected head whose conversation now holds more is
+    /// reported (`ThreadGrew`) so the reader shows the new reply at once.
+    emitted_thread: Vec<(u32, u32)>,
     /// Selection changes still expected from a reader-driven selection, and what
     /// that selection is. GTK reports each `select_row`/`unselect_all` separately
     /// and a rebuild adds more, so a single flag would be consumed by the first
@@ -2416,6 +2470,9 @@ pub enum MessageListInput {
     /// Select a message by `(account_id, id)` AND load it in the reader — used to
     /// advance after the viewed message is removed by a background sync.
     SelectAndLoad((u32, u32)),
+    /// A row palette's Move to…: open the picker for that row (and, for a
+    /// conversation head, its thread) at window point (x, y).
+    RowMoveTo { message: Box<Message>, x: f64, y: f64 },
 }
 
 #[derive(Debug)]
@@ -2443,6 +2500,14 @@ pub enum MessageListOutput {
     SetTag { message: Box<Message>, keyword: String, add: bool },
     /// A bulk action chosen for every currently-selected message.
     Bulk { action: BulkAction, messages: Vec<Message> },
+    /// "Move To…" from a row's menu: open the folder picker for `messages`
+    /// at window point (`x`, `y`). With `offer_whole`, the first message is
+    /// the clicked conversation row and the rest its members: the picker
+    /// offers moving them all (#171), or just the first.
+    MoveTo { messages: Vec<Message>, offer_whole: bool, x: f64, y: f64 },
+    /// The selected conversation gained a member since it was opened (a
+    /// reply synced in): the head and the whole conversation as it now is.
+    ThreadGrew { message: Message, thread: Vec<Message> },
     /// Delete requested on a lone selected row that heads a whole conversation:
     /// every member of the thread, for the app to confirm and delete.
     DeleteThread { messages: Vec<Message> },
@@ -2717,6 +2782,7 @@ impl SimpleComponent for MessageList {
             retire_scheduled: false,
             row_sigs: Vec::new(),
             rebuild_queued: None,
+            pending_select: None,
             all: Vec::new(),
             search_pool: Vec::new(),
             scope: SearchScope::AllFolders,
@@ -2753,8 +2819,10 @@ impl SimpleComponent for MessageList {
             )),
             thread_links: Vec::new(),
             drag_keys: DragKeys::default(),
+            thread_drag: ThreadDragKeys::default(),
             selected_id: None,
             selected_ids: Vec::new(),
+            emitted_thread: Vec::new(),
             selection_count: 0,
             nav_direction: 1,
             from_reader: 0,
@@ -2868,6 +2936,7 @@ impl SimpleComponent for MessageList {
                 // Folder switch: drop any active search, back to the first page,
                 // scrolled to the top.
                 self.clear_search();
+                self.emitted_thread.clear();
                 self.render_limit = RENDER_CAP;
                 if let Some(s) = &self.scroller {
                     s.vadjustment().set_value(0.0);
@@ -2900,6 +2969,11 @@ impl SimpleComponent for MessageList {
                         self.rebuild();
                     }
                 }
+                // The rows exist now: run the selection that waited for them.
+                if let Some(key) = self.pending_select.take() {
+                    let _ = self.input.send(MessageListInput::SelectAndLoad(key));
+                }
+                self.report_thread_growth(&sender);
             }
             MessageListInput::SetThreadLinks(links) => {
                 if self.thread_links != links {
@@ -3169,6 +3243,8 @@ impl SimpleComponent for MessageList {
                                 .cloned()
                             {
                                 let (thread, solo) = self.conversation_for(&m);
+                                self.emitted_thread =
+                                    thread.iter().map(|t| (t.account_id, t.id)).collect();
                                 let _ = sender.output(MessageListOutput::Selected {
                                     message: m,
                                     thread,
@@ -3652,6 +3728,22 @@ impl SimpleComponent for MessageList {
                 }
             }
             MessageListInput::SelectAndLoad(key) => {
+                // Rows not built yet (the list landed in this same pass):
+                // wait for the queued rebuild rather than find nothing.
+                if self.rebuild_queued.is_some() {
+                    self.pending_select = Some(key);
+                    return;
+                }
+                // A reply inside a conversation has no row of its own: its
+                // thread head does, and opening that shows the whole thread,
+                // the reply included.
+                let key = match self.shown.iter().any(|m| (m.account_id, m.id) == key) {
+                    true => key,
+                    false => match self.thread_head_for(key) {
+                        Some(head) => head,
+                        None => key,
+                    },
+                };
                 if let Some(m) = self.shown.iter().find(|m| (m.account_id, m.id) == key).cloned() {
                     self.selected_id = Some(key);
                     self.selected_ids = vec![key];
@@ -3683,8 +3775,13 @@ impl SimpleComponent for MessageList {
                         });
                     }
                     let (thread, solo) = self.conversation_for(&m);
+                    self.emitted_thread = thread.iter().map(|t| (t.account_id, t.id)).collect();
                     let _ = sender.output(MessageListOutput::Selected { message: m, thread, solo });
                 }
+            }
+            MessageListInput::RowMoveTo { message, x, y } => {
+                let (messages, offer_whole) = self.move_to_messages(&message);
+                let _ = sender.output(MessageListOutput::MoveTo { messages, offer_whole, x, y });
             }
             MessageListInput::ContextMenu { x, y } => {
                 let list = self.rows.widget();
@@ -3785,6 +3882,23 @@ impl MessageList {
         let members = self.thread_members(msg);
         let is_thread_head =
             members.first().is_some_and(|h| (h.account_id, h.id) == (msg.account_id, msg.id));
+        // Move To…: the clicked message, then (for a conversation row) the
+        // rest of its members, at the click's point in the window so the
+        // app can anchor the picker there.
+        let move_entry = {
+            let (messages, offer_whole) = self.move_to_messages(msg);
+            let (wx, wy) = self.window_point(x, y);
+            let s = sender.clone();
+            MenuEntry::new(&i18n("Move To…"), move || {
+                let _ = s.output(MessageListOutput::MoveTo {
+                    messages: messages.clone(),
+                    offer_whole,
+                    x: wx,
+                    y: wy,
+                });
+            })
+            .icon("co.hyprlab.Vireo-folder-symbolic")
+        };
         if is_thread_head {
             let any_unread = members.iter().any(|m| m.unread);
             let s = sender.clone();
@@ -3861,6 +3975,7 @@ impl MessageList {
                     }
                     section.push(item(RowAction::Spam, &i18n("Mark as Spam"), "co.hyprlab.Vireo-mail-mark-junk-symbolic"));
                 }
+                section.push(move_entry);
                 section.push(item(RowAction::Archive, &i18n("Archive"), "co.hyprlab.Vireo-mail-archive-symbolic"));
                 section.push(item(RowAction::Delete, &i18n("Delete"), "co.hyprlab.Vireo-user-trash-symbolic"));
                 section
@@ -3899,6 +4014,29 @@ impl MessageList {
                     }
                     section.push(item(BulkAction::Spam, &i18n("Mark as Spam"), "co.hyprlab.Vireo-mail-mark-junk-symbolic"));
                 }
+                {
+                    // Move To… for the whole selection.
+                    let messages: Vec<Message> = self
+                        .rows
+                        .widget()
+                        .selected_rows()
+                        .iter()
+                        .filter_map(|r| self.shown.get(r.index() as usize).cloned())
+                        .collect();
+                    let (wx, wy) = self.window_point(x, y);
+                    let s = sender.clone();
+                    section.push(
+                        MenuEntry::new(&i18n("Move To…"), move || {
+                            let _ = s.output(MessageListOutput::MoveTo {
+                                messages: messages.clone(),
+                                offer_whole: false,
+                                x: wx,
+                                y: wy,
+                            });
+                        })
+                        .icon("co.hyprlab.Vireo-folder-symbolic"),
+                    );
+                }
                 section.push(item(BulkAction::Archive, &i18n("Archive"), "co.hyprlab.Vireo-mail-archive-symbolic"));
                 section.push(item(BulkAction::Delete, &i18n("Delete"), "co.hyprlab.Vireo-user-trash-symbolic"));
                 section
@@ -3912,6 +4050,61 @@ impl MessageList {
             Some(&format!("{} selected", self.selection_count)),
             sections,
         );
+    }
+
+    /// After a rebuild: a lone selected conversation head whose thread has
+    /// gained members since it was opened (a reply just synced in) is
+    /// reported, so the reader can show the new message without a
+    /// re-selection. Members lost (deleted elsewhere) are left to the
+    /// vanish handling.
+    fn report_thread_growth(&mut self, sender: &ComponentSender<Self>) {
+        if !self.threading || self.selected_ids.len() != 1 {
+            return;
+        }
+        let Some(key) = self.selected_id else { return };
+        let Some(m) = self.shown.iter().find(|m| (m.account_id, m.id) == key).cloned() else {
+            return;
+        };
+        let (thread, solo) = self.conversation_for(&m);
+        if solo || thread.len() <= 1 {
+            return;
+        }
+        let keys: Vec<(u32, u32)> = thread.iter().map(|t| (t.account_id, t.id)).collect();
+        let grew = keys.len() > self.emitted_thread.len()
+            && self.emitted_thread.iter().all(|k| keys.contains(k));
+        if grew {
+            self.emitted_thread = keys;
+            let _ = sender.output(MessageListOutput::ThreadGrew { message: m, thread });
+        }
+    }
+
+    /// What a Move To… on `msg` offers: the message, then — when it heads a
+    /// conversation — the rest of its members, with the whole-conversation
+    /// switch (#171).
+    fn move_to_messages(&self, msg: &Message) -> (Vec<Message>, bool) {
+        let members = self.thread_members(msg);
+        let is_head =
+            members.first().is_some_and(|h| (h.account_id, h.id) == (msg.account_id, msg.id));
+        let mut messages = vec![msg.clone()];
+        let offer_whole = is_head && members.len() > 1;
+        if offer_whole {
+            messages.extend(
+                members.iter().filter(|m| (m.account_id, m.id) != (msg.account_id, msg.id)).cloned(),
+            );
+        }
+        (messages, offer_whole)
+    }
+
+    /// A point in the rows list, in the window's coordinates (the app
+    /// anchors popovers on the window; falls back to the point as given).
+    fn window_point(&self, x: f64, y: f64) -> (f64, f64) {
+        let list = self.rows.widget();
+        list.root()
+            .and_then(|root| {
+                let root: gtk::Widget = root.upcast();
+                list.compute_point(&root, &gtk::graphene::Point::new(x as f32, y as f32))
+            })
+            .map_or((x, y), |p| (p.x() as f64, p.y() as f64))
     }
 
     /// Toolbar count: total matches, noting when more exist than are shown.
@@ -4140,6 +4333,7 @@ impl MessageList {
                         thread_unread: false,
                         thread_starred: false,
                         drag_keys: self.drag_keys.clone(),
+                        thread_drag: self.thread_drag.clone(),
                         show_recipient: self.show_recipient,
                         revealed: false,
                         swipe_reversed: self.swipe_reversed.clone(),
@@ -4446,6 +4640,7 @@ impl MessageList {
                     thread_unread: meta.unread,
                     thread_starred: meta.starred,
                     drag_keys: self.drag_keys.clone(),
+                        thread_drag: self.thread_drag.clone(),
                     show_recipient: self.show_recipient,
                     // A full rebuild never needs a row to mount closed —
                     // that's only for `expand_thread`'s surgical insert.
@@ -4481,6 +4676,9 @@ impl MessageList {
                 }
                 MessageRowOutput::SetTag { message, keyword, add } => {
                     MessageListInput::SetTagFor { message, keyword, add }
+                }
+                MessageRowOutput::MoveTo { message, x, y } => {
+                    MessageListInput::RowMoveTo { message, x, y }
                 }
                 MessageRowOutput::ToggleThread(key) => MessageListInput::ToggleThread(key),
                 MessageRowOutput::PaletteOpened(idx) => MessageListInput::PaletteOpened(idx),
@@ -4670,6 +4868,41 @@ impl MessageList {
             .iter()
             .map(|m| (m.account_id, m.folder_id, m.uid, m.id))
             .collect();
+        // Each conversation head's members, for a drag that starts on it.
+        let mut threads = std::collections::HashMap::new();
+        if self.threading {
+            let source = self.active_source();
+            for m in &self.shown {
+                let key = (m.account_id, m.id);
+                let Some(tkey) = self.msg_thread.get(&key) else { continue };
+                let Some(members) = self.thread_members.get(tkey) else { continue };
+                if members.len() > 1 && members.first() == Some(&key) {
+                    let items: Vec<(u32, u32, u32, u32)> = members
+                        .iter()
+                        .filter_map(|mk| source.iter().find(|x| (x.account_id, x.id) == *mk))
+                        .map(|x| (x.account_id, x.folder_id, x.uid, x.id))
+                        .collect();
+                    threads.insert(key, items);
+                }
+            }
+        }
+        *self.thread_drag.borrow_mut() = threads;
+    }
+
+    /// The shown row (a thread head) whose conversation holds the message
+    /// `key`, when `key` is in the index but has no row of its own.
+    fn thread_head_for(&self, key: (u32, u32)) -> Option<(u32, u32)> {
+        if !self.threading {
+            return None;
+        }
+        let source = self.active_source();
+        source.iter().find(|m| (m.account_id, m.id) == key)?;
+        let keys = compute_thread_keys(source, &self.thread_links);
+        let thread = keys.get(&key)?;
+        self.shown
+            .iter()
+            .find(|m| keys.get(&(m.account_id, m.id)) == Some(thread))
+            .map(|m| (m.account_id, m.id))
     }
 
     /// Every on-screen member of `m`'s conversation (oldest first) — from any

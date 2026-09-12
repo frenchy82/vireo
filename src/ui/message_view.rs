@@ -93,6 +93,10 @@ pub struct MessageView {
     /// document (scroll resets to 0) and can reflow everything above — an
     /// element anchor survives that where a raw pixel offset lands short.
     saved_anchor: Option<(u32, u32, u32)>,
+    /// The saved anchor is a card to reveal (a reply that just arrived):
+    /// the render lands it below the page's top gutter, not flush at the
+    /// top the way a place the user scrolled to is restored.
+    anchor_gutter: bool,
     /// What each message's frame measured last time it was shown, so reopening a
     /// conversation lays out right away instead of settling into place.
     frame_heights: std::collections::HashMap<(u32, u32), u32>,
@@ -411,6 +415,12 @@ pub enum MessageViewInput {
     },
     /// The card's "Add sender to Contacts" button.
     CardContact { account_id: u32, id: u32 },
+    /// A right-click landed on one card (header or body) at webview point
+    /// (x, y): the app shows that message's menu.
+    CardMenuAt { account_id: u32, id: u32, x: f64, y: f64 },
+    /// A card's Move to… button, at page point (x, y) in CSS pixels of a
+    /// page `page_width` wide: the app opens the folder picker there.
+    CardMoveAt { account_id: u32, id: u32, x: f64, y: f64, page_width: f64 },
     /// Preferences: how card actions show — behind the ⋯ toggle, automatically
     /// on hover, or always.
     SetCardActionsMode { hover_toggle: bool, hover_auto: bool },
@@ -447,6 +457,9 @@ pub enum MessageViewInput {
     /// the viewport top and the offset into it — kept so a re-render can put
     /// the reader back where they were.
     ScrollAnchor { account_id: u32, id: u32, offset: u32 },
+    /// Bring this card into view at the next render, with the gutter above
+    /// it (a reply that just arrived for the conversation on screen).
+    RevealCard { account_id: u32, id: u32 },
 }
 
 /// How a click on a conversation card changes the selection, mirroring what the
@@ -481,6 +494,12 @@ pub enum MessageViewOutput {
     },
     /// A card's "Add sender to Contacts" button — add this message's sender.
     ContactSender(Box<Message>),
+    /// A right-click on a card: the app shows the message's full menu (the
+    /// list row's) at window point (x, y).
+    CardMenu { message: Box<Message>, x: f64, y: f64 },
+    /// A card's Move to… button: the folder picker for that message, at
+    /// window point (x, y).
+    CardMoveTo { message: Box<Message>, x: f64, y: f64 },
     /// An email address in a card header was clicked — open a composer to it.
     ComposeTo(String),
     /// "Add to Contacts" picked on an address's right-click menu.
@@ -848,6 +867,7 @@ impl Component for MessageView {
             shown_fingerprint: None,
             did_autoscroll: false,
             saved_anchor: None,
+            anchor_gutter: false,
             frame_heights: std::collections::HashMap::new(),
             instant: false,
             selected_cards: Vec::new(),
@@ -880,6 +900,55 @@ impl Component for MessageView {
                 });
             }
         });
+
+        // A right-click anywhere on a card — its header, or its body frame,
+        // which never reports events to the page — shows the message's own
+        // menu, the same one the list row has. WebKit says what the click
+        // hit but not where the pointer is, so a capture-phase gesture
+        // records the point first; the page is then asked which card holds
+        // it (in CSS pixels: the page may be zoomed under a text scaling
+        // factor, so the widget width recovers the ratio). Links, selected
+        // text, images and editable fields keep WebKit's own menus.
+        {
+            let point = std::rc::Rc::new(std::cell::Cell::new((0.0f64, 0.0f64)));
+            let click = gtk::GestureClick::new();
+            click.set_button(3);
+            click.set_propagation_phase(gtk::PropagationPhase::Capture);
+            {
+                let point = point.clone();
+                click.connect_pressed(move |_, _, x, y| point.set((x, y)));
+            }
+            model.webview.add_controller(click);
+            let menu_sender = sender.clone();
+            model.webview.connect_context_menu(move |view, _menu, hit| {
+                if hit.context_is_link()
+                    || hit.context_is_image()
+                    || hit.context_is_media()
+                    || hit.context_is_editable()
+                    || hit.context_is_selection()
+                {
+                    return false;
+                }
+                let (x, y) = point.get();
+                let width = view.width().max(1);
+                let js = format!(
+                    "(function(){{var r=window.innerWidth/{width};\
+                     var el=document.elementFromPoint({x}*r,{y}*r);\
+                     var m=el&&el.closest?el.closest('.vireo-msg'):null;\
+                     return (m&&m.dataset&&m.dataset.key)||'';}})()"
+                );
+                let s = menu_sender.clone();
+                view.evaluate_javascript(&js, None, None, None::<&gtk::gio::Cancellable>, move |r| {
+                    let key = r.ok().map(|v| v.to_str().to_string()).unwrap_or_default();
+                    if let Some((a, i)) = key.split_once(':') {
+                        if let (Ok(account_id), Ok(id)) = (a.parse::<u32>(), i.parse::<u32>()) {
+                            s.input(MessageViewInput::CardMenuAt { account_id, id, x, y });
+                        }
+                    }
+                });
+                true
+            });
+        }
 
         // Double-click on a conversation header → open that message's window.
         if let Some(ucm) = model.webview.user_content_manager() {
@@ -1015,6 +1084,22 @@ impl Component for MessageView {
                         account_id,
                         id,
                     }),
+                    // Move to… on a card: extra is the button's bottom-centre
+                    // and the page width, in CSS pixels (see "senderinfo").
+                    "moveto" => {
+                        let nums: Vec<f64> = extra
+                            .map(|e| e.split(',').filter_map(|n| n.parse().ok()).collect())
+                            .unwrap_or_default();
+                        if let [x, y, vw] = nums[..] {
+                            open_sender.input(MessageViewInput::CardMoveAt {
+                                account_id,
+                                id,
+                                x,
+                                y,
+                                page_width: vw,
+                            });
+                        }
+                    }
                     "delete" => open_sender.input(MessageViewInput::CardAction {
                         action: RowAction::Delete,
                         account_id,
@@ -1474,6 +1559,44 @@ impl Component for MessageView {
                     });
                 }
             }
+            MessageViewInput::CardMenuAt { account_id, id, x, y } => {
+                let Some(m) = self
+                    .thread
+                    .iter()
+                    .find(|m| m.account_id == account_id && m.id == id)
+                    .cloned()
+                else {
+                    return;
+                };
+                let point = self.webview.root().and_then(|root| {
+                    let root: gtk::Widget = root.upcast();
+                    self.webview
+                        .compute_point(&root, &gtk::graphene::Point::new(x as f32, y as f32))
+                });
+                let (wx, wy) = point.map_or((x, y), |p| (p.x() as f64, p.y() as f64));
+                let _ = sender.output(MessageViewOutput::CardMenu { message: Box::new(m), x: wx, y: wy });
+            }
+            MessageViewInput::CardMoveAt { account_id, id, x, y, page_width } => {
+                let Some(m) = self
+                    .thread
+                    .iter()
+                    .find(|m| m.account_id == account_id && m.id == id)
+                    .cloned()
+                else {
+                    return;
+                };
+                // CSS pixels → widget pixels (the page may be zoomed), then
+                // → window.
+                let ratio = self.webview.width() as f64 / page_width.max(1.0);
+                let (vx, vy) = (x * ratio, y * ratio);
+                let point = self.webview.root().and_then(|root| {
+                    let root: gtk::Widget = root.upcast();
+                    self.webview
+                        .compute_point(&root, &gtk::graphene::Point::new(vx as f32, vy as f32))
+                });
+                let (wx, wy) = point.map_or((vx, vy), |p| (p.x() as f64, p.y() as f64));
+                let _ = sender.output(MessageViewOutput::CardMoveTo { message: Box::new(m), x: wx, y: wy });
+            }
             MessageViewInput::SetCardActionsMode { hover_toggle, hover_auto } => {
                 if self.card_actions_hover != hover_toggle
                     || self.card_actions_auto != hover_auto
@@ -1680,6 +1803,11 @@ impl Component for MessageView {
             }
             MessageViewInput::ScrollAnchor { account_id, id, offset } => {
                 self.saved_anchor = Some((account_id, id, offset));
+                self.anchor_gutter = false;
+            }
+            MessageViewInput::RevealCard { account_id, id } => {
+                self.saved_anchor = Some((account_id, id, 0));
+                self.anchor_gutter = true;
             }
             MessageViewInput::CardContact { account_id, id } => {
                 if let Some(m) = self
@@ -1773,7 +1901,10 @@ impl MessageView {
         let noscroll = if self.did_autoscroll {
             let anchor = self
                 .saved_anchor
-                .map(|(a, i, o)| format!(" data-vireo-anchor=\"{a}:{i}:{o}\""))
+                .map(|(a, i, o)| {
+                    let g = if self.anchor_gutter { ":g" } else { "" };
+                    format!(" data-vireo-anchor=\"{a}:{i}:{o}{g}\"")
+                })
                 .unwrap_or_default();
             format!(" data-vireo-noscroll=\"1\"{anchor}")
         } else {
@@ -1987,7 +2118,7 @@ impl MessageView {
                     acts = if !thread.is_empty() {
                         let key = (m.account_id, m.id);
                         format!(
-                            "<span class=\"vireo-acts\">{}{}{}{}{}{}{}{}{}{}{}</span>",
+                            "<span class=\"vireo-acts\">{}{}{}{}{}{}{}{}{}{}{}{}</span>",
                             // Same order as the reader toolbar and the list's
                             // Actions Palette, View Source closing the line.
                             card_action_button(key, "reply", "mail-reply-sender-symbolic", &i18n("Reply to this message")),
@@ -2020,6 +2151,7 @@ impl MessageView {
                                 id = key.1,
                                 svg = inline_icon_svg("non-starred-symbolic"),
                             ),
+                            card_action_button(key, "moveto", "folder-symbolic", &i18n("Move this message to a folder")),
                             card_action_button(key, "archive", "mail-archive-symbolic", &i18n("Archive this message")),
                             card_action_button(key, "delete", "user-trash-symbolic", &i18n("Delete this message")),
                             card_action_button(key, "spam", "mail-mark-junk-symbolic", &i18n("Mark as Spam")),
@@ -2396,6 +2528,8 @@ impl MessageView {
                .vireo-msg:not(.unread) .vireo-act[data-act=\"toggleread\"] .tr-when-read{{display:inline-flex;}}\
                .vireo-act{{color:inherit;background:none;border:none;border-radius:6px;\
                  padding:5px 8px;cursor:pointer;opacity:0.7;\
+                 display:inline-flex;align-items:center;justify-content:center;\
+                 vertical-align:middle;line-height:0;\
                  transition:opacity 120ms ease,background 120ms ease;}}\
                .vireo-act:hover{{opacity:1;background:rgba(128,128,128,0.18);}}\
                .vireo-act:active{{background:rgba(128,128,128,0.3);}}\
@@ -4226,17 +4360,17 @@ function ready(){if(rdy)return;rdy=true;\
 try{window.webkit.messageHandlers.vireo.postMessage('ready:0:0');}catch(_){}\
 var bd=document.body.dataset;\
 if(bd.vireoNoscroll){var a=(bd.vireoAnchor||'').split(':');\
-if(a.length===3){var el=document.querySelector('.vireo-msg[data-key=\"'+a[0]+':'+a[1]+'\"]');\
-if(el){hold={el:el,off:parseInt(a[2],10)||0};\
+if(a.length>=3){var el=document.querySelector('.vireo-msg[data-key=\"'+a[0]+':'+a[1]+'\"]');\
+if(el){hold={el:el,off:parseInt(a[2],10)||0,g:a[3]==='g'};\
 if(el.querySelector('.vireo-dot'))follow=el;\
 setTimeout(pin,0);}}return;}\
 var ds=document.querySelectorAll('.vireo-msg .vireo-dot');\
 var d=ds.length?ds[0]:null;\
 if(d){var m=d.closest('.vireo-msg');\
-if(m)setTimeout(function(){try{follow=m;m.scrollIntoView({block:'start'});}catch(_){}},0);}\
+if(m)setTimeout(function(){try{follow=m;reveal(m);}catch(_){}},0);}\
 else if(bd.vireoNewest){\
 var nm=document.querySelector('.vireo-msg[data-key=\"'+bd.vireoNewest+'\"]');\
-if(nm)setTimeout(function(){try{follow=nm;nm.scrollIntoView({block:'start'});}catch(_){}},0);}}\
+if(nm)setTimeout(function(){try{follow=nm;reveal(nm);}catch(_){}},0);}}\
 setTimeout(markClipped,0);setTimeout(markClipped,400);\
 if(!pend)ready();\
 for(var i=0;i<fs.length;i++){(function(f){var counted=false;\
@@ -4344,7 +4478,9 @@ var as=document.querySelectorAll('.vireo-act');\
 for(var k=0;k<as.length;k++){as[k].addEventListener('click',function(e){\
 e.stopPropagation();e.preventDefault();reportPos();\
 if(this.dataset.act==='star')this.classList.toggle('on');\
-try{window.webkit.messageHandlers.vireo.postMessage(this.dataset.act+':'+this.dataset.key);}catch(_){}});\
+var extra='';if(this.dataset.act==='moveto'){var br=this.getBoundingClientRect();\
+extra=':'+(br.left+br.width/2)+','+br.bottom+','+window.innerWidth;}\
+try{window.webkit.messageHandlers.vireo.postMessage(this.dataset.act+':'+this.dataset.key+extra);}catch(_){}});\
 as[k].addEventListener('dblclick',function(e){e.stopPropagation();});}\
 });\
 function markClipped(){var as=document.querySelectorAll('.vireo-addr');\
@@ -4431,9 +4567,11 @@ p.textContent=b.dataset.vireoCopied||'Copied';\
 void p.offsetHeight;p.classList.add('on');clearTimeout(p._t);\
 p._t=setTimeout(function(){p.classList.remove('on');},1400);}\
 window.addEventListener('keydown',copySel,true);\
-function chase(){if(!follow)return;try{follow.scrollIntoView({block:'start'});}catch(_){}}\
+function gutter(){try{return parseFloat(getComputedStyle(document.body).paddingTop)||0;}catch(_){return 0;}}\
+function reveal(el){var r=el.getBoundingClientRect();var d=Math.round(r.top-gutter());if(d)window.scrollBy(0,d);}\
+function chase(){if(!follow)return;try{reveal(follow);}catch(_){}}\
 function pin(){if(follow||!hold)return;try{var r=hold.el.getBoundingClientRect();\
-var d=Math.round(r.top+hold.off);if(d)window.scrollBy(0,d);}catch(_){}}\
+var d=Math.round(r.top+hold.off-(hold.g?gutter():0));if(d)window.scrollBy(0,d);}catch(_){}}\
 ['wheel','touchstart','mousedown','keydown'].forEach(function(ev){\
 window.addEventListener(ev,function(){follow=null;hold=null;},{passive:true,capture:true});});\
 window.addEventListener('blur',function(){setTimeout(function(){\

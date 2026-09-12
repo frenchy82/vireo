@@ -28,16 +28,22 @@ const CONTRIBUTORS: &[(&str, &str)] = &[
 // width, #28); its floor lives with the pane in message_list.rs
 // (LIST_MIN_WIDTH).
 
-/// The narrowest the reader pane may be squeezed. The header's actions
-/// collapse into the overflow menu below READER_ACTIONS_BREAKPOINT, so the
-/// floor only needs a usable body width. Kept modest on purpose: the window's
+/// The narrowest the reader pane may be squeezed. The header's right-hand
+/// actions collapse into the overflow menu below READER_ACTIONS_BREAKPOINT
+/// (the left group — Reply … Delete — stays), so the floor only needs a
+/// usable body width plus that left group. Kept modest on purpose: the window's
 /// total minimum width must stay under half of a 1920px screen, or GNOME
 /// refuses to tile the window to the left/right screen edge (it only offers
 /// the top-edge maximize).
 const READER_MIN_WIDTH: i32 = 400;
 
-/// Fallback threshold for folding the reader header's actions into the
-/// overflow menu. Normally the threshold is *measured* at startup from the
+/// How long a read/unread change sent to a worker keeps overriding what the
+/// server reports for its message and folder, should the worker's
+/// confirmation never come (a dropped connection mid-request).
+const PENDING_SEEN_MAX: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Fallback threshold for folding the reader header's right-hand actions
+/// into the overflow menu. Normally the threshold is *measured* at startup from the
 /// real row (see the breakpoint in init) so it tracks the user's decoration
 /// layout; this value only stands in if that measurement comes back empty.
 const READER_ACTIONS_BREAKPOINT: f64 = 490.0;
@@ -51,6 +57,22 @@ const SIDEBAR_RAIL_WIDTH: f64 = 80.0;
 /// the SQLite cache.
 const BODY_CACHE_BUDGET: usize = 64 << 20;
 const ATTACHMENT_CACHE_BUDGET: usize = 128 << 20;
+
+/// The reader header's action buttons and fold breakpoint, kept for
+/// re-packing when the layout changes (see relayout_reader_toolbar).
+struct ReaderToolbarWidgets {
+    buttons: Vec<(config::ToolbarItem, gtk::Widget)>,
+    spinner: gtk::Widget,
+    bin: adw::BreakpointBin,
+    breakpoint: adw::Breakpoint,
+    /// The row's cost with every action button gone (padding, spacing…).
+    base: i32,
+    /// One action button's natural width.
+    button_w: i32,
+    /// The window controls' width (re-measured when the decoration layout
+    /// changes).
+    controls: std::cell::Cell<i32>,
+}
 
 relm4::new_action_group!(WindowActionGroup, "win");
 relm4::new_stateless_action!(AccountsAction, WindowActionGroup, "accounts");
@@ -198,11 +220,17 @@ pub struct AppModel {
     attachments: Vec<Attachment>,
     /// True while the current message's attachments are downloading.
     attachments_loading: bool,
-    /// The reader header's actions are collapsed into the overflow menu
+    /// The reader header's right-hand actions are collapsed into the overflow menu
     /// (pane squeezed under READER_ACTIONS_BREAKPOINT).
     reader_actions_collapsed: bool,
     /// The collapsed header's ⋯ button — the anchor its menu pops from.
     reader_overflow_btn: gtk::Button,
+    /// The reader header's layout: which buttons, which side, what order
+    /// (Settings → Appearance → Toolbar).
+    reader_toolbar: config::ReaderToolbar,
+    /// The header's action buttons and their breakpoint, for re-packing when
+    /// the layout changes. Set once after the view is built.
+    reader_toolbar_widgets: std::cell::OnceCell<ReaderToolbarWidgets>,
     /// The toolbar's tag button (#71) — the anchor its menu pops from.
     reader_tag_btn: gtk::Button,
     /// The reader toolbar's Move To… button (#164): the folder picker
@@ -261,6 +289,12 @@ pub struct AppModel {
     /// (account_id, folder_id) → server-side unread count, accurate beyond the
     /// loaded window (from IMAP STATUS/SEARCH). Drives the sidebar badges.
     folder_unread: HashMap<(u32, u32), u32>,
+    /// Read/unread changes sent to a worker and not stored yet, keyed by
+    /// (account, folder path, uid) → (seen, when sent). The worker serves
+    /// one request at a time, so a folder list or unread count it fetched
+    /// ahead of the STORE still shows the old state; while an entry is
+    /// young the app's own state for that message and folder wins over it.
+    pending_seen: HashMap<(u32, String, u32), (bool, std::time::Instant)>,
     /// The account-list split view, narrowed to icon-only width when collapsed.
     sidebar_split: Option<adw::OverlaySplitView>,
     /// The "Vireo" title label, hidden while the sidebar is collapsed.
@@ -724,8 +758,14 @@ pub enum AppMsg {
     /// A conversation card's own action pill. Reply/Reply all/Forward open the
     /// reader's inline composer (like the toolbar); the rest act like RowAction.
     CardAction { action: RowAction, message: Box<Message> },
+    /// The open conversation gained a member (a reply synced in while it
+    /// was on screen): show it in place, without a re-selection.
+    ThreadGrew { message: Box<Message>, thread: Vec<Message> },
     /// A card's "Add sender to Contacts" button.
     CardContact(Box<Message>),
+    /// A right-click on a reader card: that message's full menu (the list
+    /// row's) at window point (x, y).
+    CardMenu { message: Box<Message>, x: f64, y: f64 },
     /// The reader toolbar's Mark as Read/Unread toggle for the open message.
     ToggleReadCurrent,
     /// A bulk action applied to every selected message.
@@ -746,6 +786,17 @@ pub enum AppMsg {
     /// The reader pane crossed the actions breakpoint (true = collapse the
     /// header's buttons into the overflow menu).
     SetReaderActionsCollapsed(bool),
+    /// A new reader toolbar layout from Settings: save, re-pack, re-fold.
+    SetReaderToolbar(config::ReaderToolbar),
+    /// Showcase only: open a drop gap in the Settings toolbar editor.
+    ShowcaseToolbarGap { zone: usize, index: usize },
+    /// A right-click on the reader header's empty space: the menu that
+    /// leads to the toolbar editor.
+    ReaderToolbarMenu { x: f64, y: f64 },
+    /// Open Settings on the Appearance page (its Toolbar section).
+    CustomizeToolbar,
+    /// The window controls were re-measured (decoration layout changed).
+    ReaderControlsChanged(i32),
     /// The collapsed header's ⋯ button was clicked — pop its menu.
     ReaderOverflowMenu,
     SetGravatar(bool),
@@ -1002,8 +1053,16 @@ pub enum AppMsg {
     /// Open the Move To… folder picker (#164) for the reader's target, or
     /// the whole list selection.
     MoveToMenu,
-    /// The picker's answer: file the target or selection into `dest`.
-    MoveSelectionTo { account_id: u32, dest: String },
+    /// The picker's answer: file the target or selection into `dest` —
+    /// or, with `whole`, the open conversation entire (#171).
+    MoveSelectionTo { account_id: u32, dest: String, whole: bool },
+    /// "Move To…" from the message list's right-click menu: open the
+    /// picker at window point (`x`, `y`) for `messages` (with
+    /// `offer_whole`, a conversation row and its members: the picker
+    /// offers all of them, or the row's own message alone).
+    ListMoveTo { messages: Vec<Message>, offer_whole: bool, x: f64, y: f64 },
+    /// That picker's answer.
+    MoveMessagesTo { account_id: u32, dest: String, messages: Vec<Message> },
     /// Second stage of ImportSettings: the chosen file, applied on a clean
     /// main-loop turn (working inside the chooser's completion callback froze
     /// the app when the confirmation dialog presented there).
@@ -1036,6 +1095,9 @@ pub enum AppMsg {
     /// From a per-folder IDLE watcher, which knows its folder only by path —
     /// folder ids are positional and may have shifted since it was spawned.
     FolderUnreadByPath { account_id: u32, path: String, unread: u32 },
+    /// The worker stored (or failed to store) a read/unread change the app
+    /// had applied ahead of it.
+    SeenSettled { account_id: u32, path: String, uid: u32 },
     /// `path` is the folder the body was read from — a UID only identifies a
     /// message within its own folder, so applying a body to a message means
     /// checking the folder too.
@@ -1400,7 +1462,7 @@ impl SimpleComponent for AppModel {
                                     set_tooltip_text: Some(i18n("Edit this message").as_str()),
                                     add_css_class: "flat",
                                     #[watch]
-                                    set_visible: model.showing_outbox && !model.reader_actions_collapsed
+                                    set_visible: model.showing_outbox
                                         && model.reader_compose.is_none(),
                                     #[watch]
                                     set_sensitive: model.current.is_some(),
@@ -1411,7 +1473,7 @@ impl SimpleComponent for AppModel {
                                     set_tooltip_text: Some(i18n("Try to send this message now").as_str()),
                                     add_css_class: "flat",
                                     #[watch]
-                                    set_visible: model.showing_outbox && !model.reader_actions_collapsed
+                                    set_visible: model.showing_outbox
                                         && model.reader_compose.is_none(),
                                     #[watch]
                                     set_sensitive: model.current.is_some(),
@@ -1421,17 +1483,24 @@ impl SimpleComponent for AppModel {
                                     set_label: &i18n("Send all"),
                                     add_css_class: "flat",
                                     #[watch]
-                                    set_visible: model.showing_outbox && !model.reader_actions_collapsed
+                                    set_visible: model.showing_outbox
                                         && model.reader_compose.is_none(),
                                     connect_clicked[sender] => move |_| sender.input(AppMsg::RetryAllOutbox),
                                 },
+                                // ---- The action buttons. Declared here in the
+                                // default order, then re-packed in init (and on
+                                // every change) in the user's saved order — see
+                                // relayout_reader_toolbar. The left group stays
+                                // at every width; the right group folds into
+                                // the ⋯ overflow. Default left group: Reply,
+                                // Reply All, Forward, Star, Archive, Delete.
+                                #[name = "tb_reply"]
                                 pack_start = &gtk::Button {
                                     set_icon_name: "co.hyprlab.Vireo-mail-reply-sender-symbolic",
                                     set_tooltip_text: Some(i18n("Reply").as_str()),
                                     add_css_class: "flat",
                                     #[watch]
-                                    set_visible: !model.showing_outbox && !model.reader_actions_collapsed
-                                        && model.reader_compose.is_none(),
+                                    set_visible: model.toolbar_visible(config::ToolbarItem::Reply),
                                     // In a conversation these act on the one
                                     // highlighted card; with none (or several)
                                     // highlighted they grey out — no way to say
@@ -1440,29 +1509,140 @@ impl SimpleComponent for AppModel {
                                     set_sensitive: model.reply_target().is_some(),
                                     connect_clicked[sender] => move |_| sender.input(AppMsg::Reply),
                                 },
+                                #[name = "tb_reply_all"]
                                 pack_start = &gtk::Button {
                                     set_icon_name: "co.hyprlab.Vireo-mail-reply-all-symbolic",
                                     set_tooltip_text: Some(i18n("Reply All").as_str()),
                                     add_css_class: "flat",
                                     #[watch]
-                                    set_visible: !model.showing_outbox && !model.reader_actions_collapsed
-                                        && model.reader_compose.is_none(),
+                                    set_visible: model.toolbar_visible(config::ToolbarItem::ReplyAll),
                                     #[watch]
                                     set_sensitive: model.reply_target().is_some(),
                                     connect_clicked[sender] => move |_| sender.input(AppMsg::ReplyAll),
                                 },
+                                #[name = "tb_forward"]
                                 pack_start = &gtk::Button {
                                     set_icon_name: "co.hyprlab.Vireo-mail-forward-symbolic",
                                     set_tooltip_text: Some(i18n("Forward").as_str()),
                                     add_css_class: "flat",
                                     #[watch]
-                                    set_visible: !model.showing_outbox && !model.reader_actions_collapsed
-                                        && model.reader_compose.is_none(),
+                                    set_visible: model.toolbar_visible(config::ToolbarItem::Forward),
                                     #[watch]
                                     set_sensitive: model.reply_target().is_some(),
                                     connect_clicked[sender] => move |_| sender.input(AppMsg::Forward),
                                 },
+                                #[name = "tb_star"]
                                 pack_start = &gtk::Button {
+                                    set_tooltip_text: Some(i18n("Flag").as_str()),
+                                    // One glyph in both states, like every other
+                                    // icon; the flagged state carries colour only.
+                                    set_icon_name: "co.hyprlab.Vireo-non-starred-symbolic",
+                                    #[watch]
+                                    set_css_classes: if model.toolbar_star_lit() {
+                                        &["flat", "star-active"]
+                                    } else {
+                                        &["flat"]
+                                    },
+                                    #[watch]
+                                    set_visible: model.toolbar_visible(config::ToolbarItem::Star),
+                                    #[watch]
+                                    set_sensitive: model.reply_target().is_some(),
+                                    connect_clicked[sender] => move |_| sender.input(AppMsg::ToggleStar),
+                                },
+                                #[name = "tb_archive"]
+                                pack_start = &gtk::Button {
+                                    set_icon_name: "co.hyprlab.Vireo-mail-archive-symbolic",
+                                    set_tooltip_text: Some(i18n("Archive").as_str()),
+                                    add_css_class: "flat",
+                                    #[watch]
+                                    set_visible: model.toolbar_visible(config::ToolbarItem::Archive),
+                                    #[watch]
+                                    set_sensitive: model.reply_target().is_some(),
+                                    connect_clicked[sender] => move |_| sender.input(AppMsg::Archive),
+                                },
+                                #[name = "tb_delete"]
+                                pack_start = &gtk::Button {
+                                    set_icon_name: "co.hyprlab.Vireo-user-trash-symbolic",
+                                    #[watch]
+                                    set_tooltip_text: Some(&model.delete_tooltip()),
+                                    add_css_class: "flat",
+                                    // Shown for the Outbox too (a queued message
+                                    // can still be binned) — see toolbar_visible.
+                                    #[watch]
+                                    set_visible: model.toolbar_visible(config::ToolbarItem::Delete),
+                                    #[watch]
+                                    set_sensitive: model.reply_target().is_some()
+                                        || model.list_selection.len() > 1,
+                                    connect_clicked[sender] => move |_| sender.input(AppMsg::Delete),
+                                },
+                                // ---- Default right group, left to right: Tags,
+                                // Read/Unread, Spam, Move To, Find, Print.
+                                // (The sender-check seal lives in the
+                                // message header now — #88; no Add-to-Contacts
+                                // button either: right-click any address in a
+                                // message header.)
+                                #[name = "tb_print"]
+                                pack_end = &gtk::Button {
+                                    set_icon_name: "co.hyprlab.Vireo-printer-symbolic",
+                                    set_tooltip_text: Some(i18n("Print Preview (Ctrl+Shift+P)").as_str()),
+                                    add_css_class: "flat",
+                                    #[watch]
+                                    set_visible: model.toolbar_visible(config::ToolbarItem::Print),
+                                    #[watch]
+                                    set_sensitive: model.current.is_some(),
+                                    // The preview, not the print dialog: the button
+                                    // shows what will come out and prints from
+                                    // there, so nobody spends paper to find out.
+                                    connect_clicked[sender] => move |_| sender.input(AppMsg::PrintPreview),
+                                },
+                                // In-message find (#103).
+                                #[name = "tb_find"]
+                                pack_end = &gtk::Button {
+                                    set_icon_name: "co.hyprlab.Vireo-loupe-with-arrow-symbolic",
+                                    set_tooltip_text: Some(i18n("Find in message (Ctrl+F)").as_str()),
+                                    add_css_class: "flat",
+                                    // Greyed out, not hidden, with no message
+                                    // open: the toolbar must not shift.
+                                    #[watch]
+                                    set_visible: model.toolbar_visible(config::ToolbarItem::Find),
+                                    #[watch]
+                                    set_sensitive: model.current.is_some(),
+                                    connect_clicked[sender] => move |_| {
+                                        sender.input(AppMsg::OpenReaderFind);
+                                    },
+                                },
+                                // Move To… (#164): a folder picker for the
+                                // target, or the whole list selection.
+                                #[name = "tb_move"]
+                                pack_end = &gtk::Box {
+                                    #[local_ref]
+                                    reader_move_btn -> gtk::Button {
+                                        #[watch]
+                                        set_visible: model.toolbar_visible(config::ToolbarItem::MoveTo),
+                                        #[watch]
+                                        set_sensitive: model.reply_target().is_some()
+                                            || model.list_selection.len() > 1,
+                                    },
+                                },
+                                #[name = "tb_spam"]
+                                pack_end = &gtk::Button {
+                                    #[watch]
+                                    set_icon_name: if model.target_in_junk() {
+                                        "co.hyprlab.Vireo-mail-mark-notjunk-symbolic"
+                                    } else {
+                                        "co.hyprlab.Vireo-mail-mark-junk-symbolic"
+                                    },
+                                    #[watch]
+                                    set_tooltip_text: Some(if model.target_in_junk() { i18n("Not Spam") } else { i18n("Mark as Spam") }.as_str()),
+                                    add_css_class: "flat",
+                                    #[watch]
+                                    set_visible: model.toolbar_visible(config::ToolbarItem::Spam),
+                                    #[watch]
+                                    set_sensitive: model.reply_target().is_some(),
+                                    connect_clicked[sender] => move |_| sender.input(AppMsg::MarkSpam),
+                                },
+                                #[name = "tb_read"]
+                                pack_end = &gtk::Button {
                                     add_css_class: "flat",
                                     #[watch]
                                     set_visible: !model.showing_outbox && !model.reader_actions_collapsed
@@ -1481,131 +1661,19 @@ impl SimpleComponent for AppModel {
                                     set_sensitive: model.reply_target().is_some(),
                                     connect_clicked[sender] => move |_| sender.input(AppMsg::ToggleReadCurrent),
                                 },
-                                pack_start = &gtk::Button {
-                                    set_tooltip_text: Some(i18n("Flag").as_str()),
-                                    // One glyph in both states, like every other
-                                    // icon; the flagged state carries colour only.
-                                    set_icon_name: "co.hyprlab.Vireo-non-starred-symbolic",
-                                    #[watch]
-                                    set_css_classes: if model.toolbar_star_lit() {
-                                        &["flat", "star-active"]
-                                    } else {
-                                        &["flat"]
-                                    },
-                                    #[watch]
-                                    set_visible: !model.showing_outbox && !model.reader_actions_collapsed
-                                        && model.reader_compose.is_none(),
-                                    #[watch]
-                                    set_sensitive: model.reply_target().is_some(),
-                                    connect_clicked[sender] => move |_| sender.input(AppMsg::ToggleStar),
-                                },
-                                // Tags (#71), right of the star: a menu of the
-                                // tags, ticked where the target carries them.
-                                // Only once a tag exists.
-                                pack_start = &gtk::Box {
+                                // Tags (#71): a menu of the tags, ticked where
+                                // the target carries them. Only once a tag exists.
+                                #[name = "tb_tags"]
+                                pack_end = &gtk::Box {
                                     #[local_ref]
                                     reader_tag_btn -> gtk::Button {
                                         #[watch]
-                                        set_visible: !model.showing_outbox && !model.reader_actions_collapsed
-                                            && model.reader_compose.is_none() && !model.tags.is_empty(),
+                                        set_visible: model.toolbar_visible(config::ToolbarItem::Tags) && !model.tags.is_empty(),
                                         #[watch]
                                         set_sensitive: model.reply_target().is_some(),
                                     },
                                 },
-                                // In-message find (#103), right of the star.
-                                // (No Add-to-Contacts button here: the action
-                                // lives on the address itself — right-click any
-                                // address in a message header.)
-                                // pack_end fills right-to-left, so these are declared
-                                // in reverse of their visual order. Left to right:
-                                // Archive, Delete, Spam, Move To, Find, Print. (The
-                                // sender-check seal lives in the message header
-                                // now — #88.)
-                                                                pack_end = &gtk::Button {
-                                    set_icon_name: "co.hyprlab.Vireo-printer-symbolic",
-                                    set_tooltip_text: Some(i18n("Print Preview (Ctrl+Shift+P)").as_str()),
-                                    add_css_class: "flat",
-                                    #[watch]
-                                    set_visible: !model.showing_outbox && !model.reader_actions_collapsed
-                                        && model.reader_compose.is_none(),
-                                    #[watch]
-                                    set_sensitive: model.current.is_some(),
-                                    // The preview, not the print dialog: the button
-                                    // shows what will come out and prints from
-                                    // there, so nobody spends paper to find out.
-                                    connect_clicked[sender] => move |_| sender.input(AppMsg::PrintPreview),
-                                },
-                                pack_end = &gtk::Button {
-                                    set_icon_name: "co.hyprlab.Vireo-loupe-with-arrow-symbolic",
-                                    set_tooltip_text: Some(i18n("Find in message (Ctrl+F)").as_str()),
-                                    add_css_class: "flat",
-                                    // Greyed out, not hidden, with no message
-                                    // open: the toolbar must not shift.
-                                    #[watch]
-                                    set_visible: !model.showing_outbox
-                                        && model.reader_compose.is_none()
-                                        && !model.reader_actions_collapsed,
-                                    #[watch]
-                                    set_sensitive: model.current.is_some(),
-                                    connect_clicked[sender] => move |_| {
-                                        sender.input(AppMsg::OpenReaderFind);
-                                    },
-                                },
-                                // Move To… (#164), between Find and Spam: a
-                                // folder picker for the target, or the whole
-                                // list selection.
-                                pack_end = &gtk::Box {
-                                    #[local_ref]
-                                    reader_move_btn -> gtk::Button {
-                                        #[watch]
-                                        set_visible: !model.showing_outbox && !model.reader_actions_collapsed
-                                            && model.reader_compose.is_none(),
-                                        #[watch]
-                                        set_sensitive: model.reply_target().is_some()
-                                            || model.list_selection.len() > 1,
-                                    },
-                                },
-                                pack_end = &gtk::Button {
-                                    #[watch]
-                                    set_icon_name: if model.target_in_junk() {
-                                        "co.hyprlab.Vireo-mail-mark-notjunk-symbolic"
-                                    } else {
-                                        "co.hyprlab.Vireo-mail-mark-junk-symbolic"
-                                    },
-                                    #[watch]
-                                    set_tooltip_text: Some(if model.target_in_junk() { i18n("Not Spam") } else { i18n("Mark as Spam") }.as_str()),
-                                    add_css_class: "flat",
-                                    #[watch]
-                                    set_visible: !model.showing_outbox && !model.reader_actions_collapsed
-                                        && model.reader_compose.is_none(),
-                                    #[watch]
-                                    set_sensitive: model.reply_target().is_some(),
-                                    connect_clicked[sender] => move |_| sender.input(AppMsg::MarkSpam),
-                                },
-                                pack_end = &gtk::Button {
-                                    set_icon_name: "co.hyprlab.Vireo-user-trash-symbolic",
-                                    #[watch]
-                                    set_tooltip_text: Some(&model.delete_tooltip()),
-                                    add_css_class: "flat",
-                                    #[watch]
-                                    set_visible: !model.reader_actions_collapsed
-                                        && model.reader_compose.is_none(),
-                                    #[watch]
-                                    set_sensitive: model.reply_target().is_some()
-                                        || model.list_selection.len() > 1,
-                                    connect_clicked[sender] => move |_| sender.input(AppMsg::Delete),
-                                },
-                                pack_end = &gtk::Button {
-                                    set_icon_name: "co.hyprlab.Vireo-mail-archive-symbolic",
-                                    set_tooltip_text: Some(i18n("Archive").as_str()),
-                                    add_css_class: "flat",
-                                    #[watch]
-                                    set_visible: !model.showing_outbox && !model.reader_actions_collapsed
-                                        && model.reader_compose.is_none(),
-                                    #[watch]
-                                    set_sensitive: model.reply_target().is_some(),
-                                    connect_clicked[sender] => move |_| sender.input(AppMsg::Archive),
-                                },
+                                #[name = "tb_spinner"]
                                 pack_end = &gtk::Spinner {
                                     set_valign: gtk::Align::Center,
                                     set_tooltip_text: Some(i18n("Downloading attachments…").as_str()),
@@ -1885,6 +1953,9 @@ impl SimpleComponent for AppModel {
                     MessageListOutput::DeleteThread { messages } => {
                         AppMsg::DeleteThread(messages)
                     }
+                    MessageListOutput::ThreadGrew { message, thread } => {
+                        AppMsg::ThreadGrew { message: Box::new(message), thread }
+                    }
                     MessageListOutput::CountChanged(text) => AppMsg::ListCount(text),
                     MessageListOutput::Activated { message, thread } => {
                         AppMsg::OpenMessageWindow { message, thread }
@@ -1897,6 +1968,9 @@ impl SimpleComponent for AppModel {
                     }
                     MessageListOutput::Bulk { action, messages } => {
                         AppMsg::Bulk { action, messages }
+                    }
+                    MessageListOutput::MoveTo { messages, offer_whole, x, y } => {
+                        AppMsg::ListMoveTo { messages, offer_whole, x, y }
                     }
                     MessageListOutput::SelectionCleared => AppMsg::ClearReader,
                     MessageListOutput::SearchActive(active) => AppMsg::SearchActive(active),
@@ -1914,6 +1988,15 @@ impl SimpleComponent for AppModel {
                         AppMsg::CardAction { action, message }
                     }
                     MessageViewOutput::ContactSender(m) => AppMsg::CardContact(m),
+                    MessageViewOutput::CardMenu { message, x, y } => {
+                        AppMsg::CardMenu { message, x, y }
+                    }
+                    MessageViewOutput::CardMoveTo { message, x, y } => AppMsg::ListMoveTo {
+                        messages: vec![*message],
+                        offer_whole: false,
+                        x,
+                        y,
+                    },
                     MessageViewOutput::MarkSeen { account_id, id } => {
                         AppMsg::ThreadMessageSeen { account_id, id }
                     }
@@ -2094,6 +2177,8 @@ impl SimpleComponent for AppModel {
             lightbox_scroller: None,
             attachments_loading: false,
             reader_actions_collapsed: false,
+            reader_toolbar: config::load_reader_toolbar(),
+            reader_toolbar_widgets: std::cell::OnceCell::new(),
             reader_overflow_btn: {
                 let b = gtk::Button::from_icon_name(
                     "co.hyprlab.Vireo-view-more-horizontal-symbolic",
@@ -2133,6 +2218,7 @@ impl SimpleComponent for AppModel {
             related_id_seq: u32::MAX,
             related_ids: HashMap::new(),
             folder_unread: HashMap::new(),
+            pending_seen: HashMap::new(),
             sidebar_split: None,
             app_title: None,
             sidebar_menu: None,
@@ -2403,6 +2489,35 @@ impl SimpleComponent for AppModel {
         let reader_move_btn = model.reader_move_btn.clone();
         let widgets = view_output!();
         let _ = model.reader_header.set(widgets.reader_header.clone());
+        // Right-click on the header's empty space (not a button) offers
+        // the way to the toolbar editor.
+        {
+            let click = gtk::GestureClick::new();
+            click.set_button(3);
+            // Capture phase: the header's own window handle (a child, so
+            // earlier in the bubble phase) would otherwise take the click
+            // for the compositor's window menu and never let it through.
+            click.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let header: gtk::Widget = widgets.reader_header.clone().upcast();
+            let s = sender.input_sender().clone();
+            click.connect_pressed(move |g, _, x, y| {
+                // Anything clickable under the pointer keeps its own
+                // right-click (or lack of one).
+                let mut w = header.pick(x, y, gtk::PickFlags::DEFAULT);
+                while let Some(cur) = w {
+                    if cur == header {
+                        break;
+                    }
+                    if cur.is::<gtk::Button>() || cur.is::<gtk::WindowControls>() {
+                        return;
+                    }
+                    w = cur.parent();
+                }
+                g.set_state(gtk::EventSequenceState::Claimed);
+                let _ = s.send(AppMsg::ReaderToolbarMenu { x, y });
+            });
+            widgets.reader_header.add_controller(click);
+        }
         // Collapse the reader header's actions into the overflow menu when the
         // pane can no longer fit the full row — squeezing it further must never
         // push the window controls off the right edge. The threshold is
@@ -2430,23 +2545,37 @@ impl SimpleComponent for AppModel {
             let full = header.measure(gtk::Orientation::Horizontal, -1).1;
             let mut controls = 0;
             measure_controls(&header, &mut controls);
-            // The actions' share of the row is layout-independent; slack keeps
-            // the fold a step ahead of an actual squeeze.
-            let actions = full - controls;
-            let threshold = move |controls: i32| {
-                if full <= 0 {
-                    READER_ACTIONS_BREAKPOINT
-                } else {
-                    (actions + controls) as f64 + 24.0
+            use config::ToolbarItem as T;
+            let buttons: Vec<(T, gtk::Widget)> = vec![
+                (T::Reply, widgets.tb_reply.clone().upcast()),
+                (T::ReplyAll, widgets.tb_reply_all.clone().upcast()),
+                (T::Forward, widgets.tb_forward.clone().upcast()),
+                (T::Star, widgets.tb_star.clone().upcast()),
+                (T::Archive, widgets.tb_archive.clone().upcast()),
+                (T::Delete, widgets.tb_delete.clone().upcast()),
+                (T::Spam, widgets.tb_spam.clone().upcast()),
+                (T::ReadUnread, widgets.tb_read.clone().upcast()),
+                (T::Tags, widgets.tb_tags.clone().upcast()),
+                (T::MoveTo, widgets.tb_move.clone().upcast()),
+                (T::Find, widgets.tb_find.clone().upcast()),
+                (T::Print, widgets.tb_print.clone().upcast()),
+            ];
+            // One button's cost, from the buttons themselves (a hidden one —
+            // Tags before any tag exists — measures 0 and is skipped); what
+            // is left of the row after them and the controls is the base.
+            let mut visible_sum = 0;
+            let mut button_w = 0;
+            for (_, w) in &buttons {
+                let nat = w.measure(gtk::Orientation::Horizontal, -1).1;
+                if nat > 0 {
+                    visible_sum += nat;
+                    button_w = button_w.max(nat);
                 }
-            };
-            tracing::info!(
-                "reader toolbar: actions {actions}px + controls {controls}px → collapse below {:.0}px",
-                threshold(controls)
-            );
+            }
+            let base = if full <= 0 { 0 } else { full - controls - visible_sum };
             let bp = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
                 adw::BreakpointConditionLengthType::MaxWidth,
-                threshold(controls),
+                READER_ACTIONS_BREAKPOINT,
                 adw::LengthUnit::Px,
             ));
             let s = sender.input_sender().clone();
@@ -2458,24 +2587,28 @@ impl SimpleComponent for AppModel {
                 let _ = s.send(AppMsg::SetReaderActionsCollapsed(false));
             });
             widgets.reader_bin.add_breakpoint(bp.clone());
+            let _ = model.reader_toolbar_widgets.set(ReaderToolbarWidgets {
+                buttons,
+                spinner: widgets.tb_spinner.clone().upcast(),
+                bin: widgets.reader_bin.clone(),
+                breakpoint: bp,
+                base,
+                button_w,
+                controls: std::cell::Cell::new(controls),
+            });
+            // Packs the saved order and sets the real threshold.
+            model.relayout_reader_toolbar();
             if let Some(settings) = gtk::Settings::default() {
+                let s = sender.input_sender().clone();
                 settings.connect_notify_local(Some("gtk-decoration-layout"), move |_, _| {
                     // Re-measure in an idle: the headerbar's own controls
                     // rebuild on this same notify, in unspecified order.
-                    let bp = bp.clone();
                     let header = header.clone();
+                    let s = s.clone();
                     gtk::glib::idle_add_local_once(move || {
                         let mut controls = 0;
                         measure_controls(&header, &mut controls);
-                        tracing::info!(
-                            "reader toolbar: decoration layout changed, controls {controls}px → collapse below {:.0}px",
-                            threshold(controls)
-                        );
-                        bp.set_condition(Some(&adw::BreakpointCondition::new_length(
-                            adw::BreakpointConditionLengthType::MaxWidth,
-                            threshold(controls),
-                            adw::LengthUnit::Px,
-                        )));
+                        let _ = s.send(AppMsg::ReaderControlsChanged(controls));
                     });
                 });
             }
@@ -2661,70 +2794,32 @@ impl SimpleComponent for AppModel {
             });
         }
         // Pointer tracking drives the hover peek: with the hover-expand
-        // preference on, entering the docked rail floats the panel out; and
-        // once the cursor has been out of both the rail and the panel for a
-        // second, an open peek folds back on its own (however it was opened).
-        // Crossing from the rail into the panel arms and then cancels the
-        // same timer, so it stays open. The handlers fire in every mode —
-        // the guards in the AppMsg handlers keep them meaningless outside a
-        // rail.
-        {
-            let pending: std::rc::Rc<std::cell::RefCell<Option<gtk::glib::SourceId>>> =
-                std::rc::Rc::new(std::cell::RefCell::new(None));
-            let panes = [
-                (widgets.sidebar_split.sidebar(), true),
-                (widgets.peek_split.sidebar(), false),
-            ];
-            for (pane, is_rail) in panes {
-                let Some(pane) = pane else { continue };
-                let motion = gtk::EventControllerMotion::new();
-                let armed = std::rc::Rc::new(std::cell::Cell::new(false));
-                {
-                    let s = sender.input_sender().clone();
-                    let pending = pending.clone();
-                    let armed = armed.clone();
-                    motion.connect_enter(move |_, _, _| {
-                        if let Some(prev) = pending.borrow_mut().take() {
-                            prev.remove();
-                        }
-                        armed.set(true);
-                    });
-                }
-                if is_rail {
-                    // Hover-open waits for the pointer to actually move over
-                    // the rail. GTK also synthesises an "enter" when the rail
-                    // reappears under a resting pointer as the panel slides
-                    // away — opening on that would fold and float forever.
-                    let s = sender.input_sender().clone();
-                    let armed = armed.clone();
-                    motion.connect_motion(move |_, _, _| {
-                        if armed.replace(false) {
-                            let _ = s.send(AppMsg::SidebarHoverEnter);
-                        }
-                    });
-                }
-                {
-                    let s = sender.input_sender().clone();
-                    let pending = pending.clone();
-                    motion.connect_leave(move |_| {
-                        let timer = gtk::glib::timeout_add_local_once(
-                            std::time::Duration::from_secs(1),
-                            {
-                                let s = s.clone();
-                                let pending = pending.clone();
-                                move || {
-                                    pending.borrow_mut().take();
-                                    let _ = s.send(AppMsg::SidebarPeekDismissed);
-                                }
-                            },
-                        );
-                        if let Some(prev) = pending.borrow_mut().replace(timer) {
-                            prev.remove();
-                        }
-                    });
-                }
-                pane.add_controller(motion);
+        // preference on, moving the pointer over the docked rail floats the
+        // panel out. The peek never folds back on its own — the pointer
+        // leaving used to arm a one-second dismissal, but the panel's menu
+        // popover is its own surface, so merely opening it counted as
+        // leaving and the panel slid away under the menu. Now only a click
+        // outside the panel (the scrim), a swipe, or a navigation closes it.
+        // The handler fires in every mode — the guards in the AppMsg handler
+        // keep it meaningless outside a rail.
+        if let Some(rail) = widgets.sidebar_split.sidebar() {
+            let motion = gtk::EventControllerMotion::new();
+            let armed = std::rc::Rc::new(std::cell::Cell::new(false));
+            {
+                let armed = armed.clone();
+                motion.connect_enter(move |_, _, _| armed.set(true));
             }
+            // Hover-open waits for the pointer to actually move over the
+            // rail. GTK also synthesises an "enter" when the rail reappears
+            // under a resting pointer as the panel slides away — opening on
+            // that would fold and float forever.
+            let s = sender.input_sender().clone();
+            motion.connect_motion(move |_, _, _| {
+                if armed.replace(false) {
+                    let _ = s.send(AppMsg::SidebarHoverEnter);
+                }
+            });
+            rail.add_controller(motion);
         }
         model.sidebar_split = Some(widgets.sidebar_split.clone());
         model.peek_split = Some(widgets.peek_split.clone());
@@ -3166,6 +3261,42 @@ impl SimpleComponent for AppModel {
                         let _ = ml.send(MessageListInput::ContextMenu { x: 120.0, y: 40.0 });
                     });
                 }
+                // VIREO_SHOWCASE_TOOLBAR_GAP=<zone>:<index> opens a drop gap
+                // in the Settings toolbar editor at 6s (pair with
+                // VIREO_SHOWCASE_SETTINGS=appearance), as a hovering drag
+                // would.
+                if let Ok(spec) = std::env::var("VIREO_SHOWCASE_TOOLBAR_GAP") {
+                    if let Some((z, i)) = spec.split_once(':') {
+                        if let (Ok(zone), Ok(index)) = (z.parse::<usize>(), i.parse::<usize>()) {
+                            let s = sender.input_sender().clone();
+                            gtk::glib::timeout_add_seconds_local_once(6, move || {
+                                let _ = s.send(AppMsg::ShowcaseToolbarGap { zone, index });
+                            });
+                        }
+                    }
+                }
+                // VIREO_SHOWCASE_TOOLBAR_MENU=1 opens the header's right-click
+                // menu (Customize Toolbar…) at 5s, as a click on its empty
+                // middle would.
+                if std::env::var("VIREO_SHOWCASE_TOOLBAR_MENU").is_ok() {
+                    let s = sender.input_sender().clone();
+                    let header: gtk::Widget = widgets.reader_header.clone().upcast();
+                    gtk::glib::timeout_add_seconds_local_once(5, move || {
+                        let _ = s.send(AppMsg::ReaderToolbarMenu {
+                            x: header.width() as f64 / 2.0,
+                            y: header.height() as f64 / 2.0,
+                        });
+                    });
+                }
+                // VIREO_SHOWCASE_READER_MENU=1 opens the reader header's ⋯
+                // overflow menu at 5s (pair with VIREO_SHOWCASE_MENU to
+                // capture it; the window must be narrow enough to collapse).
+                if std::env::var("VIREO_SHOWCASE_READER_MENU").is_ok() {
+                    let s = sender.input_sender().clone();
+                    gtk::glib::timeout_add_seconds_local_once(5, move || {
+                        let _ = s.send(AppMsg::ReaderOverflowMenu);
+                    });
+                }
                 // VIREO_SHOWCASE_MOVE=1 opens the Move To… picker at 5s
                 // (it captures itself a second later).
                 if std::env::var("VIREO_SHOWCASE_MOVE").is_ok() {
@@ -3532,97 +3663,7 @@ impl SimpleComponent for AppModel {
             }
 
             AppMsg::UnifiedSelected(view) => {
-                let t_open = std::time::Instant::now();
-                self.close_sidebar_peek();
-                self.mirror_selection(match view {
-                    UnifiedView::Kind(FolderKind::Inbox) => crate::ui::sidebar::Sel::Unified,
-                    UnifiedView::Kind(kind) => crate::ui::sidebar::Sel::UnifiedKind(kind),
-                    UnifiedView::Filtered => crate::ui::sidebar::Sel::UnifiedFiltered,
-                });
-                self.leave_gallery();
-                self.showing_contacts = false;
-                self.showing_outbox = false;
-                // Another view's slices are another view's: start afresh
-                // (the loads below refill them).
-                if self.unified_view != view {
-                    self.unified_slices.clear();
-                    self.unified_boot_requested.clear();
-                }
-                self.unified_view = view;
-                self.unified = true;
-                self.tag_view = None;
-                self.selected = None;
-                self.current = None;
-                self.current_thread.clear();
-                self.attachments.clear();
-                self.attachments_loading = false;
-                self.sync_attachment_drawer();
-                self.show_message(None, false);
-                self.message_list.emit(MessageListInput::SetSelected(None));
-                self.message_list.emit(MessageListInput::SetColorize(true));
-                self.message_list.emit(MessageListInput::ResetPaging);
-                // A Sent view's rows all come from you — name the recipients.
-                self.message_list.emit(MessageListInput::SetShowRecipient(
-                    view == UnifiedView::Kind(FolderKind::Sent),
-                ));
-                self.message_list.emit(MessageListInput::SetRestorable(false));
-                self.message_list.emit(MessageListInput::SetInJunk(false));
-                let reqs = self.unified_targets();
-                // Keep every account's last known slice and top it up from the
-                // folder caches, the way opening a single folder does. This used
-                // to clear the lot and wait: an account whose worker was slow to
-                // answer — busy backfilling a large mailbox, reconnecting, or
-                // offline — was simply absent from "All Inboxes", while its own
-                // Inbox, served from cache, still listed its mail. Each account's
-                // slice is replaced when its load lands.
-                for (account_id, folder_id, path) in &reqs {
-                    // A folder not seen since launch (only inboxes are primed
-                    // at startup): the on-disk index has it as last synced,
-                    // so the view opens at once — and after a restart — rather
-                    // than waiting on the worker.
-                    let seen = self
-                        .message_cache
-                        .get(&(*account_id, *folder_id))
-                        .is_some_and(|c| !c.is_empty());
-                    if !seen {
-                        let from_disk = self
-                            .cache
-                            .as_ref()
-                            .map(|c| c.load_messages(*account_id, path, *folder_id))
-                            .unwrap_or_default();
-                        if !from_disk.is_empty() {
-                            let from_disk = self.merge_local_tags(*account_id, from_disk);
-                            self.message_cache.insert((*account_id, *folder_id), from_disk);
-                        }
-                    }
-                    if let Some(cached) = self.message_cache.get(&(*account_id, *folder_id)) {
-                        if !cached.is_empty() {
-                            self.unified_slices.insert((*account_id, *folder_id), cached.clone());
-                        }
-                    }
-                }
-                // Forget folders that no longer contribute (an account
-                // removed or disabled, a rule gone, since the last visit).
-                let live: std::collections::HashSet<(u32, u32)> =
-                    reqs.iter().map(|(a, f, _)| (*a, *f)).collect();
-                self.unified_slices.retain(|k, _| live.contains(k));
-                if self.unified_slices.is_empty() {
-                    self.message_list
-                        .emit(MessageListInput::SetLoading);
-                } else {
-                    self.emit_unified();
-                }
-                // Request every account's inbox; each result replaces that
-                // account's slice as it arrives.
-                for (account_id, folder_id, path) in reqs {
-                    self.send_to(account_id, MailRequest::LoadMessages { folder_id, path });
-                }
-                self.push_index_complete();
-                tracing::info!(
-                    "unified {view:?}: opened in {:?} with {} cached messages",
-                    t_open.elapsed(),
-                    self.unified_slices.values().map(Vec::len).sum::<usize>()
-                );
+                self.open_unified(view);
             }
 
             AppMsg::FolderSelected { account_id, folder_id, name, path } => {
@@ -3635,15 +3676,55 @@ impl SimpleComponent for AppModel {
                 // that account's mail, so clear its toast, then navigate to the
                 // message's folder and open it in the reader.
                 crate::notify::withdraw_mail(account_id);
-                if let Some((name, path)) = self
+                tracing::info!(
+                    "notification: open account {account_id} folder {folder_id} message {message_id} (unified row: {})",
+                    self.unified_inboxes_shown()
+                );
+                if let Some((name, path, kind)) = self
                     .folders
                     .get(&account_id)
                     .and_then(|fs| fs.iter().find(|f| f.id == folder_id))
-                    .map(|f| (f.name.clone(), f.path.clone()))
+                    .map(|f| (f.name.clone(), f.path.clone(), f.kind))
                 {
-                    // select_folder emits the (cached) list synchronously, so the
-                    // subsequent SelectAndLoad finds the row and opens it.
-                    self.select_folder(account_id, folder_id, name, path);
+                    // Ask for the body before anything else goes to the
+                    // account's worker. Opening Inboxes below asks every
+                    // account for its inbox list, and the worker serves one
+                    // request at a time: the body request the selection
+                    // sends afterwards would wait behind that whole fetch
+                    // (and the IDLE hand-off before it), so the message the
+                    // user clicked sat on a spinner while the list loaded.
+                    // Sent first, it comes back into the body cache, which
+                    // the selection reads before fetching. A body already
+                    // there (prefetched on arrival) needs nothing.
+                    if !self.body_cache.contains_key(&(account_id, message_id)) {
+                        let uid = self
+                            .message_cache
+                            .get(&(account_id, folder_id))
+                            .and_then(|msgs| msgs.iter().find(|m| m.id == message_id))
+                            .map(|m| m.uid);
+                        if let Some(uid) = uid {
+                            self.send_to(account_id, MailRequest::LoadBody {
+                                message_id,
+                                path: path.clone(),
+                                uid,
+                            });
+                        }
+                    }
+                    // Mail that landed in an inbox opens in the unified
+                    // Inboxes when the sidebar has that row (the view the
+                    // app opens with; the account's own Inbox row may sit
+                    // inside a folded section, where a highlight has nowhere
+                    // to show). Without the row — one account, or the
+                    // preference off — or when a filter filed the message
+                    // elsewhere, its folder opens directly and the sidebar
+                    // unfolds the account to show where that is. Both emit
+                    // the (cached) list synchronously, so the SelectAndLoad
+                    // that follows finds the row and opens it.
+                    if kind == FolderKind::Inbox && self.unified_inboxes_shown() {
+                        self.open_unified(UnifiedView::Kind(FolderKind::Inbox));
+                    } else {
+                        self.select_folder(account_id, folder_id, name, path);
+                    }
                     self.message_list
                         .emit(MessageListInput::SelectAndLoad((account_id, message_id)));
                 }
@@ -3827,7 +3908,7 @@ impl SimpleComponent for AppModel {
                 // sidebar out without a click — whether the rail comes from
                 // the narrow-window breakpoint or the user's own collapse.
                 // The same peek the expand button opens, dismissed the same
-                // ways (navigation, scrim, or the cursor leaving).
+                // ways (navigation, or a click outside the panel).
                 let rail_up = self.auto_rail || self.sidebar_collapsed;
                 if self.sidebar_hover_expand && rail_up && !self.sidebar_peek {
                     self.rail_active = false;
@@ -4297,6 +4378,84 @@ impl SimpleComponent for AppModel {
                 }
             }
 
+            AppMsg::ThreadGrew { message: m, thread } => {
+                // Only for the conversation on screen: the reader's primary
+                // is that head. A reply of the user's own filed in Sent is
+                // not in the folder's list and stays as the related lookup
+                // left it — kept below.
+                let key = (m.account_id, m.id);
+                if self.current.as_ref().map(|c| (c.account_id, c.id)) != Some(key) {
+                    return;
+                }
+                let existing = std::mem::take(&mut self.current_thread);
+                let mut conv: Vec<Message> = existing.clone();
+                for tm in &thread {
+                    let k = (tm.account_id, tm.id);
+                    if conv.iter().any(|e| (e.account_id, e.id) == k) {
+                        continue;
+                    }
+                    let mut tm = tm.clone();
+                    if k == key {
+                        tm.unread = false;
+                        if let Some(c) = self.current.as_ref().filter(|c| !c.body.is_empty()) {
+                            tm.body = c.body.clone();
+                        }
+                    } else if tm.body.is_empty() {
+                        if let Some(b) = self.body_cache.get(&k) {
+                            tm.body = b.clone();
+                        }
+                    }
+                    conv.push(tm);
+                }
+                // Chronological, as a conversation is stored (display order
+                // is show_thread's business).
+                conv.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then(a.uid.cmp(&b.uid)));
+                tracing::info!(
+                    "conversation on screen grew: {} -> {} messages",
+                    existing.len(),
+                    conv.len()
+                );
+                self.current_thread = conv;
+                self.thread_key = Some(key);
+                // The conversation is already painted: the new card joins it
+                // in place. Its body, when not prefetched, is asked for and
+                // the render follows its arrival (the Body handler repaints a
+                // conversation as bodies land) rather than showing an empty
+                // card first.
+                self.thread_painted = true;
+                self.thread_related_pending = false;
+                self.remember_thread();
+                // The new message is what the sync brought: bring it into
+                // view — at the top with newest first, appended otherwise.
+                // The render keeps the reader's place through its saved
+                // anchor; pointing that at the new card is the scroll.
+                let newest = self
+                    .current_thread
+                    .iter()
+                    .filter(|tm| !existing.iter().any(|e| (e.account_id, e.id) == (tm.account_id, tm.id)))
+                    .max_by_key(|tm| tm.timestamp)
+                    .map(|tm| (tm.account_id, tm.id));
+                if let Some((account_id, id)) = newest {
+                    self.message_view.emit(MessageViewInput::RevealCard { account_id, id });
+                }
+                let to_load: Vec<MissingBody> = self
+                    .current_thread
+                    .iter()
+                    .filter(|tm| tm.body.is_empty())
+                    .filter_map(|tm| {
+                        self.resolve_folder_path(tm).map(|p| (tm.account_id, tm.id, tm.uid, p))
+                    })
+                    .collect();
+                if to_load.is_empty() {
+                    self.show_thread();
+                } else {
+                    for ((aid, path), items) in batch_bodies_by_folder(to_load) {
+                        self.send_to(aid, MailRequest::LoadBodies { items, path });
+                    }
+                }
+                self.load_thread_attachments();
+            }
+
             AppMsg::OpenMessageWindow { message: m, thread } => {
                 // Drafts open in the editor rather than a read-only window.
                 if self.is_drafts_folder(m.account_id, m.folder_id) {
@@ -4743,7 +4902,27 @@ impl SimpleComponent for AppModel {
 
             AppMsg::SetReaderActionsCollapsed(on) => {
                 self.reader_actions_collapsed = on;
-                self.reader_overflow_btn.set_visible(on);
+                self.reader_overflow_btn.set_visible(self.reader_overflow_wanted());
+            }
+
+            AppMsg::SetReaderToolbar(layout) => {
+                if self.reader_toolbar != layout {
+                    self.reader_toolbar = layout;
+                    config::save_reader_toolbar(&self.reader_toolbar);
+                    self.relayout_reader_toolbar();
+                    // Not while the inline composer covers the header: that
+                    // path hides the ⋯ by hand and restores it on close.
+                    if !self.reader_compose.as_ref().is_some_and(|r| r.window.is_none()) {
+                        self.reader_overflow_btn.set_visible(self.reader_overflow_wanted());
+                    }
+                }
+            }
+
+            AppMsg::ReaderControlsChanged(controls) => {
+                if let Some(tb) = self.reader_toolbar_widgets.get() {
+                    tb.controls.set(controls);
+                }
+                self.refresh_reader_breakpoint();
             }
 
             AppMsg::ReaderOverflowMenu => self.show_reader_overflow_menu(&sender),
@@ -5435,6 +5614,28 @@ impl SimpleComponent for AppModel {
                     p.emit(PrefInput::ShowPageById(id));
                 }
             }
+            AppMsg::ReaderToolbarMenu { x, y } => {
+                use crate::ui::context_menu::{show_context_menu, MenuEntry};
+                if let Some(header) = self.reader_header.get() {
+                    let s = sender.input_sender().clone();
+                    let entry = MenuEntry::new(i18n("Customize Toolbar…"), move || {
+                        let _ = s.send(AppMsg::CustomizeToolbar);
+                    })
+                    .icon("co.hyprlab.Vireo-preferences-desktop-appearance-symbolic");
+                    show_context_menu(header, x, y, vec![vec![entry]]);
+                }
+            }
+            AppMsg::CustomizeToolbar => {
+                self.open_settings_window(&sender, false, false);
+                if let Some(p) = &self.prefs {
+                    p.emit(PrefInput::ShowPageById("appearance".to_string()));
+                }
+            }
+            AppMsg::ShowcaseToolbarGap { zone, index } => {
+                if let Some(p) = &self.prefs {
+                    p.emit(PrefInput::ToolbarGapPreview { zone, index });
+                }
+            }
             AppMsg::ReloadBody(m) => {
                 if let Some(path) = self.resolve_folder_path(&m) {
                     self.send_to(m.account_id, MailRequest::LoadBody { message_id: m.id, path, uid: m.uid });
@@ -6051,6 +6252,11 @@ impl SimpleComponent for AppModel {
                 if folders.is_empty() {
                     return;
                 }
+                // The reading pane shows a conversation (its row was opened,
+                // not one reply of it): offer to move the whole of it.
+                let conversation = (self.list_selection.len() <= 1
+                    && self.current_thread.len() > 1)
+                    .then_some(self.current_thread.len());
                 // Anchored to the toolbar button, or to the overflow button
                 // when the toolbar has folded into it.
                 let btn = if self.reader_move_btn.is_mapped() {
@@ -6065,14 +6271,68 @@ impl SimpleComponent for AppModel {
                     btn.height() as f64,
                     folders,
                     exclude,
-                    move |dest| {
-                        let _ = s.send(AppMsg::MoveSelectionTo { account_id, dest });
+                    conversation,
+                    move |dest, whole| {
+                        let _ = s.send(AppMsg::MoveSelectionTo { account_id, dest, whole });
                     },
                 );
             }
 
-            AppMsg::MoveSelectionTo { account_id, dest } => {
-                if self.list_selection.len() > 1 {
+            AppMsg::CardMenu { message, x, y } => {
+                self.show_card_menu(*message, x, y, &sender);
+            }
+
+            AppMsg::ListMoveTo { messages, offer_whole, x, y } => {
+                let Some(first) = messages.first() else { return };
+                let account_id = first.account_id;
+                let folders = self.folders.get(&account_id).cloned().unwrap_or_default();
+                if folders.is_empty() {
+                    return;
+                }
+                // Leave out the folder the mail sits in, when it is one.
+                let exclude = self
+                    .resolve_folder_path(first)
+                    .filter(|p| messages.iter().all(|m| self.resolve_folder_path(m).as_ref() == Some(p)));
+                let conversation = offer_whole.then_some(messages.len());
+                let s = sender.input_sender().clone();
+                let window = self.window.clone();
+                crate::ui::folder_picker::show_folder_picker(
+                    &window,
+                    x,
+                    y,
+                    folders,
+                    exclude,
+                    conversation,
+                    move |dest, whole| {
+                        let picked = if offer_whole && !whole {
+                            messages[..1].to_vec()
+                        } else {
+                            messages.clone()
+                        };
+                        let _ = s.send(AppMsg::MoveMessagesTo { account_id, dest, messages: picked });
+                    },
+                );
+            }
+
+            AppMsg::MoveMessagesTo { account_id, dest, messages } => {
+                let items: Vec<(u32, u32, u32, u32)> =
+                    messages.iter().map(|m| (m.account_id, m.folder_id, m.uid, m.id)).collect();
+                self.drop_move(account_id, dest, items);
+            }
+
+            AppMsg::MoveSelectionTo { account_id, dest, whole } => {
+                if whole && self.current_thread.len() > 1 {
+                    // The whole conversation, the way a dragged selection
+                    // moves: grouped by source folder, undoable, and any
+                    // member from another account (a conversation merged
+                    // across accounts in a unified view) reported.
+                    let items: Vec<(u32, u32, u32, u32)> = self
+                        .current_thread
+                        .iter()
+                        .map(|m| (m.account_id, m.folder_id, m.uid, m.id))
+                        .collect();
+                    self.drop_move(account_id, dest, items);
+                } else if self.list_selection.len() > 1 {
                     // The same path a drag onto the sidebar takes: grouped by
                     // source folder, undoable, foreign accounts reported.
                     let items: Vec<(u32, u32, u32, u32)> = self
@@ -6544,6 +6804,12 @@ impl SimpleComponent for AppModel {
             }
 
             AppMsg::FolderUnread { account_id, folder_id, unread } => {
+                // A count fetched ahead of a read mark still in the worker's
+                // queue: the app's own count (adjusted when the mark was
+                // made) stands until the mark is stored.
+                if self.pending_seen_in_folder(account_id, folder_id) {
+                    return;
+                }
                 let prev = self.folder_unread.insert((account_id, folder_id), unread);
                 if prev != Some(unread) {
                     self.sync_background_folder(account_id, folder_id);
@@ -6551,7 +6817,15 @@ impl SimpleComponent for AppModel {
                 self.push_unread_counts();
             }
 
+            AppMsg::SeenSettled { account_id, path, uid } => {
+                self.pending_seen.remove(&(account_id, path, uid));
+                self.pending_seen.retain(|_, (_, at)| at.elapsed() < PENDING_SEEN_MAX);
+            }
+
             AppMsg::FolderUnreadByPath { account_id, path, unread } => {
+                if self.pending_seen_in(account_id, &path) {
+                    return;
+                }
                 // Resolve against the current list; a path the app no longer
                 // knows (folder deleted/renamed under a live watcher) is
                 // dropped rather than guessed at.
@@ -6576,6 +6850,9 @@ impl SimpleComponent for AppModel {
                 // else sees them.
                 let messages = self.apply_blacklist(account_id, folder_id, messages);
                 let (messages, filed) = self.apply_filters(account_id, folder_id, messages);
+                // A list fetched ahead of a read mark still in the worker's
+                // queue shows the message unread again; keep the app's state.
+                let messages = self.apply_pending_seen(account_id, folder_id, messages);
                 // Did this sync remove the message currently open in the reader
                 // (deleted/moved on another device)? Scope the check to the reader's
                 // own folder so a folder switch or another folder's sync doesn't
@@ -8455,11 +8732,8 @@ impl AppModel {
         // single-account — its default selection then landed on that account's
         // inbox (possibly inside a collapsed section, so nothing visibly
         // highlighted) instead of the "All Inboxes" the app should open with.
-        let multi_account = self.config.iter().filter(|c| c.enabled).count() > 1
-            // The demo has no config-file accounts, but its two mock accounts
-            // deserve the same All Inboxes opening as a real multi-account setup.
-            || (demo_mode() && self.accounts.len() > 1);
-        let show_unified = self.show_unified_pref && multi_account;
+        let multi_account = self.multi_account();
+        let show_unified = self.unified_inboxes_shown();
         // The other unified rows are as pointless with one account.
         let unified_kinds =
             if multi_account { self.unified_kinds } else { config::UnifiedKinds::NONE };
@@ -8602,8 +8876,6 @@ impl AppModel {
         });
     }
 
-    /// The collapsed reader header's overflow menu: every action the full row
-    /// of buttons offers, same icons, enabled under the same conditions.
     /// The tag entries of the reader's menus (#71): one per tag, its swatch
     /// filled where the reader's target message carries it. None without a
     /// target or a tag.
@@ -8621,6 +8893,9 @@ impl AppModel {
         }))
     }
 
+    /// The collapsed reader header's overflow menu: the right group of the
+    /// toolbar (Tags, Read/Unread, Spam, Move To, Find, Print), same icons,
+    /// enabled under the same conditions. The left group never folds.
     fn show_reader_overflow_menu(&self, sender: &ComponentSender<Self>) {
         use crate::ui::context_menu::{show_context_menu, MenuEntry};
 
@@ -8638,85 +8913,77 @@ impl AppModel {
 
         let has_current = self.current.is_some();
         let sections = if self.showing_outbox {
-            vec![
-                vec![
-                    entry!(i18n("Edit"), "document-edit", AppMsg::EditCurrentOutbox, has_current),
-                    entry!(i18n("Send Now"), "mail-send", AppMsg::SendCurrentOutbox, has_current),
-                    entry!(i18n("Send All"), "mail-send", AppMsg::RetryAllOutbox, true),
-                ],
-                vec![
-                    entry!(i18n("View Source"), "code", AppMsg::ViewSource, has_current),
-                    entry!(i18n("Delete"), "user-trash", AppMsg::Delete, has_current),
-                ],
-            ]
+            // The Outbox's own buttons (Edit, Send, Send all, Delete) sit in
+            // the always-visible left group; only View Source is left to
+            // fold here (queued rows have no context menu to carry it).
+            vec![vec![entry!(i18n("View Source"), "code", AppMsg::ViewSource, has_current)]]
         } else {
-            // Per-message actions act on the reply target: the open message,
-            // or — in a conversation — the one highlighted card. With none
-            // (or several) highlighted they grey out.
+            // Only the right group folds in here, in its own order; the left
+            // group stays on the bar at every width. Per-message actions act
+            // on the reply target: the open message, or — in a conversation —
+            // the one highlighted card. With none (or several) highlighted
+            // they grey out.
+            use config::ToolbarItem as T;
             let target = self.reply_target();
             let acts = target.is_some();
+            let many = acts || self.list_selection.len() > 1;
             let starred = target.as_ref().is_some_and(|m| m.starred);
             let target_unread = target.as_ref().is_some_and(|m| m.unread);
-            vec![
-                vec![
-                    entry!(i18n("Reply"), "mail-reply-sender", AppMsg::Reply, acts),
-                    entry!(i18n("Reply All"), "mail-reply-all", AppMsg::ReplyAll, acts),
-                    entry!(i18n("Forward"), "mail-forward", AppMsg::Forward, acts),
-                ],
-                vec![
-                    if target_unread {
-                        entry!(i18n("Mark as Read"), "mail-read", AppMsg::ToggleReadCurrent, acts)
-                    } else {
-                        entry!(i18n("Mark as Unread"), "mail-unread", AppMsg::ToggleReadCurrent, acts)
-                    },
-                    if starred {
+            let restorable = target.as_ref().is_some_and(|m| {
+                self.folder_kind(m.account_id, m.folder_id)
+                    .is_some_and(|k| matches!(k, FolderKind::Trash | FolderKind::Junk))
+            });
+            let mut section = Vec::new();
+            for item in &self.reader_toolbar.right {
+                match item {
+                    T::Reply => section.push(entry!(i18n("Reply"), "mail-reply-sender", AppMsg::Reply, acts)),
+                    T::ReplyAll => section.push(entry!(i18n("Reply All"), "mail-reply-all", AppMsg::ReplyAll, acts)),
+                    T::Forward => section.push(entry!(i18n("Forward"), "mail-forward", AppMsg::Forward, acts)),
+                    T::Star => section.push(if starred {
                         entry!(i18n("Remove Flag"), "non-starred", AppMsg::ToggleStar, acts)
                     } else {
                         entry!(i18n("Flag"), "starred", AppMsg::ToggleStar, acts)
-                    },
-                ],
-                // Tags (#71), where there are any and something to tag —
-                // behind a submenu, as in the message list's menu.
-                self.reader_tag_entries(sender)
-                    .map(|entries| {
-                        vec![MenuEntry::submenu(i18n("Tags"), vec![entries])
-                            .icon("co.hyprlab.Vireo-tag-symbolic")]
-                    })
-                    .unwrap_or_default(),
-                // View Source is deliberately absent: it lives in the message
-                // list's context menu only (the Outbox variant above keeps it —
-                // queued rows have no such menu).
-                vec![entry!(i18n("Print Preview"), "printer", AppMsg::PrintPreview, has_current)],
-                {
-                    let mut section = Vec::new();
-                    let restorable = target.as_ref().is_some_and(|m| {
-                        self.folder_kind(m.account_id, m.folder_id)
-                            .is_some_and(|k| matches!(k, FolderKind::Trash | FolderKind::Junk))
-                    });
-                    if restorable {
-                        section.push(entry!(i18n("Move to Inbox"), "mail-inbox", AppMsg::MoveToInbox, acts));
-                    }
-                    if self.target_in_junk() {
-                        section.push(entry!(i18n("Not Spam"), "mail-mark-notjunk", AppMsg::MarkSpam, acts));
+                    }),
+                    T::Archive => section.push(entry!(i18n("Archive"), "mail-archive", AppMsg::Archive, acts)),
+                    T::Delete => section.push(entry!(i18n("Delete"), "user-trash", AppMsg::Delete, many)),
+                    T::Spam => section.push(if self.target_in_junk() {
+                        entry!(i18n("Not Spam"), "mail-mark-notjunk", AppMsg::MarkSpam, acts)
                     } else {
-                        section.push(entry!(i18n("Mark as Spam"), "mail-mark-junk", AppMsg::MarkSpam, acts));
+                        entry!(i18n("Mark as Spam"), "mail-mark-junk", AppMsg::MarkSpam, acts)
+                    }),
+                    T::ReadUnread => section.push(if target_unread {
+                        entry!(i18n("Mark as Read"), "mail-read", AppMsg::ToggleReadCurrent, acts)
+                    } else {
+                        entry!(i18n("Mark as Unread"), "mail-unread", AppMsg::ToggleReadCurrent, acts)
+                    }),
+                    // Tags (#71), where there are any and something to tag —
+                    // behind a submenu, as in the message list's menu.
+                    T::Tags => {
+                        if let Some(entries) = self.reader_tag_entries(sender) {
+                            section.push(
+                                MenuEntry::submenu(i18n("Tags"), vec![entries]).icon("co.hyprlab.Vireo-tag-symbolic"),
+                            );
+                        }
                     }
-                    section.push(entry!(
-                        i18n("Move To…"),
-                        "folder",
-                        AppMsg::MoveToMenu,
-                        acts || self.list_selection.len() > 1
-                    ));
-                    section.push(entry!(i18n("Archive"), "mail-archive", AppMsg::Archive, acts));
-                    section.push(entry!(
-                        i18n("Delete"),
-                        "user-trash",
-                        AppMsg::Delete,
-                        acts || self.list_selection.len() > 1
-                    ));
-                    section
-                },
-            ]
+                    T::MoveTo => {
+                        if restorable {
+                            section.push(entry!(i18n("Move to Inbox"), "mail-inbox", AppMsg::MoveToInbox, acts));
+                        }
+                        section.push(entry!(i18n("Move To…"), "folder", AppMsg::MoveToMenu, many));
+                    }
+                    T::Find => section.push(entry!(
+                        i18n("Find in Message"),
+                        "loupe-with-arrow",
+                        AppMsg::OpenReaderFind,
+                        has_current
+                    )),
+                    // View Source is deliberately absent: it lives in the
+                    // message list's context menu only (the Outbox variant
+                    // above keeps it — queued rows have no such menu).
+                    T::Print => section.push(entry!(i18n("Print Preview"), "printer", AppMsg::PrintPreview, has_current)),
+                }
+            }
+            vec![section]
         };
 
         let btn = &self.reader_overflow_btn;
@@ -8818,6 +9085,252 @@ impl AppModel {
             self.gallery_by_account.clear();
             self.gallery.emit(GalleryInput::SetItems(Vec::new()));
         }
+    }
+
+    /// More than one account is switched on. Counted from config, not from
+    /// the workers that have reported in: at startup the accounts stream in
+    /// one by one, and counting only the connected ones made the first
+    /// sidebar build look single-account — its default selection then
+    /// landed on that account's inbox (possibly inside a collapsed section,
+    /// so nothing visibly highlighted) instead of the "All Inboxes" the app
+    /// should open with.
+    fn multi_account(&self) -> bool {
+        self.config.iter().filter(|c| c.enabled).count() > 1
+            // The demo has no config-file accounts, but its two mock accounts
+            // deserve the same All Inboxes opening as a real multi-account setup.
+            || (demo_mode() && self.accounts.len() > 1)
+    }
+
+    /// The sidebar has an Inboxes row: the preference is on and there is
+    /// more than one account to merge.
+    fn unified_inboxes_shown(&self) -> bool {
+        self.show_unified_pref && self.multi_account()
+    }
+
+    /// Open a unified view (Inboxes, Starred, Sent, …, Filtered): the merged
+    /// list of every account's folder of that kind. What clicking the
+    /// sidebar row does; a notification click lands here too.
+    fn open_unified(&mut self, view: UnifiedView) {
+        let t_open = std::time::Instant::now();
+        self.close_sidebar_peek();
+        self.mirror_selection(match view {
+            UnifiedView::Kind(FolderKind::Inbox) => crate::ui::sidebar::Sel::Unified,
+            UnifiedView::Kind(kind) => crate::ui::sidebar::Sel::UnifiedKind(kind),
+            UnifiedView::Filtered => crate::ui::sidebar::Sel::UnifiedFiltered,
+        });
+        self.leave_gallery();
+        self.showing_contacts = false;
+        self.showing_outbox = false;
+        // Another view's slices are another view's: start afresh
+        // (the loads below refill them).
+        if self.unified_view != view {
+            self.unified_slices.clear();
+            self.unified_boot_requested.clear();
+        }
+        self.unified_view = view;
+        self.unified = true;
+        self.tag_view = None;
+        self.selected = None;
+        self.current = None;
+        self.current_thread.clear();
+        self.attachments.clear();
+        self.attachments_loading = false;
+        self.sync_attachment_drawer();
+        self.show_message(None, false);
+        self.message_list.emit(MessageListInput::SetSelected(None));
+        self.message_list.emit(MessageListInput::SetColorize(true));
+        self.message_list.emit(MessageListInput::ResetPaging);
+        // A Sent view's rows all come from you — name the recipients.
+        self.message_list.emit(MessageListInput::SetShowRecipient(
+            view == UnifiedView::Kind(FolderKind::Sent),
+        ));
+        self.message_list.emit(MessageListInput::SetRestorable(false));
+        self.message_list.emit(MessageListInput::SetInJunk(false));
+        let reqs = self.unified_targets();
+        // Keep every account's last known slice and top it up from the
+        // folder caches, the way opening a single folder does. This used
+        // to clear the lot and wait: an account whose worker was slow to
+        // answer — busy backfilling a large mailbox, reconnecting, or
+        // offline — was simply absent from "All Inboxes", while its own
+        // Inbox, served from cache, still listed its mail. Each account's
+        // slice is replaced when its load lands.
+        for (account_id, folder_id, path) in &reqs {
+            // A folder not seen since launch (only inboxes are primed
+            // at startup): the on-disk index has it as last synced,
+            // so the view opens at once — and after a restart — rather
+            // than waiting on the worker.
+            let seen = self
+                .message_cache
+                .get(&(*account_id, *folder_id))
+                .is_some_and(|c| !c.is_empty());
+            if !seen {
+                let from_disk = self
+                    .cache
+                    .as_ref()
+                    .map(|c| c.load_messages(*account_id, path, *folder_id))
+                    .unwrap_or_default();
+                if !from_disk.is_empty() {
+                    let from_disk = self.merge_local_tags(*account_id, from_disk);
+                    self.message_cache.insert((*account_id, *folder_id), from_disk);
+                }
+            }
+            if let Some(cached) = self.message_cache.get(&(*account_id, *folder_id)) {
+                if !cached.is_empty() {
+                    self.unified_slices.insert((*account_id, *folder_id), cached.clone());
+                }
+            }
+        }
+        // Forget folders that no longer contribute (an account
+        // removed or disabled, a rule gone, since the last visit).
+        let live: std::collections::HashSet<(u32, u32)> =
+            reqs.iter().map(|(a, f, _)| (*a, *f)).collect();
+        self.unified_slices.retain(|k, _| live.contains(k));
+        if self.unified_slices.is_empty() {
+            self.message_list
+                .emit(MessageListInput::SetLoading);
+        } else {
+            self.emit_unified();
+        }
+        // Request every account's inbox; each result replaces that
+        // account's slice as it arrives.
+        for (account_id, folder_id, path) in reqs {
+            self.send_to(account_id, MailRequest::LoadMessages { folder_id, path });
+        }
+        self.push_index_complete();
+        tracing::info!(
+            "unified {view:?}: opened in {:?} with {} cached messages",
+            t_open.elapsed(),
+            self.unified_slices.values().map(Vec::len).sum::<usize>()
+        );
+    }
+
+    /// The menu a right-click on a reader card opens (the message list
+    /// row's menu, for that one message), anchored on the window at (x, y).
+    fn show_card_menu(&self, m: Message, x: f64, y: f64, sender: &ComponentSender<Self>) {
+        use crate::ui::context_menu::{show_context_menu, MenuEntry};
+        // Through the card path: a reply started from a card belongs in the
+        // pane's inline composer, like the card's own buttons — the row path
+        // would open a compose window. Every other action falls through to
+        // the row behaviour there.
+        let item = |action: RowAction, label: String, icon: &str| -> MenuEntry {
+            let s = sender.input_sender().clone();
+            let message = m.clone();
+            MenuEntry::new(label, move || {
+                let _ = s.send(AppMsg::CardAction { action, message: Box::new(message.clone()) });
+            })
+            .icon(format!("co.hyprlab.Vireo-{icon}-symbolic"))
+        };
+        let kind = self.folder_kind(m.account_id, m.folder_id);
+        let in_junk = kind == Some(FolderKind::Junk);
+        let restorable = matches!(kind, Some(FolderKind::Trash | FolderKind::Junk));
+        let mut sections = vec![
+            vec![
+                item(RowAction::Reply, i18n("Reply"), "mail-reply-sender"),
+                item(RowAction::ReplyAll, i18n("Reply All"), "mail-reply-all"),
+                item(RowAction::Forward, i18n("Forward"), "mail-forward"),
+            ],
+            vec![
+                if m.starred {
+                    item(RowAction::ToggleStar, i18n("Remove Star"), "non-starred")
+                } else {
+                    item(RowAction::ToggleStar, i18n("Star"), "starred")
+                },
+                if m.unread {
+                    item(RowAction::ToggleRead, i18n("Mark as Read"), "mail-read")
+                } else {
+                    item(RowAction::ToggleRead, i18n("Mark as Unread"), "mail-unread")
+                },
+            ],
+        ];
+        if !self.tags.is_empty() {
+            let s = sender.input_sender().clone();
+            let message = m.clone();
+            let entries =
+                crate::ui::message_list::tag_menu_entries(&self.tags, &m, move |keyword, add| {
+                    let _ = s.send(AppMsg::SetTag {
+                        message: Box::new(message.clone()),
+                        keyword,
+                        add,
+                    });
+                });
+            sections.push(vec![
+                MenuEntry::submenu(i18n("Tags"), vec![entries]).icon("co.hyprlab.Vireo-tag-symbolic"),
+            ]);
+        }
+        let mut acts = Vec::new();
+        if in_junk {
+            acts.push(item(RowAction::NotSpam, i18n("Not Spam"), "mail-mark-notjunk"));
+        } else {
+            if restorable {
+                acts.push(item(RowAction::MoveToInbox, i18n("Move to Inbox"), "mail-inbox"));
+            }
+            acts.push(item(RowAction::Spam, i18n("Mark as Spam"), "mail-mark-junk"));
+        }
+        {
+            let s = sender.input_sender().clone();
+            let message = m.clone();
+            acts.push(
+                MenuEntry::new(i18n("Move To…"), move || {
+                    let _ = s.send(AppMsg::ListMoveTo {
+                        messages: vec![message.clone()],
+                        offer_whole: false,
+                        x,
+                        y,
+                    });
+                })
+                .icon("co.hyprlab.Vireo-folder-symbolic"),
+            );
+        }
+        acts.push(item(RowAction::Archive, i18n("Archive"), "mail-archive"));
+        acts.push(item(RowAction::Delete, i18n("Delete"), "user-trash"));
+        sections.push(acts);
+        sections.push(vec![item(RowAction::AddContact, i18n("Add Sender to Contacts"), "contact-new")]);
+        sections.push(vec![item(RowAction::ViewSource, i18n("View Source"), "code")]);
+        show_context_menu(&self.window, x, y, sections);
+    }
+
+    /// Whether a read/unread change for a message in `path` is still on its
+    /// way to the server (and not so old that the worker must have lost it).
+    fn pending_seen_in(&self, account_id: u32, path: &str) -> bool {
+        self.pending_seen.iter().any(|((a, p, _), (_, at))| {
+            *a == account_id && p == path && at.elapsed() < PENDING_SEEN_MAX
+        })
+    }
+
+    fn pending_seen_in_folder(&self, account_id: u32, folder_id: u32) -> bool {
+        self.folders
+            .get(&account_id)
+            .and_then(|fs| fs.iter().find(|f| f.id == folder_id))
+            .is_some_and(|f| self.pending_seen_in(account_id, &f.path))
+    }
+
+    /// Overlay the read/unread changes still on their way to the server on
+    /// a folder list the worker fetched before storing them.
+    fn apply_pending_seen(
+        &self,
+        account_id: u32,
+        folder_id: u32,
+        mut messages: Vec<Message>,
+    ) -> Vec<Message> {
+        let Some(path) = self
+            .folders
+            .get(&account_id)
+            .and_then(|fs| fs.iter().find(|f| f.id == folder_id))
+            .map(|f| f.path.clone())
+        else {
+            return messages;
+        };
+        if !self.pending_seen_in(account_id, &path) {
+            return messages;
+        }
+        for m in messages.iter_mut() {
+            if let Some((seen, at)) = self.pending_seen.get(&(account_id, path.clone(), m.uid)) {
+                if at.elapsed() < PENDING_SEEN_MAX {
+                    m.unread = !seen;
+                }
+            }
+        }
+        messages
     }
 
     /// Switch the message list to a folder: reset the view, show its cached
@@ -9161,6 +9674,88 @@ impl AppModel {
 
     /// Tooltip for the toolbar's trash button: says when it will delete the
     /// whole multi-selection rather than just the open message.
+    /// Whether the reader header shows `item` right now: it must be in the
+    /// saved layout, and a right-group button also needs the pane wide
+    /// enough (the left group never folds). Delete alone also serves the
+    /// Outbox; the inline composer hides the whole row.
+    fn toolbar_visible(&self, item: config::ToolbarItem) -> bool {
+        use config::ToolbarSide;
+        self.reader_compose.is_none()
+            && (item == config::ToolbarItem::Delete || !self.showing_outbox)
+            && match self.reader_toolbar.side(item) {
+                Some(ToolbarSide::Left) => true,
+                Some(ToolbarSide::Right) => !self.reader_actions_collapsed,
+                None => false,
+            }
+    }
+
+    /// The ⋯ overflow stands in for the folded right group: only while
+    /// collapsed, and only when that group has something to offer (the
+    /// Outbox keeps View Source there regardless).
+    fn reader_overflow_wanted(&self) -> bool {
+        self.reader_actions_collapsed && (self.showing_outbox || !self.reader_toolbar.right.is_empty())
+    }
+
+    /// Pack the header's action buttons in the saved order: the left group
+    /// via pack_start, the right group via pack_end (which fills right to
+    /// left, so in reverse), then the attachments spinner so it keeps the
+    /// innermost slot of the right group. Buttons on neither side are left
+    /// unpacked. Re-folds the row for the new count afterwards.
+    fn relayout_reader_toolbar(&self) {
+        let (Some(header), Some(tb)) = (self.reader_header.get(), self.reader_toolbar_widgets.get()) else {
+            return;
+        };
+        for (_, w) in &tb.buttons {
+            if w.parent().is_some() {
+                header.remove(w);
+            }
+        }
+        if tb.spinner.parent().is_some() {
+            header.remove(&tb.spinner);
+        }
+        let find = |item: config::ToolbarItem| tb.buttons.iter().find(|(i, _)| *i == item).map(|(_, w)| w);
+        for item in &self.reader_toolbar.left {
+            if let Some(w) = find(*item) {
+                header.pack_start(w);
+            }
+        }
+        for item in self.reader_toolbar.right.iter().rev() {
+            if let Some(w) = find(*item) {
+                header.pack_end(w);
+            }
+        }
+        header.pack_end(&tb.spinner);
+        self.refresh_reader_breakpoint();
+    }
+
+    /// Point the fold breakpoint at the width the current layout needs: the
+    /// row's fixed cost, the window controls, and one button's worth per
+    /// shown item (hidden-for-now buttons like Tags without tags count too —
+    /// that slack keeps the fold a step ahead of a squeeze).
+    fn refresh_reader_breakpoint(&self) {
+        let Some(tb) = self.reader_toolbar_widgets.get() else {
+            return;
+        };
+        let shown = (self.reader_toolbar.left.len() + self.reader_toolbar.right.len()) as i32;
+        let threshold = if tb.button_w <= 0 {
+            READER_ACTIONS_BREAKPOINT
+        } else {
+            (tb.base + tb.controls.get() + shown * tb.button_w) as f64 + 24.0
+        };
+        tracing::info!(
+            "reader toolbar: {shown} buttons × {}px + base {}px + controls {}px → collapse below {threshold:.0}px",
+            tb.button_w,
+            tb.base,
+            tb.controls.get()
+        );
+        tb.breakpoint.set_condition(Some(&adw::BreakpointCondition::new_length(
+            adw::BreakpointConditionLengthType::MaxWidth,
+            threshold,
+            adw::LengthUnit::Px,
+        )));
+        tb.bin.queue_resize();
+    }
+
     fn delete_tooltip(&self) -> String {
         match self.list_selection.len() {
             n if n > 1 => i18n_f("Delete {n} messages", &[("n", &n.to_string())]),
@@ -9806,7 +10401,7 @@ impl AppModel {
                 } else {
                     self.animate_cover_close();
                 }
-                self.reader_overflow_btn.set_visible(self.reader_actions_collapsed);
+                self.reader_overflow_btn.set_visible(self.reader_overflow_wanted());
                 r.controller.emit(ComposeInput::SaveDraftIfDirty);
                 self.draining_composers.push((r.id, r.controller));
             }
@@ -9828,7 +10423,7 @@ impl AppModel {
             None => {
                 // inline → window: unparent from the revealer, then host in a window.
                 self.clear_compose_slots();
-                self.reader_overflow_btn.set_visible(self.reader_actions_collapsed);
+                self.reader_overflow_btn.set_visible(self.reader_overflow_wanted());
                 let window = self.compose_window_host(&widget, id, sender);
                 r.window = Some(window);
                 r.controller.emit(ComposeInput::SetWindowed(true));
@@ -9876,7 +10471,7 @@ impl AppModel {
                     } else {
                         self.animate_cover_close();
                     }
-                    self.reader_overflow_btn.set_visible(self.reader_actions_collapsed);
+                    self.reader_overflow_btn.set_visible(self.reader_overflow_wanted());
                 }
             }
             return;
@@ -11148,6 +11743,7 @@ impl AppModel {
             remember_rail: self.remember_rail,
             rail_dots: self.rail_dots,
             rail_fold: self.rail_fold,
+            reader_toolbar: self.reader_toolbar.clone(),
             card_actions_hover: self.card_actions_hover,
             card_actions_auto: self.card_actions_auto,
             list_palette: self.list_palette,
@@ -11249,6 +11845,7 @@ impl AppModel {
                 PrefOutput::SetRememberSidebar(on) => AppMsg::SetRememberSidebar(on),
                 PrefOutput::SetRememberRail(on) => AppMsg::SetRememberRail(on),
                 PrefOutput::SetRailDots(on) => AppMsg::SetRailDots(on),
+                PrefOutput::SetReaderToolbar(layout) => AppMsg::SetReaderToolbar(layout),
                 PrefOutput::SetRailFold(fold) => AppMsg::SetRailFold(fold),
                 PrefOutput::SetAppTheme(theme) => AppMsg::SetAppTheme(theme),
                 PrefOutput::SetSettingsOpenAccounts(on) => {
@@ -11822,6 +12419,8 @@ impl AppModel {
         let Some(path) = self.resolve_folder_path(m) else {
             return;
         };
+        self.pending_seen
+            .insert((m.account_id, path.clone(), m.uid), (read, std::time::Instant::now()));
         self.send_to(m.account_id, MailRequest::SetSeen { path, uid: m.uid, seen: read });
         if read {
             // The mail was read (or marked read) in the app — the desktop
@@ -12377,14 +12976,14 @@ impl AppModel {
         else {
             return;
         };
-        let open = (self.unified && self.is_unified_target(account_id, folder_id))
-            || self
-                .selected
-                .as_ref()
-                .is_some_and(|s| s.account_id == account_id && s.folder_id == folder_id);
-        if open {
-            return;
-        }
+        // A folder that is open — on its own or as part of a unified view —
+        // is not skipped (#170). It used to be, on the assumption that the
+        // worker's IDLE on it would deliver the new list; but only push
+        // accounts IDLE, and a polled account's Inboxes slice then waited a
+        // whole poll interval for mail its unread chip already counted.
+        // When IDLE did deliver it, this re-fetch of the first page comes
+        // back identical and changes nothing (the Messages handler skips an
+        // unchanged list).
         let path = folder.path.clone();
         self.send_to(account_id, MailRequest::SyncFolder { folder_id, path });
     }
@@ -13445,6 +14044,7 @@ fn map_event(account_id: u32, event: WorkerEvent) -> AppMsg {
         WorkerEvent::FolderUnreadByPath { path, unread } => {
             AppMsg::FolderUnreadByPath { account_id, path, unread }
         }
+        WorkerEvent::SeenSettled { path, uid } => AppMsg::SeenSettled { account_id, path, uid },
         WorkerEvent::RefsRepaired { folder_id } => {
             AppMsg::RefsRepaired { account_id, folder_id }
         }
