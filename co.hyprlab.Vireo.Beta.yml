@@ -18,6 +18,8 @@ sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 command: vireo
+# Keep the message catalogues in the app itself (see the stable manifest, #183).
+separate-locales: false
 
 finish-args:
   - --share=ipc

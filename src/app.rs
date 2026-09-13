@@ -3457,10 +3457,16 @@ impl SimpleComponent for AppModel {
                     .ok()
                     .map(|v| v.parse().unwrap_or(1.0));
                 if let (Some(_), Some(frac)) = (&settings, scroll) {
+                    // VIREO_SHOWCASE_SCROLL_WIDTH overrides the 720px width,
+                    // for checking a panel at the window's real width.
+                    let width: i32 = std::env::var("VIREO_SHOWCASE_SCROLL_WIDTH")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(720);
                     let find = settings_window.clone();
                     gtk::glib::timeout_add_seconds_local_once(4, move || {
                         if let Some(w) = find() {
-                            w.set_default_size(720, 1300);
+                            w.set_default_size(width, 1300);
                         }
                     });
                     let find = settings_window.clone();
@@ -5281,7 +5287,7 @@ impl SimpleComponent for AppModel {
                 } else if let Some((account_id, folder_id, name, path)) = self
                     .accounts
                     .iter()
-                    .flat_map(|a| self.counted_folders(a.id))
+                    .filter_map(|a| self.inbox_of(a.id))
                     .find(|f| self.folder_unread_of(f) > 0)
                     .map(|f| (f.account_id, f.id, f.name.clone(), f.path.clone()))
                 {
@@ -7643,7 +7649,7 @@ impl AppModel {
         }
         self.help_menu.append(Some(i18n("Keyboard Shortcuts").as_str()), Some("win.shortcuts"));
         self.help_menu
-            .append(Some(format!("About {}", crate::APP_NAME).as_str()), Some("win.about"));
+            .append(Some(format!("{} {}", i18n("About"), crate::APP_NAME).as_str()), Some("win.about"));
     }
 
     /// The reader's font-and-colour override (#56) as the reader applies it:
@@ -8603,9 +8609,10 @@ impl AppModel {
         if self.run_in_background.get() {
             crate::background::set_status(&crate::background::status_text(unified));
         }
-        // And what the tray icon's dot answers to.
+        // And what the tray icon's dot answers to: the inboxes alone, as
+        // its menu says.
         if let Some(tray) = &self.tray {
-            tray.set_unread(unified);
+            tray.set_unread(self.inboxes_unread());
         }
         self.push_tray_mail();
     }
@@ -8690,10 +8697,11 @@ impl AppModel {
         tray.set_mail(mail);
     }
 
-    /// The newest unread messages across accounts' counted folders, as tray
-    /// cards, with the unread total the badges show (the cards may be fewer).
+    /// The newest unread messages across accounts' inboxes, as tray cards,
+    /// with the inboxes' unread total (the cards may be fewer). Filter
+    /// destinations are left out: the menu says it lists inboxes.
     fn tray_mail_list(&self) -> crate::tray::TrayMailList {
-        let unread = self.unified_unread();
+        let unread = self.inboxes_unread();
         let items = self.tray_mail_cards();
         crate::tray::TrayMailList { items, unread }
     }
@@ -8703,7 +8711,7 @@ impl AppModel {
         let mut unread: Vec<(&Account, &Message)> = self
             .accounts
             .iter()
-            .flat_map(|a| self.counted_folders(a.id).into_iter().map(move |f| (a, f)))
+            .filter_map(|a| self.inbox_of(a.id).map(|f| (a, f)))
             .flat_map(|(a, f)| {
                 self.message_cache
                     .get(&(a.id, f.id))
@@ -12277,7 +12285,7 @@ impl AppModel {
         let win = adw::Window::builder()
             .transient_for(&self.window)
             .modal(false)
-            .title(format!("About {}", crate::APP_NAME).as_str())
+            .title(format!("{} {}", i18n("About"), crate::APP_NAME).as_str())
             .default_width(460)
             // Remembered vertical size (tall by default) — resizing sticks
             // across restarts via the save on close below.
@@ -12482,7 +12490,7 @@ impl AppModel {
         main_tv.set_content(Some(&scroller));
         nav.add(
             &adw::NavigationPage::builder()
-                .title(format!("About {}", crate::APP_NAME).as_str())
+                .title(format!("{} {}", i18n("About"), crate::APP_NAME).as_str())
                 .tag("main")
                 .child(&main_tv)
                 .build(),

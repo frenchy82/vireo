@@ -4,7 +4,7 @@
 %global debug_package %{nil}
 
 Name:           vireo
-Version:        1.27.3
+Version:        1.28.0
 Release:        1%{?dist}
 Summary:        A clean, fast GNOME-native email client
 License:        AGPL-3.0-or-later
@@ -36,8 +36,16 @@ for size in 256x256 512x512; do
 done
 install -Dm644 icons/scalable/%{appid}.svg \
     %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/%{appid}.svg
+# Message catalogues, staged by tools/build-packages.sh as
+# locale/<lang>/LC_MESSAGES/vireo.mo; the binary looks under
+# %{_datadir}/locale beside itself (src/i18n.rs).
+for mo in locale/*/LC_MESSAGES/vireo.mo; do
+    [ -e "$mo" ] || continue
+    install -Dm644 "$mo" %{buildroot}%{_datadir}/"$mo"
+done
+%find_lang %{name}
 
-%files
+%files -f %{name}.lang
 %license LICENSE
 %{_bindir}/vireo
 %{_datadir}/applications/%{appid}.desktop
