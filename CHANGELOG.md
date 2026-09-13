@@ -1,9 +1,66 @@
 # Changelog
 
-## 1.28.2-beta.1 — 2026-09-13
+## 1.28.3-beta.1 — 2026-09-13
 
-Catch-up with stable 1.28.1: the beta channel carries exactly the 1.28.1
+Catch-up with stable 1.28.2: the beta channel carries exactly the 1.28.2
 code and documentation below, under the beta app ID.
+
+## 1.28.2 — 2026-09-13
+
+Sender logos from BIMI and a bundled set, wide mail that scrolls again
+in a narrow pane, drafts that are neither read nor unread, an evenly
+spaced Special Folders description, more room above the first account in
+the sidebar, and French.
+
+- **Sender logos, before the site's favicon.** Two sources now come
+  ahead of the 32px favicon a page declares (`src/logo.rs`). BIMI: the
+  SVG a sender publishes for mail clients, named by the DNS TXT record
+  at `default._bimi.<domain>` (the sending host first, then the
+  registrable domain), resolved through GLib and fetched from the
+  sender's own site (https only, 64KB at most, SVG only); a confirmed
+  no-record is remembered for a week, a resolver or network failure is
+  not. A bundled set: `data/logos/`, about 220 sender domains mapped to
+  marks from gilbarbara/logos, Simple Icons and the app's own service
+  marks, built by `tools/fetch-logos.py` into an embedded `logos.toml`
+  and a compiled `logos.gresource` (~316KB), shown with no request at
+  all. Every SVG is re-framed to a 160px square (`square_svg`) and
+  rasterised with `GdkTexture`, which also lets site discovery take the
+  SVG icons a page or manifest declares. Precedence: a stored BIMI logo,
+  a fresh BIMI lookup, a bundled mark, the stored or fetched favicon.
+  Still behind Privacy → "Show sender logos", whose text now says what
+  is and isn't fetched. `VIREO_LOGO_PROBE=<address>` logs which source
+  answers for a sender.
+- **Wide mail scrolls again in a narrow pane.** A message whose layout
+  grows with the frame width (640px tables inside 100% cells) was
+  widened once and then measured wider still, so the frame's own
+  document stayed horizontally scrollable and WebKit latched the wheel
+  to it — vertical scrolling stopped whenever the pane was narrower than
+  the mail. The sizing script now widens repeatedly until the content
+  stops growing (up to eight passes) and every frame document's root is
+  `overflow:hidden`, so whatever is left over is clipped rather than
+  scrollable and a frame can never capture the wheel. Printing keeps
+  overflow visible.
+- **Drafts are neither read nor unread.** A draft is a message being
+  written, so the read/unread toggle is withheld wherever it appeared on
+  a draft — the row's right-click menu and its "Mark All" form, the
+  action palette, the multi-select menu and the bulk bar — when the list
+  shows Drafts, and `set_read` refuses a read change on a draft so
+  nothing reaches the server and the chip is never adjusted. The empty
+  reading pane in Drafts now reads "No draft selected. Choose a draft
+  from the list to edit it here." under a pencil.
+- **Special Folders description.** Its subheading no longer renders with
+  stretched word spacing. libadwaita 1.9 paints a preferences-group
+  description fill-justified when the text is shorter than the label,
+  though `GtkLabel::justify()` reports left; the account editor now
+  left-justifies its wrapping labels. The wording reads "Automatically
+  follows…".
+- **More room in the sidebar.** The first account's header sits 10px
+  below whatever ends the unified block above it (a unified row, Filters
+  or Tags), so the two read as separate groups. Nothing changes when no
+  unified block is shown.
+- **French** is complete again for the 1.28.1 strings by
+  [@frenchy82](https://github.com/frenchy82) (#186): 1096 of 1096,
+  nothing fuzzy.
 
 ## 1.28.1 — 2026-09-13
 
@@ -68,11 +125,6 @@ Flatpak and the RPM, and Brazilian Portuguese.
   untranslated everywhere.
 - **Harness.** `VIREO_SHOWCASE_SCROLL_WIDTH` overrides the settings
   capture's 720px width.
-
-## 1.28.1-beta.1 — 2026-09-12
-
-Catch-up with stable 1.28.0: the beta channel carries exactly the 1.28.0
-code and documentation below, under the beta app ID.
 
 ## 1.28.0 — 2026-09-12
 
@@ -249,125 +301,6 @@ Hungarian, Russian and Portuguese.
   user scrolled to is still restored exactly. `VIREO_DEMO_ARRIVAL=<secs>`
   has the demo's mock worker deliver such a reply.
 
-## 1.28.0-beta.1 — 2026-09-12
-
-First preview of 1.28.0: an arrangeable reader toolbar, a slide-over
-sidebar that stays open, notification clicks that land in Inboxes and
-open at once, conversations that move as one and take in new replies
-while open, and the Hungarian translation.
-
-- **Reader toolbar layout** (Settings → Appearance → Toolbar). The
-  reading pane's header buttons are arrangeable in two groups, plus a
-  "Not shown" zone. Default: left = Reply, Reply All, Forward, Star,
-  Archive, Delete; right = Tags, Read/Unread, Spam, Move To, Find in
-  Message, Print. Only the right group folds into the ⋯ overflow menu on
-  a narrow pane (in its own order); the left group stays at every width,
-  and the fold threshold is recomputed from the button count. Stored in
-  `~/.config/vireo/toolbar.toml` (`left` / `right` key lists;
-  `config::ReaderToolbar`, `App::relayout_reader_toolbar`). The editor
-  (`ToolbarEditor` in preferences.rs, three `ChipFlow` drop zones: a
-  widget that lays chips out wrapping and eases each to its slot) opens
-  a gap the size of the dragged chip under the pointer and slides the
-  others aside; every drop autosaves. Right-clicking the header's empty
-  space offers "Customize Toolbar…", which opens that page. The section
-  is a raised card on the Appearance page.
-- **Sidebar peek stays open.** The narrow-window slide-over panel folded
-  back one second after the pointer left the rail or the panel, and the
-  panel's menu popover is its own surface, so opening it counted as
-  leaving: the panel slid away under the menu. The leave timer is gone;
-  a click outside the panel (the scrim), a swipe or a navigation closes
-  it. The hover-expand preference's text says so.
-- **Hungarian** (PR #169, Laszlo Lang). `po/hu.po`, 953 of the strings
-  up to 1.27.0, merged against the current template; `po/LINGUAS` lists
-  `hu`, so the launcher and metainfo carry it. French caught up with the
-  1.27.0 strings (PR #172, frenchy82). The strings this cycle adds are
-  untranslated in both.
-- **Notification clicks** (#170). A click on a new-mail notification
-  opened the message's folder and, when that account's section was
-  folded in the sidebar, highlighted nothing. Now: mail that landed in
-  an inbox opens in the unified Inboxes whenever the sidebar has that
-  row (`App::open_unified`, the old `UnifiedSelected` body); otherwise,
-  or for mail a filter filed elsewhere, its folder opens and the sidebar
-  unfolds the account (`Sidebar::reveal_account`, on every programmatic
-  folder highlight, so "Go to Message" from the gallery gets it too).
-  Underneath, four things were fixed:
-  - The list builds its rows on an idle since the coalesced-rebuild
-    speed-up, so a `SelectAndLoad` queued in the same pass as the
-    folder's list found no rows and the notified message was never
-    selected. It now waits for the queued rebuild (`pending_select`); a
-    reply inside a conversation, which has no row of its own, selects
-    its thread head (`thread_head_for`).
-  - An inbox open in the unified view was skipped when its unread count
-    moved, on the assumption that the worker's IDLE would deliver the
-    new list; only push accounts IDLE, so a polled account's Inboxes
-    slice waited a poll interval for mail its chip already counted
-    (`sync_background_folder` no longer skips open folders).
-  - The message took seconds to show: the account's worker serves one
-    request at a time, and the body request sat behind the inbox list
-    fetch opening Inboxes asked for, and behind the unread sweep that
-    IDLE waking ran inline (an EXAMINE and a SEARCH per folder, 13
-    folders at 165 ms a round trip). The notification handler asks for
-    the body first; the IMAP worker moves reader loads (body, bodies,
-    source, attachment downloads) ahead of queued list fetches
-    (`reorder_reader_loads`, never past a move, a flag change or a
-    reconnect); and the sweep keeps its place in `sweep_pending`, stops
-    before the next folder whenever a request is waiting, and runs from
-    the idle chain after the new mail's body prefetch (`sweep_due`)
-    rather than inline.
-  - After the message was read, the Inboxes chip came back for a
-    moment: lists and counts the worker had fetched ahead of the queued
-    STORE still reported it unread. A read/unread change now stays in
-    `pending_seen` until the worker reports it stored (new
-    `WorkerEvent::SeenSettled` from the IMAP, Graph and POP3 workers;
-    entries expire after 20 s); meanwhile that folder's server-reported
-    counts are ignored and a fetched list has the pending state overlaid.
-- **Conversations move as one** (#171). With a conversation open in the
-  reading pane, the Move To… picker starts with a "Whole conversation"
-  switch showing the member count, on by default; picking a folder then
-  moves every member the way a dragged multi-selection does
-  (`drop_move`: grouped by source folder, undoable, members from
-  another account reported). Move To… is also in the message list's
-  right-click menu (row and multi-selection, between Mark as Spam and
-  Archive; the list hands the click's point over in window coordinates
-  and the app anchors the picker on the window), on the row's action
-  palette, and on the reader card's action row (the page reports the
-  button's place in CSS pixels with its width, so a zoomed page still
-  lands it). A drag that starts on a conversation row carries every
-  member, as its Delete does (`ThreadDragKeys`, published with the row
-  keys; a multi-selection of several conversations expands each). The
-  picker has 10px above its contents.
-- **Reader cards.** A right-click anywhere on a card — its header, or its
-  body frame, which never reports events to the page — opens that
-  message's full menu, the list row's: reply, star, read, tags, spam,
-  Move To…, archive, delete, contacts, source. WebKit's context-menu
-  signal says what was hit but not where, so a capture-phase gesture on
-  the webview records the pointer and the page is asked which card holds
-  it (`elementFromPoint`, in CSS pixels); links, selected text, images
-  and editable fields keep WebKit's own menus. Reply, Reply All and
-  Forward from that menu open the pane's inline composer, like the
-  card's own buttons. The card's action buttons are centred flex boxes:
-  the read toggle's nested spans rode the button's text line and sat
-  high.
-- **A reply arriving for the open conversation** used to mark its row
-  and nothing else. After each rebuild the list compares the selected
-  head's conversation with the one it last handed the app
-  (`emitted_thread`) and reports growth (`MessageListOutput::ThreadGrew`);
-  the app merges the new members into the painted conversation,
-  chronologically, with bodies from the cache and the rest requested
-  (the Body handler repaints as they land), and points the reader's
-  saved anchor at the new card (`MessageViewInput::RevealCard`), so with
-  newest first the pane scrolls to the top and otherwise to the appended
-  card. A revealed card — that one, the unread mark on open, the newest
-  message — now lands below the page's top gutter rather than flush at
-  the viewport edge; a place the user scrolled to is still restored
-  exactly. `VIREO_DEMO_ARRIVAL=<secs>` has the demo's mock worker deliver
-  such a reply.
-
-## 1.27.4-beta.1 — 2026-09-11
-
-Catch-up with stable 1.27.3: the beta channel carries exactly the 1.27.3
-code and documentation below, under the beta app ID.
-
 ## 1.27.3 — 2026-09-11
 
 The narrow-window sidebar peek is its own panel over an untouched rail.
@@ -403,95 +336,6 @@ The narrow-window sidebar peek is its own panel over an untouched rail.
   the panel slides away); leaving either the rail or the panel arms the
   one-second fold-back and entering either cancels it.
 
-## 1.27.3-beta.5 — 2026-09-11
-
-The sidebar peek slides in over the rail.
-
-- **Panel over the rail.** The peek panel's split view now wraps the whole
-  account split view rather than its content slot, so the panel slides in
-  from the window's left edge and covers the rail and the panes instead of
-  floating out beside the rail (beta.4). The rail underneath is still its
-  own untouched widget, only covered.
-- **Hover-open waits for movement.** Hover-expand now opens on the first
-  pointer motion over the rail rather than on entering it: GTK synthesises
-  an enter when the rail reappears under a resting pointer as the panel
-  slides away, and opening on that would fold and float forever.
-
-## 1.27.3-beta.4 — 2026-09-11
-
-The narrow-window sidebar peek is its own panel; the icon rail is never
-touched.
-
-- **Peek panel beside the rail.** The peek used to collapse the account
-  split view, stand a snapshot in for the docked rail and rebuild the one
-  sidebar's rows expanded for the overlay, so the rail's column was covered
-  and redrawn by the panel's content as it slid over (beta.3's pinned
-  header is reverted). A second, always collapsed split view nested in the
-  content slot now floats a second sidebar instance out from the rail's
-  right edge over the panes, with libadwaita's scrim, shadow and swipe.
-  The panel has its own header in the expanded sidebar's layout (Refresh
-  top-left, title, menu top-right). The docked rail keeps its rows, header
-  and width throughout and stays clickable beside the panel. The snapshot,
-  restore-timer and rail-repaint machinery is gone.
-- **Two sidebar instances, one state.** Both receive the same contents,
-  unread counts, busy state and folder rows; every navigation is pushed to
-  both as a silent highlight change (`SidebarInput::MirrorSelection`), so
-  the row clicked in one is highlighted in the other. List-box selection
-  signals are muted while rows are selected programmatically: an input
-  they queue is judged later against a selection that may have moved on,
-  which made two instances oscillate through the app.
-- **Hover peek across both panes.** Leaving the rail arms the one-second
-  fold-back and entering the panel cancels it, so moving the pointer from
-  the rail into the panel keeps it open.
-
-## 1.27.3-beta.3 — 2026-09-11
-
-The sidebar peek's menu and refresh buttons stay where the rail draws them.
-
-- **Peek header pinned to the rail.** The floating sidebar covers the icon
-  rail, so its first 80px column is what reads as the rail. The peek header
-  used to place the hamburger at the panel's far end and Refresh at the
-  top-left, so both buttons appeared to jump as the panel slid in and back
-  as it left. The peek now keeps the hamburger centred over the rail strip
-  (start-packed, margin compensating the header padding) and keeps Refresh
-  out of the header; the sidebar rows keep the rail's refresh stacked
-  below the menu in peek mode (`SidebarInput::SetPeek`, set before the
-  expanded rebuild on open and after the rail rebuild on close), pinned to
-  the rail's centre line. The "Vireo" title stays centred in the panel.
-
-## 1.27.3-beta.2 — 2026-09-11
-
-The narrow-window sidebar peek no longer moves the rail underneath it.
-
-- **Rail held still under the sidebar peek.** In a narrow window the
-  header's sidebar button used to hand the toggle to the sidebar, which
-  rebuilt its rows expanded while still docked at rail width; the split
-  view then re-laid the 80px rail around those rows for a frame before the
-  app collapsed it, and the ghost strip under the sliding panel showed a
-  rail snapshot cached at an earlier pointer-enter, stale whenever a folder
-  had been picked or a section folded since. The button now runs the peek
-  itself: capture the live rail, show its ghost and collapse the split in a
-  single layout pass, then rebuild the rows expanded off-screen for the
-  slide-in. The pointer-enter snapshot is kept only for the hover-expand
-  peek, where it avoids a hover-highlighted row in the ghost.
-- **End-of-close restore waits for the slide-out.** The rail used to be
-  docked back by a fixed 320ms timer, racing the split view's spring
-  (about 290ms to settle); when the spring finished after the dock, its
-  done handler hid the docked rail, leaving no sidebar and a dead toggle
-  until the next press repaired it (seen on 1.17.1). The close now watches
-  the split's sidebar bin for the slide-out to end (frame tick plus a
-  250ms poll for a stopped frame clock), rails the rows and compacts the
-  header first, and docks on a low-priority idle once the rows are rebuilt,
-  so the ghost is swapped for identical pixels. A generation counter drops
-  stale watchers when the peek reopens, pins or is repaired; a window
-  widening mid-slide-out runs the restore at once and restarts the spring
-  toward "shown" so it cannot hide the rail.
-
-## 1.27.3-beta.1 — 2026-09-11
-
-Catch-up with stable 1.27.2: the beta channel carries exactly the 1.27.2
-code and documentation below, under the beta app ID.
-
 ## 1.27.2 — 2026-09-11
 
 Inbox and Archive use GNOME's own icons.
@@ -506,11 +350,6 @@ Inbox and Archive use GNOME's own icons.
   button.
 - **README screenshot** refreshed to show the new icons.
 
-## 1.27.2-beta.1 — 2026-09-11
-
-Catch-up with stable 1.27.1: the beta channel carries exactly the 1.27.1
-code and documentation below, under the beta app ID.
-
 ## 1.27.1 — 2026-09-11
 
 French translation catch-up for the 1.26.0 strings.
@@ -524,11 +363,6 @@ French translation catch-up for the 1.26.0 strings.
   strings are reworded ("Generate…" gets its ellipsis, "No keys from
   other people yet."). The 83 strings still in English are the ones
   1.27.0 added.
-
-## 1.27.1-beta.1 — 2026-09-11
-
-Catch-up with stable 1.27.0: the beta channel carries exactly the 1.27.0
-code and documentation below, under the beta app ID.
 
 ## 1.27.0 — 2026-09-11
 
@@ -859,282 +693,6 @@ the Actions Palette as a menu. Everything from the 1.27.0 betas is in.
   `VIREO_SHOWCASE_TOGGLE`; `FolderKind` derives `Hash`, `Message`
   derives `PartialEq`.
 
-## 1.27.0-beta.3 — 2026-09-11
-
-Third preview of 1.27.0: a tag finder, "Not Spam", sender logos at
-their real size, initials centred by their ink, and a composer that
-fits a narrow pane.
-
-- **Tag finder** (Settings → Tags → "Find Tags…"). Every account is
-  asked for the keywords in use across all its folders
-  (`MailRequest::FindKeywords` → `WorkerEvent::KeywordsFound`, fanned
-  out and counted in `App::tag_scan`, with a two-minute safety net for
-  an account that never answers). IMAP: EXAMINE per folder reads the
-  mailbox's FLAGS line and a `UID SEARCH KEYWORD` per candidate gives
-  the count (an unused keyword is dropped; `worker::is_system_keyword`
-  leaves out `$Junk`, `$Forwarded`, `$MailFlagBit…` and the like).
-  Microsoft 365: the mailbox's master categories with their names and
-  preset colours (`graph_preset_color`), counts from the cache
-  (`Cache::count_with_keyword`). POP3 has nothing to find; the demo
-  answers with a fixed set. Findings merge by keyword across accounts,
-  known tags are dropped, and each keyword gets a proposed name and
-  colour (`Tag::name_for_keyword` / `color_for_keyword`: Thunderbird's
-  `$label1`–`$label5` become Important, Work, Personal, To Do and Later
-  in Thunderbird's colours; anything else reads as words and takes the
-  next free palette colour). The report (`AccountsInput::TagFindings`,
-  an `adw::MessageDialog` checklist) offers Import All or Import
-  Selected; the button shows a spinner and "Searching…" meanwhile.
-- **Not Spam** (#168). In Junk, the row menu, bulk menu and bar, the row
-  palette, the reader's toolbar button, its folded ⋯ menu and the spam
-  shortcut read "Not Spam": `MailRequest::MarkHam` / `MarkHamMany` set
-  `$NotJunk`, clear `$Junk` (best-effort, as marking spam is) and move
-  the messages back to the Inbox in one round (`mark_ham`); Microsoft
-  365 moves them. `MessageListInput::SetInJunk` beside `SetRestorable`,
-  `RowAction::NotSpam` / `BulkAction::NotSpam`, `RowInit.in_junk` for
-  the palette; the unified views clear the state too. Icon
-  `mail-mark-notjunk-symbolic` joins the bundled set; the demo's Junk
-  folder holds two messages.
-- **Sender logos at the size the site publishes** (`logo::discover`).
-  Only the two root paths were tried, so most senders got the 16–48px
-  favicon.ico. The domain's home page (first 512KB, browser-ish
-  User-Agent) and its web manifest are read for `<link rel="icon">`,
-  `apple-touch-icon` and manifest icons, ranked by claimed size with the
-  root `apple-touch-icon.png` (180) and `favicon.ico` (32); SVG and mask
-  icons are skipped. Decoding still downsizes to 160px for the cache.
-- **Initials centred by their ink** (`ui::initials::InitialsPaintable`).
-  The message list's avatars, the sidebar's account circles and the
-  reader cards' circles are drawn from the ink extents of the laid-out
-  text rather than a label's logical box: a lone letter and a pair both
-  sit exactly in the middle. The list keeps libadwaita's fourteen avatar
-  gradients and its name hash, so every sender keeps their colour; the
-  sidebar's `glyph_picture` (sized to the circle, expanding nothing)
-  replaces the label and its optical-nudge CSS; the reader embeds each
-  circle as a PNG rendered at the screen's scale (`png_data_uri`, cached
-  per initial and tint) with the per-address hue as before.
-- **Compose folds in a narrow pane.** An inline composer (new message,
-  reply, forward) in a narrow reader pushed the window's close button
-  off the canvas. The composer's root is an `adw::BreakpointBin` (360px
-  floor); the full header is measured on first map, and below that
-  width everything but Cancel, Send and the fields chevron folds into a
-  ⋯ menu (`ComposeInput::SetNarrow` / `OverflowMenu`, the OpenPGP
-  toggles ticked when on). The compose header shares the reader
-  toolbar's tighter spacing; the compose window opens 720px wide. Fixed
-  alongside: `Compose::update_with_view` never called `update_view`, so
-  every `#[watch]` in the composer (the Send/Schedule label, Delete
-  Draft, the cloud button) held its init value.
-- **Tags in a submenu.** The row context menu and the reader's folded
-  ⋯ menu put the tag toggles behind a "Tags ›" row
-  (`context_menu::MenuEntry::submenu`: the popover is a `gtk::Stack` of
-  pages with a back row; a page taller than 420px scrolls). The
-  palette's and the reader toolbar's tag menus stay flat.
-- **Sidebar rail toggle without the smear.** The freeze-frame snapshot
-  over a rebuild was a `ContentFit::Fill` picture, stretched by the
-  200ms width animation of a rail toggle. It now keeps the width it was
-  taken at (halign Start, clipped by the overlay) and fades out over the
-  same 200ms during a toggle (`built_collapsed` tells a toggle from an
-  in-place refresh); other rebuilds keep the 80ms lift.
-- **Row context menu in the capture phase.** The list's secondary-button
-  gesture runs in the capture phase and claims the sequence, so no
-  widget inside a row can take the press first; a miss on the row band
-  falls back to picking the row under the pointer.
-- **Inboxes chip.** The unified Inboxes chip counts the inboxes alone
-  (`App::inboxes_unread`); a filter destination has its own row and chip
-  under Filters. The rule's "Count unread mail" switch keeps feeding the
-  tray icon and the Background Apps status, and says so.
-- **Settings.** Add Account… (no longer a pill at the foot of the list),
-  Add Filter…, Add Tag… and Find Tags… are regular 130px buttons at
-  their group's end, stacked where a group has two. The Tags description
-  breaks before "Drag a tag to reorder".
-- Showcase hooks: `VIREO_SHOWCASE_FIND_TAGS`, `VIREO_SHOWCASE_ROW_MENU` +
-  `VIREO_SHOWCASE_MENU=main|<submenu>`.
-
-## 1.27.0-beta.2 — 2026-09-11
-
-Second preview of 1.27.0: filters and tags settle into the sidebar and
-Settings, unread chips get per-row switches and never overflow, and a
-renamed folder no longer haunts every fetch.
-
-- **Filters in the sidebar.** The unified "Filtered Folders" row is
-  "Filters" (`row_title`, the heading-style section, and the Settings →
-  Sidebar rows that name it). The per-rule "Show under All Inboxes"
-  switch is gone: `FilterRule.show_in_unified` is removed (older
-  `filters.toml` files still load; the key is ignored) and the unified
-  Filters section lists every rule's destination
-  (`unified_folder_refs`), switched on or off as a whole. Each account's
-  own Filtered Folders section is gone too; instead a destination folder
-  is marked in place in the account's hierarchy (`filter_icon` →
-  `FolderGlyph`): a custom folder wears the filter-folder glyph in the
-  account's colour (`filtered_folder_icon`, `acct-tint-{id}`), a main
-  folder (Archive, Junk…) keeps its grey glyph with a 9px
-  `filter-symbolic` mark on the icon's corner in the account's colour
-  (`FolderGlyph::Marked`, `.filter-mark`; bottom-right in the rail, where
-  the unread badge has the top). The unified Filters rows show the
-  kind's glyph tinted. `co.hyprlab.Vireo-filter-symbolic` (GNOME's
-  three-bar filter) joins the bundled icon set.
-- **Tags under each account** sit between the essential folders and the
-  "Folders (N)" list.
-- **One folder context menu** (`folder_menu_items(id, &Folder,
-  filtered)`) wherever a folder is listed — under its account, as a
-  unified Filters row, or in a heading-style filtered section: Mark as
-  Read, Refresh, "Edit Filter…" for a filter destination
-  (`CtxAction::EditFilter { account_id, path }` opens Settings on the
-  Filters page with that rule's editor), Rename/Delete for custom
-  folders, Empty for Trash and Junk. The unified rows drop their extra
-  "Account Settings…" item. Every tag row (unified, heading-style,
-  per-account) takes a right-click: "Edit Tag…"
-  (`attach_tag_context_menu`, `CtxAction::EditTag(keyword)`).
-- **Filter and tag editors are pages.** `open_filter_page` /
-  `open_tag_page` push an `adw::NavigationPage` (tags `filter` / `tag`)
-  on the accounts panel's navigation view, like the account and cloud
-  editors: a header with Save and the window's close button, Enter in a
-  field saves (`push_form_page`, `form_save`). `AccountsOutput::EditorOpen`
-  carries the settings page that owns the open editor
-  (`Option<&'static str>`), so the leave-editor prompt says filter or
-  tag and saves through the open page (`AccountsInput::SaveOpenPage`);
-  `CloseEditor` pops any of the three. The colour chooser parents to the
-  active window. The Filters and Tags list cards lose their pencil (and
-  the filter cards their "Count unread" switch, which lives in the
-  editor) for a chevron, like the account and cloud cards.
-- **Unread chips per unified row** (Settings → Sidebar → Unified →
-  "Unread counts", an expander with a switch each for Inboxes, Starred,
-  Drafts, Archive and Filters): `UnifiedChips` in `privacy.toml`
-  (`[unified_chips]`, all on; the old `unified_chip` still counts for the
-  Inboxes row through `load_unified_chips`), read by the sidebar's
-  `chip_shown(row)` at every chip site, rail dots included.
-- **Chips never overflow.** `style_badge(label, max_chars)` is the one
-  way to make an unread chip: ellipsized past five digits (four in the
-  rail's corner badges), and the unified header titles ellipsize, so a
-  wide chip shortens the title rather than pushing the chevron out.
-- **Unified glyphs aligned.** Rows under Filters and Tags no longer take
-  the `.unified-subrow` 2px pull-in that centres the 21px account pills
-  (`build_unified_sub_row(..., pill)`), so their 16px icons and discs sit
-  on the header's icon column; their label gives up the same 2px.
-- **Renamed folder follows the selection.** `apply_folder_rename` left
-  `selected` on the old path, so every auto-fetch asked the server for a
-  mailbox that no longer existed ("Could not load Vreo" every minute
-  after Vreo → Vireo). The selection (and any child path) moves with the
-  rename, the sidebar row is reselected, and a `LoadMessages` is queued
-  behind the `RenameFolder` on the worker so the cleared view refills.
-- **"All Inboxes" is "Inboxes"**, in the sidebar, Settings, README and
-  the metainfo feature list.
-- **Archive row** in the unified section (`UnifiedKinds.archive`,
-  `archive_expanded`, rail fold-up and unread-chip switches).
-- **Tag views cached.** Opening a tag shows the cached list at once
-  (`tag_view_cache`) and reads the index off the main thread
-  (`AppMsg::TagViewLoaded`).
-
-## 1.27.0-beta.1 — 2026-09-10
-
-A preview of 1.27.0: the unified section grows into its own thing, the
-sidebar remembers itself, the message list and the Settings window open
-in tens of milliseconds, and list previews read the charset they were
-sent in (#159).
-
-- **List previews in the right charset** (#159, @7system7). The preview
-  line under a subject read the first part's bytes as UTF-8, so an
-  `iso-8859-2` body showed a replacement character per accented letter
-  while the reader was fine. The summary fetch now asks for
-  `BODY.PEEK[1.MIME]` alongside the slice; `preview_from_part` works on
-  bytes, transfer-decodes first and reads the text in the declared
-  charset through mail-parser's table (`decode_text`), UTF-8 and ASCII
-  directly. Parts inside a nested multipart use their own Content-Type
-  (folded headers unfolded, `mime_header`). A slice cut mid-character
-  drops the fragment; undeclared 8-bit text falls back to Windows-1252.
-  A first part that is a file (photo mail) yields an empty preview and
-  hands off to the `BODY[TEXT]` retry (`retry_missing_previews`, now
-  shared), which tolerates a MIME preamble; cached rows still holding
-  replacement characters are re-read up to 12 per folder load
-  (`redecode_garbled_previews`).
-- **Unified section.** Starred, Sent and Drafts rows join All Inboxes,
-  each built by one builder (`UnifiedRow`, `build_unified_row`): the
-  header opens the merged view, the caret (or a long-press) opens the
-  accounts' own folders of that kind. The unified view merges a set of
-  (account, folder) slices (`UnifiedView::{Kind, Filtered}`,
-  `unified_slices`) rather than one folder per account, carried through
-  load, refresh, mark-read, index and background-sync paths. Filtered
-  Folders and Tags placed "In the unified section" are unified rows too;
-  their headers open every rule's folder merged and every tagged message
-  (`tag_view` keyword `None`). "Above" and "Below the accounts" keep the
-  heading style. Sent wears no unread chip anywhere. The section heads
-  the scrolling sidebar rather than the pinned area (it can stand taller
-  than a short window), and its rows stack with no gap (`.unified-item`).
-- **Per-account Filtered Folders and Tags** under each account's Folders
-  heading, whatever the unified section shows: every rule's destination
-  (`account_filtered_folders`) and every tag scoped to that account
-  (`TagSelected { account }`; the cache's keyword query was already
-  per-account). Section widgets are keyed by `Slot::{Unified,
-  Account(id)}`.
-- **Settings → Sidebar** is three groups. "Sidebar": "Accounts in the
-  sidebar" (`show_accounts`, also the main menu's "Show Accounts" check
-  item, a stateful `app.show-accounts` action, and Ctrl+Shift+A), chevron
-  placement, Attachments/Contacts rows, hover-expand, "Remember the
-  sidebar layout" (`remember_sidebar`; off starts every launch with every
-  account and section folded, accounts folded as they arrive in
-  `SetAccount`) and "Remember icon rail state" (`remember_rail`).
-  "Unified": a switch per row (`unified_kinds`, `unified_tags`) plus the
-  unread-count switch and the two placement combos. "Icon rail": unread
-  dots (`rail_dots`, a `.rail-dots` style on the rail's containers) and
-  "Fold up expanded items" (`RailFold { enabled, accounts, all_inboxes,
-  starred, sent, drafts, filtered, tags }`), an expander row whose enable
-  switch is the master. Everything defaults to on.
-- **Sidebar layout persisted.** `sidebar.toml` gains `unified_expanded`,
-  `filtered_expanded`, `tags_expanded`, `starred_expanded`,
-  `sent_expanded`, `drafts_expanded`, `filtered_expanded_accounts` and
-  `tags_expanded_accounts`, reported by `SidebarOutput::SectionsOpen` and
-  the per-account toggles.
-- **Icon rail.** The Filtered Folders and Tags headings sat 2px left of
-  every other rail item (a padding rule meant for the full sidebar);
-  fixed with a rail-scoped rule. "Fold up expanded items" is a view of
-  the rail, not a change to what is saved: while collapsed, ticked items
-  start folded; anything opened or folded in the rail — a long-press on a
-  unified row, a click on an account avatar — lands in the rail's own
-  `rail_open`/`rail_open_accounts` states, cleared whenever the sidebar
-  changes width, so the full sidebar comes back exactly as it was left.
-  The rail carries no chevron buttons any more; the tooltip says
-  "Long-press to expand or collapse", and the long-press works in the
-  full sidebar too, alongside the chevrons.
-- **Tag rows** indent like the Filtered Folders rows (the same leaf
-  expander slot) and use regular weight.
-- **Message list speed.** Measured with a 15,000-message demo mailbox
-  (`VIREO_DEMO_BULK`), a switch into a unified view took 300–600ms: 200
-  row widgets built at 1.5ms each, the previous 200 destroyed first, two
-  or three times per switch. Now: rebuild requests coalesce
-  (`queue_rebuild`, one rebuild per main-loop pass ahead of GTK's
-  layout); the first 20 rows build synchronously and the rest in idle
-  chunks (`fill_rows`, `row_send` guards indices, `flush_rows` before
-  structural edits); a page switch hands the pane a fresh list box and
-  retires the old rows at idle (`discard_rows`, `wire_list`); the row's
-  eleven action-palette buttons build on first open (`build_palette`,
-  0.9ms per row from 1.5); "load more" appends when the existing rows are
-  unchanged (`row_sigs`). An arriving folder list identical to the held
-  one no longer re-threads or re-emits; a unified view seeds missing
-  slices from the on-disk index when it opens. Warm switch ≈55ms, cold
-  ≈40ms. `VIREO_SHOWCASE_UNIFIED=sent|starred|drafts|filtered|tags`
-  drives the rows in the showcase; timings log at debug level.
-- **Settings window speed.** Opening took about a second (reportedly
-  several with eight or more accounts): every account's passwords were
-  read from the keyring first, the icon gallery decoded the catalogue,
-  the dictionary list read directories, the OpenPGP page ran gpg, the
-  signature editor's WebKit view was created, and the stack measured
-  every page. Passwords load when an account's editor opens, off the
-  main thread (`AccountSecrets`, with a sync fallback at Save); the
-  gallery (`app_icon::texture` now cached), dictionaries and gpg probe
-  run after the first paint at low priority; the signature editor and
-  the editor page mount on first use; the stacks are non-homogeneous and
-  unshown pages join after the first paint; the window is built hidden
-  1.5 s after startup and kept (`set_hide_on_close`), the accounts panel
-  rebuilt on reopen only when its inputs changed (`accounts_seed`). First
-  open ≈170ms, reopen ≈70ms. The settings and account section stacks
-  switch without a crossfade.
-- **Showcase hooks**: `VIREO_SHOWCASE_SETTINGS_REOPEN`, `VIREO_SHOWCASE_RAIL`,
-  `VIREO_SHOWCASE_TOGGLE`; `FolderKind` derives `Hash`, `Message`
-  derives `PartialEq`.
-
-## 1.26.1-beta.1 — 2026-09-10
-
-Catch-up with stable 1.26.0: the beta channel carries exactly the 1.26.0
-code and documentation below, under the beta app ID.
-
 ## 1.26.0 — 2026-09-10
 
 A default sender for new messages and number keys for tags (#157), the
@@ -1205,10 +763,6 @@ like Mail Accounts, and a fuller settings backup.
   window's Thanks list, the README and the website; @p-mitana joins the
   About window.
 - README: tagline without "clean".
-
-## 1.25.3-beta.1 — 2026-09-09
-
-Catch-up with stable 1.25.2: the same code, on the beta channel.
 
 ## 1.25.2 — 2026-09-09
 
@@ -1290,10 +844,6 @@ chosen per upload; recipient suggestions remember everyone you write to.
 - **Sign-in success page** shows the bare app icon, without the rounded
   tile behind it.
 
-## 1.25.2-beta.1 — 2026-09-09
-
-Catch-up with stable 1.25.1: the same code, on the beta channel.
-
 ## 1.25.1 — 2026-09-09
 
 French translation catch-up and a message-list drawing fix.
@@ -1315,11 +865,6 @@ French translation catch-up and a message-list drawing fix.
   messages deep, so screenshots show the Tags and Filtered Folders sections
   and an expanded thread without staging. The README screenshot is
   refreshed.
-
-
-## 1.25.1-beta.1 — 2026-09-09
-
-Catch-up with stable 1.25.0: the same code, on the beta channel.
 
 ## 1.25.0 — 2026-09-09
 
@@ -1391,10 +936,6 @@ Send Later, cloud attachments, and a round of composer and drafts work.
   switches the demo to that folder; `VIREO_SHOWCASE_SETTINGS=<page id>`
   opens any Settings category.
 
-## 1.24.4-beta.1 — 2026-09-08
-
-Catch-up with stable 1.24.3: the same code, on the beta channel.
-
 ## 1.24.3 — 2026-09-08
 
 French translation catch-up.
@@ -1409,10 +950,6 @@ French translation catch-up.
   (`Senders`, `{n} more address`) were cleared, and two typos corrected.
   Still untranslated: `Senders`, `{n} more address`, `Custom colour…`,
   `Tag Colour` and the export-log description.
-
-## 1.24.3-beta.1 — 2026-09-08
-
-Catch-up with stable 1.24.2: the same code, on the beta channel.
 
 ## 1.24.2 — 2026-09-08
 
@@ -1442,10 +979,6 @@ Any colour for a tag, and a composer that follows the theme.
   6 s, `VIREO_SHOWCASE_EDIT_TAG=<index>` opens a tag's editor (past the
   end: Add Tag).
 
-## 1.24.2-beta.1 — 2026-09-08
-
-Catch-up with stable 1.24.1: the same code, on the beta channel.
-
 ## 1.24.1 — 2026-09-08
 
 Three preview lines are three lines again, and a swipe slides flush.
@@ -1464,10 +997,6 @@ Three preview lines are three lines again, and a swipe slides flush.
   geometry changes and the list never shifts as a drag starts or settles.
   A `swiping` row class is held from the first drag until the snap-back
   animation lands.
-
-## 1.24.1-beta.1 — 2026-09-08
-
-Catch-up with stable 1.24.0: the same code, on the beta channel.
 
 ## 1.24.0 — 2026-09-08
 
@@ -1553,12 +1082,6 @@ The reader's own fonts and colours over the senders'.
   account editor keeps the window's close button in its own header, and
   choosing another category while an editor is open asks to save, discard
   or stay. The General category wears the puzzle-piece icon.
-  socket. Signing and encrypting outgoing mail, and key management, are the
-  next slices.
-## 1.23.2-beta.1 — 2026-09-07
-
-The beta channel catches up with stable 1.23.1: the same code, no
-beta-only changes.
 
 ## 1.23.1 — 2026-09-07
 
@@ -1587,13 +1110,6 @@ server conversation in the log so the next such report explains itself.
   translations — and the icon override the app writes for a chosen app
   icon; `--purge` also removes the settings, cache and data directories
   (keyring passwords stay). Same `PREFIX` convention as the installer.
-
-## 1.23.1-beta.1 — 2026-09-07
-
-The beta channel catches up with stable 1.23.0: the same code, no
-beta-only changes. The beta build now ships the .Devel twin of the new
-default icon (GNOME's hazard stripe) as its own icon, with a scalable
-SVG installed alongside the PNGs.
 
 ## 1.23.0 — 2026-09-07
 
@@ -1687,13 +1203,6 @@ translation completed.
   bundle), a `.tag-<keyword>` colour stylesheet the chips and sidebar
   share, and a `tag-symbolic` icon.
 
-## 1.22.1-beta.1 — 2026-09-06
-
-The beta channel catches up with stable 1.22.0: the same code, no
-beta-only changes. Everything since 1.22.0-beta.7 (the Ctrl+C copy with
-its "Copied" pill, the 100-message cross-folder conversation limit, and
-the French corrections from PR #131) is in the 1.22.0 section below.
-
 ## 1.22.0 — 2026-09-06
 
 A translatable interface with a French translation, pictures from the
@@ -1786,127 +1295,6 @@ Ctrl+C in the reader. Everything previewed in the 1.22.0 betas.
 - **Tests.** The tray's tests build again (#124, reported with a PR by
   @typedev, #125); tests for the filename path, the hostile-`alt`
   rejection, the signature sanitizer and the `mid:` parser.
-## 1.22.0-beta.7 — 2026-09-06
-
-Deleting on servers without MOVE, mid: links, and a redrawn envelope.
-
-- **Moves work on a server without the MOVE extension** (#128, reported
-  by @EmmanuelP on a Zimbra account). Every move, deleting included, went
-  through `UID MOVE`; a server without MOVE answers "command not permitted
-  with UID", so nothing could be deleted, archived or filed there.
-  `worker::uid_move` now asks `CAPABILITY` and, without MOVE, does `UID
-  COPY`, flags the originals `\Deleted` and expunges (`UID EXPUNGE` with
-  UIDPLUS, plain `EXPUNGE` otherwise). The delete helper shares that step.
-- **No stray frame under an empty sender list** (#129, @EmmanuelP). An
-  empty boxed list still drew its border under the "Address or domain"
-  entry; the allowed-senders and blacklist lists are hidden until they
-  have a row.
-- **`mid:` links open the message with that Message-ID** (#130, requested
-  by @7system7 for the Vicinae extension). Vireo registers for the `mid`
-  URI scheme (RFC 2392) in both desktop entries. The id is normalized as
-  the cache stores it (percent-decoded, brackets optional, lowercase, an
-  optional `/content-id` after the domain dropped; slashes inside the id
-  kept; GLib's `mid:///` form accepted). The local index is asked first,
-  through a new index on `message_id`; on a miss every IMAP account runs
-  `UID SEARCH HEADER Message-ID` folder by folder (POP3 and Graph answer
-  from the index only), and a miss is reported once in the notification
-  bar. A running instance takes the link over D-Bus.
-- **Icons.** The envelope is redrawn from SVG under the same id, now
-  labelled "Envelope, yellow", and cream, blue and white variants join it
-  in the gallery, which runs Default, the four envelopes, the birds, the
-  colours, the patterns, Classic.
-
-## 1.22.0-beta.6 — 2026-09-06
-
-Labels that stayed English in a translated interface.
-
-- **Marked but untranslated labels** (#122, reported by @frenchy82 on
-  1.22.0-beta.3). Tables of labels marked with `i18n_noop` must be
-  translated where they are shown, and several consumers passed them
-  straight through: the sidebar's folder context menus (Mark as Read,
-  Refresh, Rename Folder…, Delete Folder…), the editor toolbar's
-  tooltips, the shortcuts help and the provider hint under the provider
-  row. Also translated now: the message list's conversation entries
-  (Star Conversation, Mark All as Read/Unread), the preview-lines
-  dropdown, the tray's Open Vireo, the filter dialog's title, and every
-  dialog button that was a bare literal (Cancel, Delete, Remove, Add,
-  Create, Rename, Insert, Later, Restart Vireo, Delete Conversation).
-  `po/vireo.pot` gains nineteen strings; eleven remain untranslated in
-  `po/fr.po`, all from this week's new features.
-
-## 1.22.0-beta.5 — 2026-09-06
-
-HTML signatures.
-
-- **Signatures from an HTML file, or edited as HTML** (#120, reported by
-  @7system7). Signatures were already stored as HTML and edited in place;
-  the account editor's Signature group now has "Import File…" (an HTML or
-  text file, through `gtk::FileDialog`) and "Edit HTML…" (the current
-  signature's source in a dialog, to paste into or edit). Both go through
-  `rich_editor::signature_from_source`: plain text is escaped like a typed
-  signature; HTML is sanitized with ammonia keeping tables, inline `style`
-  and images and dropping scripts, style sheets and event handlers; an
-  image referenced by a local path (relative to the file, or absolute) is
-  embedded as a `data:` URI, up to 8 MB, so the send path lifts it into a
-  `cid:` part like any inline picture. Remote images stay remote. Three
-  unit tests.
-
-## 1.22.0-beta.4 — 2026-09-05
-
-Pictures from the file manager, and picture resizing in the composer.
-
-- **Files from a file manager reach the message** (#126, PR #127 by
-  @typedev). WebKitGTK hands the editor document a `text/uri-list` it then
-  refuses to serve, so a dropped or pasted file arrived as a link or a bare
-  path. The widget now takes such files itself: a `GtkDropTarget` declaring
-  only `GdkFileList` (every other drag still goes to WebKit), and a
-  synchronous clipboard-formats check before a paste is handed over.
-  Images go inline through the document's existing downscale-and-insert;
-  anything else, a picture over 32 MB, or an image type outside a fixed
-  list the engine is known to decode becomes an attachment.
-- **A picture keeps its filename.** It rides on the `<img>` as `alt`, and
-  `build_email` names the inline `cid:` part with it. Only a bare filename
-  is accepted: `alt` arrives from outside on a quoted reply and ends up in a
-  Content-Disposition header, so the value is reduced to its last path
-  segment and rejected if it carries a quote, a backslash or a control
-  character. Two tests cover both.
-- **Pictures can be resized.** Clicking one raises a frame with four corner
-  handles; the context menu leads with Small, Medium, Large and Original
-  Size, as fractions of the writing width. The width goes to the inline
-  style and the `width` attribute. The frame and handles carry
-  `data-vireo-ui` and the body is read through `__vireoBodyHtml()`, which
-  clones it and drops them.
-- **Recompress to This Size on Send.** Resizing changes how big a picture
-  is drawn, not how many bytes travel. This menu entry arms a picture (red
-  frame, red dashed outline) to be recut once, as the message is sent;
-  drafts never touch the pixels, and a draft keeps the arming so a reopened
-  one still shows and honours it.
-- The new menu labels and the arming hint are translatable; `po/vireo.pot`
-  and `po/fr.po` regenerated (six new strings, untranslated in French).
-- Icons: the dark blue and beta icons come from PNG masters again, since
-  librsvg rendered the dark blue gradient as a plain blue; the default icon
-  is also installed as a scalable SVG (install.sh, Flatpak, RPM). Icon
-  sources live in `data/icons/src` with `tools/gen-app-icons.py` to
-  regenerate them; the gallery gains an "Envelope" entry and now leads
-  with Default, Envelope, Bird and Bird, @.
-
-## 1.22.0-beta.3 — 2026-09-05
-
-French, and two strings that had stayed English.
-
-- **French translation.** `po/fr.po`, contributed by @frenchy82 (#122):
-  every string in the interface, the launcher and the metainfo. The app
-  follows the desktop's language; a French session gets French. Two
-  maintainer edits: one shortcut description, and the two strings below.
-- **Inbox and the recipient chip.** The INBOX folder's display name and
-  the reader's "{n} recipients" chip were fixed English; both now go
-  through the catalogue, the chip with proper plurals.
-
-## 1.22.0-beta.2 — 2026-09-05
-
-The beta channel catches up with stable 1.21.1: the refreshed icon set,
-the beta's own ribboned icon included, and the new "Bird, @" gallery
-entry. Everything since 1.22.0-beta.1 is in the 1.21.1 section below.
 
 ## 1.21.1 — 2026-09-05
 
@@ -1916,34 +1304,6 @@ Refreshed icon artwork.
   default, the beta channel's ribboned icon, and the sixteen gallery
   alternatives. A second bird variant carrying an @ joins the gallery as
   "Bird, @" (`data/icons/alt/bird-blue-at-symbol.png`).
-
-## 1.22.0-beta.1 — 2026-09-05
-
-The interface can be translated.
-
-- **Translations through gettext.** Every user-facing string now goes
-  through the helpers in `src/i18n.rs` — `i18n()`, `ni18n()` for
-  plurals, `i18n_f()`/`ni18n_f()` with named `{placeholders}`,
-  `i18n_noop()` for tables of literals translated where shown — and the
-  text domain is bound at startup to the first directory holding a
-  catalogue (an override in `VIREO_LOCALEDIR`, the source tree's own
-  `po/.build`, the install prefix, then the system prefixes). The app
-  follows the desktop's language; nothing to set.
-- **Translator workflow.** `po/vireo.pot` is the template, regenerated
-  by `tools/update-pot.sh` from the source (`xtr`) plus the launcher and
-  metainfo (`xgettext`; the release history is left out). Translators
-  work on `po/<lang>.po` only — see `po/README.md`. The Flatpak build,
-  the RPM and `install.sh` compile `po/*.po` into `share/locale` and
-  merge the translated launcher and metainfo fields (`msgfmt --desktop`,
-  `msgfmt --xml`, driven by `po/LINGUAS`). No translation ships yet:
-  this beta carries the plumbing and the template.
-- **Tests.** The tray's tests are fixed for the app-icon change.
-
-## 1.21.1-beta.1 — 2026-09-05
-
-The beta channel catches up with stable 1.21.0: the same code, no
-beta-only changes. Everything since 1.20.3-beta.1 is in the 1.21.0
-section below (choose the app icon).
 
 ## 1.21.0 — 2026-09-05
 
@@ -1999,12 +1359,6 @@ Choose the app icon, a new default icon, and the redrawn wordmark.
   the wizard and About window; the README logo and every icon refreshed
   from the new files.
 
-## 1.20.3-beta.1 — 2026-09-04
-
-The beta channel catches up with stable 1.20.2: the same code, no
-beta-only changes. Everything since 1.20.2-beta.1 is in the 1.20.2
-section below (editable filters).
-
 ## 1.20.2 — 2026-09-04
 
 Filter rules can be edited, and their rows get more room.
@@ -2024,12 +1378,6 @@ Filter rules can be edited, and their rows get more room.
   `VIREO_SHOWCASE_EDIT_FILTER=<index>` opens that rule's editor for a
   capture, and Settings captures target the newest window so a dialog
   over Settings is what gets shot.
-
-## 1.20.2-beta.1 — 2026-09-04
-
-The beta channel catches up with stable 1.20.1: the same code, no
-beta-only changes. Everything since 1.20.1-beta.1 is in the 1.20.1
-section below (Filtered Folders under All Inboxes).
 
 ## 1.20.1 — 2026-09-04
 
@@ -2063,12 +1411,6 @@ Filter-rule folders reachable from All Inboxes, per rule.
   `VIREO_SHOWCASE_SCROLL=<0..1>` makes it tall and scrolls its panels that
   far down first, and `VIREO_SHOWCASE_FOLD_FILTERED` folds the Filtered
   Folders section, for checking those states in stills.
-
-## 1.20.1-beta.1 — 2026-09-04
-
-The beta channel catches up with stable 1.20.0: the same code, no
-beta-only changes. Everything since beta.9 is in the 1.20.0 section
-below (the gallery table's column alignment, and the README manifesto).
 
 ## 1.20.0 — 2026-09-04
 
@@ -2209,266 +1551,6 @@ Linux Mint.
 - **Discord** joins the About window's project links, and the README
   gains the Vireo Manifesto.
 
-## 1.20.0-beta.9 — 2026-09-03
-
-Mail that filter rules file into folders counts toward unread, per rule
-(#116).
-
-- **Filtered folders count toward unread, per rule (#116).** The unread
-  total behind the All Inboxes chip, the tray icon's dot and menu, and
-  the Background Apps status counted inbox mail only, so mail a filter
-  rule filed into a folder dropped out of the number the moment it was
-  filed: five unread in the window, one in the tray. Each filter rule
-  now carries a "Count unread mail" switch (`count_unread`, on by
-  default, also in the Add Filter dialog; existing rules load with it
-  on), and the folders of counting rules join the account's inbox in
-  the total. Trash and Junk destinations never count. The tray menu
-  lists unread mail from those folders too; their lists are primed from
-  the disk cache at startup, fetched quietly when a rule starts counting
-  a folder, and the background resync that follows a changed count now
-  covers every counted folder, not just the inbox. Flipping the switch
-  recounts at once. Server-side sorting Vireo does not know about is
-  not counted, and notifications are unchanged (inbox arrivals, and
-  mail Vireo's own filters file elsewhere).
-
-## 1.20.0-beta.8 — 2026-09-03
-
-The tray menu and new-mail notifications follow the inbox while another
-folder is open (#116), Account Settings… opens the right account, and
-the split reply closes in one motion.
-
-- **An inbox's list follows its unread count while another folder is
-  open (#116).** The worker's IDLE sits on the folder last opened, so
-  with another folder in view the inbox only ever got count updates
-  from its watcher and the sweep; its message list refreshed when the
-  inbox was next opened. Both the tray menu's cards and the new-mail
-  notification read that list: the menu said "No unread mail" under a
-  "View all 1 unread" row, and mail arriving while a filtered folder
-  was open raised no notification. A changed inbox count now asks the
-  worker for a quiet resync (`MailRequest::SyncFolder`): the same fetch
-  as opening the folder, without the status text and without adopting
-  the folder for IDLE or the watch list. An open inbox (alone or as All
-  Inboxes) is skipped, being the IDLE folder already. The sweep
-  re-emits every count each pass, so only a changed value triggers it.
-- **Account Settings… from the sidebar opens that account's editor.**
-  Right-clicking an account header or one of its folders and choosing
-  Account Settings… opened Settings on the Accounts list; it now opens
-  the editor for that account, stepping back from another account's
-  editor first if one is up.
-- **The split reply's exit slides the reader header in with it.**
-  Closing the split reply slid the panel up, then re-showed the
-  reader's header bar in one frame: the reader jumped up as the panel
-  went and back down as the header popped in, with the icons flashing
-  on. The header now returns through the toolbar view's reveal
-  transition, started with the panel's slide, and its icons fade in
-  over the same 300ms. The teardown no longer forbids shrinking the
-  slot before emptying it, which re-clamped the divider to the
-  composer's minimum for a frame (the bounce at the end). Opening
-  slides the header out the same way instead of hiding it.
-
-## 1.20.0-beta.7 — 2026-09-03
-
-The tray icon now appears in the beta Flatpak, and sits level with its
-neighbours on Cinnamon (#116).
-
-- **The beta Flatpak can reach the tray watcher (#116).** The stable
-  manifest gained `--talk-name=org.kde.StatusNotifierWatcher` with the
-  tray icon, but the beta manifest did not, so every beta build since
-  beta.5 shipped a sandbox whose D-Bus proxy dropped the
-  `RegisterStatusNotifierItem` call. Reproduced on Linux Mint 22.3 /
-  Cinnamon 6.6.4: the stock beta.6 showed nothing, and the same build
-  run with the grant registered with xapp-sn-watcher and appeared in
-  the panel. The beta manifest now carries the grant.
-- **The tray icon is drawn smaller on Cinnamon (#116).** Cinnamon's
-  status applet takes a StatusNotifierItem pixmap for a full-colour
-  icon and draws it at the panel's colour icon size, 24px on a default
-  panel, while the symbolic icons beside it get 16px, so the Vireo icon
-  towered over them. When `XDG_CURRENT_DESKTOP` names Cinnamon the icon
-  and its dot are rendered at five-eighths of the pixmap, centred in a
-  clear margin, which brings it level with its neighbours. Every other
-  panel draws the pixmap at the size it asked for and keeps the full
-  fill. A test covers the reduced fill and the moved dot.
-
-## 1.20.0-beta.6 — 2026-09-03
-
-The tray menu lists unread mail (#116), and the beta-only wizard entry
-is gone.
-
-- **Unread mail in the tray menu (#116).** With the tray icon on, its
-  menu lists the newest five unread inbox messages across accounts as
-  card-like rows: the sender's contact or Gravatar picture (initials on
-  a colour when there is none), then sender, account when there are
-  several, and date; the subject; and the list's preview line. A click
-  opens the message in the reader, the same path a notification click
-  takes. Past five, a "View all N unread…" row goes to All Inboxes when
-  that view is on, else to the first inbox in sidebar order holding
-  unread mail, moving the sidebar highlight with it. The section is
-  refreshed with the unread counts and sent over D-Bus only when it
-  changed. A switch under the tray icon rows turns it off. Underscores
-  in mail text are escaped, since a menu label reads them as mnemonics.
-  Actions on a message (reply, mark read, archive, delete) stay in the
-  reader: a tray menu is a DBusMenu the panel draws as a vertical list
-  of icon-and-text rows, so buttons on a card, or icons side by side,
-  cannot be expressed; stacked action rows were tried and dropped.
-- **The Welcome Wizard entry leaves the beta help menu.** It let
-  testers review the first-run flow without wiping their config; that
-  review is done. The wizard still runs on a first launch, and
-  `VIREO_WELCOME=1` still forces it.
-
-## 1.20.0-beta.5 — 2026-09-03
-
-Cached mail opens at once at startup, and a tray icon for the desktops
-that have one (#116).
-
-- **Cached mail opens at once, whatever the worker is syncing.** Each
-  account has one worker that takes requests strictly in order, and
-  every arm runs to completion before the next request is even read
-  from the channel. A folder sync, a backfill chunk of a thousand UIDs,
-  or an attachment prefetch (a whole raw message each) holds it for
-  seconds, and a click on a message whose body was cached long ago sat
-  behind all of it: at startup, with the initial sync running, the
-  reader showed its spinner over mail already on disk. (The beta.1
-  schema bump to v13 made it obvious: it also dropped the bodies table,
-  so every message was re-fetched once, each fetch queued behind the
-  sync.) A cache lane now sits in front of each worker: a thread of its
-  own that answers what the disk cache can (a body, a batch of bodies,
-  an attachment list, a conversation lookup) and passes only what needs
-  the network on to the worker, in the order it arrived.
-- **A tray icon for the desktops that have a tray (#116).** Vireo can
-  publish a StatusNotifierItem, which is what AppIndicator means today:
-  Cinnamon, KDE, MATE, XFCE, and GNOME with the AppIndicator extension
-  draw it. The item is the Vireo icon, or the reader's unread envelope
-  in white or black for panels that don't recolour symbolic icons, with
-  a red dot on its top-right corner while any inbox has unread mail, a
-  tooltip with the count, and a menu: Open Vireo, Accounts, Settings,
-  Quit. A click brings the window back. Off by default, as a switch and
-  an icon choice under Keep running in the background. On a desktop
-  with no tray nothing is drawn and Background Apps is untouched (the
-  item is a D-Bus object the portal never sees); the item keeps waiting,
-  so enabling a tray extension later picks it up without a restart.
-  Icons go as pixel data, since the panel is outside the sandbox. New
-  dependency: `ksni`. The Flatpak manifest gains
-  `--talk-name=org.kde.StatusNotifierWatcher`.
-
-## 1.20.0-beta.4 — 2026-09-03
-
-The attachment drawer's seam, finished (beta.3 feedback).
-
-- **The dead zone is gone at the root.** GtkPaned attaches two
-  capture-phase gestures to the paned itself (a GestureDrag that moves
-  the divider, and its GesturePan touch sibling) that hit-test raw
-  coordinates against an enlarged handle area — untargeting the
-  separator widget never stopped them claiming presses near the seam,
-  which is why the cursor and hover kept working while clicks died and
-  drags "worked" natively. Both gestures are removed; the seam is
-  entirely the app's own.
-- **One continuous handle.** Full-width grab zone above, hairline
-  separator, and a real edge strip inside the drawer's top that clicks,
-  drags, wears the same cursor, and lights the bar on hover.
-- **Cursors that match their seams.** The split reply's handle shows
-  row-resize (matching its live separator); the drawer keeps plain
-  ns-resize.
-
-## 1.20.0-beta.3 — 2026-09-03
-
-Attachment-drawer seam fixes from beta.2 testing.
-
-- **No flash on collapse.** The slide's end was restoring the drawer's
-  minimum-size constraint while its body was still visible — the Paned
-  jumped the divider up to fit the body, then the settle snapped it
-  back. State now flips before the constraint returns, on the animated
-  and skip paths alike; the same window could occasionally record the
-  jump as the drawer's height, so a resized drawer reopens at its
-  dragged height reliably now (drags also record their height
-  directly).
-- **The seam answers everywhere.** The grab zone is taller, the
-  separator strip itself toggles on click (it already dragged), and the
-  drawer's topmost few pixels toggle too — from above the bar to just
-  inside the drawer, no dead zones to hunt around.
-
-## 1.20.0-beta.2 — 2026-09-03
-
-Polish on beta.1's composer work, from first-round beta feedback.
-
-- **Smooth composer entrances and exits.** The split reply slides in the
-  way it slides out (the divider is animated; the revealer's own
-  transition never ran, since it starts unmapped and adw skips
-  animations on unmapped widgets). New Message defers its reveal one
-  frame so its slide actually plays, and closing it slides up before
-  the composer is removed instead of blinking out. The editor fades in
-  when its document finishes loading, so content arrives as a fade into
-  the settled panel rather than a late pop.
-- **A slimmer split reply.** While a reply is open, the reader's own
-  header bar is hidden — it showed a second set of window decorations
-  mid-window and spent vertical space the split needs. The visible
-  reader starts at the remote-content banner, or the subject block
-  without one; the header returns when the reply closes.
-- **A findable drawer handle.** The attachment drawer's grab bar wears
-  a drop shadow so it reads on dark message content (it vanished in
-  dark mode), and its hit zone is the full width of the seam: click
-  anywhere along the drawer's edge to toggle it, grab anywhere along it
-  to resize.
-
-## 1.20.0-beta.1 — 2026-09-03
-
-Feature beta previewing 1.20.0.
-
-- **Spell checking in the composer** (discussion #114). WebKit's checker
-  runs in the message body; the subject line asks the same enchant
-  engine directly, since GTK entries have none of their own. Both check
-  the word being typed: the subject on every keystroke (exempting the
-  word under the cursor until a 400ms pause), the body's caret word via
-  a 600ms round trip drawn with the CSS Custom Highlight API. Settings
-  gains a Spelling group: an on-by-default switch, a language dropdown
-  offering exactly the installed dictionaries (named in their own
-  language), and an "Added words" list managing the personal dictionary
-  that Learn Spelling feeds. The Flatpak bundles eleven languages beyond
-  English; English variants are trimmed to the five anyone looks for.
-- **Inline images in the composer** (discussion #113). Pasting or
-  dropping a picture puts it in the text at the caret, downscaled to
-  1600px; sending lifts each into an inline cid: part inside
-  multipart/related, out of the recipient's attachment list. A click
-  selects an image whole (delete/cut/copy work on it); right-click
-  offers "Send as Attachment Instead". WebKit's native image paste
-  arrives as a blob: URL — invisible to clipboardData, dead on the
-  wire — so every blob: image is adopted into a scaled data: URI the
-  moment it appears.
-- **Reply follows Reply-To.** Summaries now carry the Reply-To list from
-  every ingestion path (ENVELOPE, iCloud raw-header fallback, POP3,
-  Graph); Reply and Reply All answer it instead of From, and Reply All
-  keeps the To address out of Cc. Cached mail heals as folders re-sync.
-- **Wide mail scrolls.** A message wider than the pane made its sandboxed
-  frame horizontally scrollable, and WebKit's wheel-latching swallowed
-  vertical scrolling over it. Frames now widen to their content inside a
-  panning wrapper, so the wheel always reaches the page and wide mail
-  pans sideways in place.
-- **Split reply reworked.** The panel holds the height it is given (a
-  big paste can no longer push it down), dragged by an iOS-style grab
-  pill floating at its bottom edge, and slides out on cancel/send the
-  way it slid in. The dragged height is remembered.
-- **Attachment drawer reworked.** The same grab pill replaces the
-  chevron: click toggles collapsed/expanded (animated, both ways), drag
-  resizes live — from collapsed too, where the release point becomes the
-  new height.
-- **Paste is plain text by default.** Ctrl+V strips formatting; the
-  editor's context menu always offers "Paste with Formatting" and
-  "Paste as Plain Text"; a Settings switch ("Paste as plain text", on by
-  default) flips the default.
-- **Attachment fixes** (#109, #111, #117 — PRs #110, #112, #118). Small
-  attachments sent from web Gmail are no longer dropped by the
-  inline-image heuristic; a labelled Gmail message's attachments are
-  fetched once, not once per label; filenames split across two RFC 2047
-  encoded-words are rejoined, keeping their extension. The attachment
-  cache is rebuilt once on upgrade (schema v13) so mail already synced
-  by affected builds heals too.
-- **Add Sender to Contacts** joins the message list's right-click menu.
-- **Discord** joins the About window's project links.
-
-## 1.19.3-beta.1 — 2026-09-02
-
-Catch-up release: the beta matches stable 1.19.2 (next section). No
-beta-only changes.
-
 ## 1.19.2 — 2026-09-02
 
 - **Emails with their own dark mode render on the right ground.** A
@@ -2484,11 +1566,6 @@ beta-only changes.
   `prefers-color-scheme` media query is now pinned to the ground the
   reader actually chose, so an email's own light and dark rules follow
   the card, not the desktop.
-
-## 1.19.2-beta.1 — 2026-09-01
-
-Catch-up release: the beta matches stable 1.19.1 (next section). No
-beta-only changes.
 
 ## 1.19.1 — 2026-09-01
 
@@ -2519,11 +1596,6 @@ and never shrink.
   drops the eagerly loaded item bytes (up to 300 × 6 MiB per account,
   previously held in two copies until quit); it reloads from the cache
   on the next visit exactly as it already did.
-
-## 1.19.1-beta.1 — 2026-09-01
-
-Catch-up release: the beta matches stable 1.19.0 (next section). No
-beta-only changes.
 
 ## 1.19.0 — 2026-09-01
 
@@ -2598,99 +1670,6 @@ feedback (@mfreeman72), #50 (@doodoobug-dot), #86 (@yioannides), #97
   parameters; the sidebar's Accounts panel shows the demo accounts in
   demo mode.
 
-## 1.19.0-beta.3 — 2026-08-31
-
-- **Filtered mail raises the new-mail notification (#47 beta feedback).**
-  Mail filters ran before the notification check, so a message filed by a
-  rule arrived silently. Filed mail now counts toward the notification;
-  when the newest arrival was filed, the notification opens the folder it
-  went to, and the Mark as Read/Archive buttons are omitted (the message
-  is no longer where they would act). Filter moves are also remembered
-  per sync, so a sync racing the server-side move can't re-request it.
-- **Cancelling a split reply clears the reply-target outline.** The card
-  outline painted for a split reply stayed behind when the composer
-  closed without sending; a cancel mid-slide could strand one too.
-- **The compose body editor wears the fields' card shadow.** The editor
-  frame takes libadwaita's card styling to match the From/To/Subject
-  rows above it, in the inline split, the popout window, and the
-  signature editor.
-- **Single messages render as cards by default on new installs.**
-  Existing installs keep their saved choice.
-
-## 1.19.0-beta.2 — 2026-08-31
-
-- **Beta selectable as the default mail app.** The beta's desktop entry now
-  registers the mailto handler and passes the URI through, so GNOME's
-  default-apps picker offers Vireo (beta) separately from the stable app and
-  mailto: links open in it. The running-instance hand-off already used the
-  beta's own D-Bus name, so the two channels stay independent.
-
-## 1.19.0-beta.1 — 2026-08-31
-
-The 1.19 feature preview. Everything below is new since stable 1.18.4.
-
-- **First-run welcome wizard.** A brand-new install is greeted by a
-  five-step guided setup — account (one-click GNOME Online Accounts
-  imports plus a manual IMAP form with provider presets and a live
-  connection test), privacy choices, and popular defaults — with the
-  wordmark riding the carousel's spring from hero to header. The main
-  window appears when the wizard finishes or is dismissed. Beta builds
-  carry a Welcome Wizard burger-menu entry for reviewing it safely.
-- **Console mode.** Settings → System & Appearance gains a status-bar
-  console: a live verbose log (dedicated vireo=debug tracing layer)
-  in a dracula-styled, CRT-grained, selectable view — via a status-bar
-  button, the burger menu, or Ctrl+Shift+C; resizable with a 160px
-  floor. WebKit's JS console pipes into the same log.
-- **Mail filters (#47).** Accounts tab → Filters: file inbox arrivals
-  into folders by From address/name, Subject, or To/Cc (contains / is
-  exactly / starts with / ends with), per account, first match wins,
-  applied on sight so mail that arrived while Vireo was closed is
-  filed on the next sync.
-- **Settings backup (#50).** Export every configuration file as one
-  TOML bundle (passwords stay in the keyring, never exported); import
-  replaces the config in place and offers a self-restart.
-- **Notification actions (#38).** Single-message new-mail
-  notifications carry Mark as Read and Archive buttons that act
-  without raising the window.
-- **Split replies (#86).** Reply/Reply All/Forward slide a compact
-  composer (editor only; pop out for the full fields) down from the
-  reader's top, with the conversation visible and interactive below,
-  scrolled to the card being answered with the selection outline.
-- **Search reworked (#102, #103).** The list's search bar hides
-  behind a header button (or Ctrl+F, or /); the reader gains
-  find-in-message with rounded pill highlights (current match solid,
-  the rest translucent), a live "N of M" counter and arrows, hidden
-  text excluded and matches walked in visual order.
-- **Quick filters (#97).** Unread-only and starred-only toggles beside
-  the sort menu, composable, session-scoped.
-- **Read marking rebuilt (#100, #101).** Conversation members mark
-  read as they come into view (the old scrolled-through path never
-  fired), with a Settings → Reading policy: when displayed, after two
-  seconds, or manually. Threads open on the first unread, falling
-  back to the newest message.
-- **Conversation starring.** A thread row's star (palette, context
-  menu, or reader toolbar) stars or unstars the whole conversation —
-  any member starred reads as a starred thread — while individual
-  messages keep their own stars; the reader no longer collapses to a
-  single message when starring an open conversation.
-- **Threads surface their newest message** in the list (sender,
-  avatar, preview), and a conversation row's context menu can mark
-  the whole thread read or unread.
-- **Reorganized Settings.** Filters, Allowed Senders and the
-  Blacklist live on the Accounts tab; the composer always shows its
-  Subject; the About window is rebuilt around the wordmark with
-  flowing Release Notes/Changelog text.
-- **Fixes**: cold-start composers from Nautilus's "Send by email"
-  keep their From field (#105); avatarless rows align top-left with
-  equal padding (#99); emoji avatars centre with their own optical
-  parameters; the sidebar's Accounts panel shows the demo accounts in
-  demo mode.
-
-## 1.18.5-beta.1 — 2026-08-30
-
-Catch-up release: the beta matches stable 1.18.4 (next section). No
-beta-only changes.
-
 ## 1.18.4 — 2026-08-30
 
 Composer attachment fixes with Isaac (@thecalamityjoe87, PR #96).
@@ -2705,10 +1684,6 @@ Composer attachment fixes with Isaac (@thecalamityjoe87, PR #96).
   fresh composer with the files attached, relayed to the running
   instance over D-Bus like mailto; arguments that name no real file
   are ignored.
-## 1.18.4-beta.1 — 2026-08-30
-
-Catch-up release: the beta matches stable 1.18.3 (next section). No
-beta-only changes.
 
 ## 1.18.3 — 2026-08-30
 
@@ -2739,10 +1714,6 @@ sender-seal corrections under GNOME text scaling.
   seal at any GNOME text scaling factor; the seal itself is now
   em-sized and baseline-anchored, so it sits level with the sender's
   name instead of sinking when the type shrinks.
-## 1.18.3-beta.1 — 2026-08-30
-
-Catch-up release: the beta matches stable 1.18.2 (next section). No
-beta-only changes.
 
 ## 1.18.2 — 2026-08-30
 
@@ -2781,58 +1752,6 @@ was requested by @taprobane99 (#88).
   Actions Palette shifts left to match.
 - Beta versions use semver prereleases (X.Y.Z-beta.N) natively in
   Cargo.toml; VERSION is the crate version verbatim on both channels.
-## 1.18.2-beta.4 — 2026-08-30
-
-- Settings → Sidebar gains "Chevron placement" (Left/Right): Left is
-  the leading-chevron design from beta.3, Right restores the classic
-  trailing layout. Rebuilds the sidebar live and persists.
-- Double-clicking All Inboxes toggles its per-account sub-list
-  (single click still only selects the unified view).
-- Account circles get 6px of clearance from their text, so a
-  collapsed section's corner count chip never crowds it.
-
-## 1.18.2-beta.3 — 2026-08-30
-
-- Sidebar disclosure chevrons lead their rows: All Inboxes and the
-  account headers put the chevron first, pixel-aligned on one column,
-  matching the folder tree's expanders. Every unread chip right-aligns
-  on one shared edge. All Inboxes' chevron stays its own button
-  (selecting the unified view and expanding its sub-list are separate
-  actions), with a 24px hit target and tightened gaps; the expanded
-  sub-list gets 14px of air before the first account section.
-- The avatar switch is titled "Sender avatars" (wording swept
-  app-wide). With avatars off, the message list's unread dot aligns
-  with the sender name's line instead of floating mid-row, and the
-  Actions Palette button sits 10px further left.
-- Demo mode gains a third account for multi-account screenshots.
-
-## 1.18.2-beta.2 — 2026-08-30
-
-The 1.18.2 preview continues (thanks @taprobane99 and
-@thecalamityjoe87). Beta versions now follow semver prerelease style —
-1.18.2-beta.2 means the second beta of the 1.18.2 cycle.
-
-- **The sender seal moves into the message header (#88).** The
-  verified-sender indicator leaves the reader toolbar for the spot it
-  describes: beside the sender's name in every message header —
-  single messages, conversation cards, and popouts. It wears GNOME's
-  own verified-checkmark seal (the icon-development-kit asset Bazaar
-  uses) in a fixed blue for a pass, amber for suspicious, red for
-  likely forgery, and nothing at all for unverified. Clicking it opens
-  the familiar verdict popover, anchored on the seal and sized to the
-  header text.
-- **Sidebar counts share one column (from Isaac's PR #89).** Every
-  expanded row reserves a fixed caret lane after its unread pill, so
-  all pills line up on one right-hand column; row icons pin to exact
-  16px boxes so the icon column can't drift. One departure from the
-  PR: the All Inboxes chevron stays its own button — selecting the
-  unified view and expanding its sub-list remain separate actions.
-
-## 1.18.2-beta.1 — 2026-08-30
-
-Opened the 1.18.2 beta cycle as the catch-up to stable 1.18.1 — same
-code, beta app ID. (Shipped displaying "1.18.2b", before the
-prerelease naming above was adopted.)
 
 ## 1.18.1 — 2026-08-30
 
@@ -2899,15 +1818,6 @@ plus two long-requested integrations (thanks @thecalamityjoe87,
 - New installs default to collapsed in-list conversations and
   toggle-gated card actions (existing settings untouched); the README
   points Nix users at @tbaumann's community-maintained flake.
-
-## 1.18.1b — 2026-08-29
-
-- Beta-channel build matching stable 1.18.0 (see below) — everything
-  previewed in 1.18.0b plus the beta-feedback fixes: the DPD
-  encoded-word repair, live delete counts, the gapless sidebar footer,
-  the Settings renames, Reply-To, sanitized HTML forwards, thread
-  animations, and the shared-data fix that makes a beta-first install
-  create the persistent home stable picks up (#83).
 
 ## 1.18.0 — 2026-08-29
 
@@ -2984,74 +1894,6 @@ the community's feedback in discussion #81 — thanks @p-mitana,
   documents @bennypowers' community Gentoo overlay (#53) and the
   --user flatpak install flag (thanks @yioannides, PR #75).
 
-## 1.18.0b — 2026-08-29
-
-- **Contacts move into the app.** The sidebar's Contacts row now opens a
-  full view in the content area (like the attachments gallery): a
-  searchable, sortable list (first/last name or email, live count,
-  resizable pane with a 280px floor, accent-coloured selection) beside a
-  full contact card — photo (expandable to the lightbox), name, title ·
-  organization, labelled emails (compose or copy), phones, postal
-  addresses, websites, birthday, notes, and which address book the entry
-  lives in ("Google — a@gmail.com", "CardDAV — j@mac.com", "On This
-  Computer"). Contacts can be edited, created (+) and deleted (with
-  confirmation) right here — writes go through EDS D-Bus, so GNOME
-  Contacts and CardDAV stay in sync; edits patch the stored vCard so
-  unedited properties survive. Composing from a contact slides the
-  composer down over the card. GNOME Contacts stays one click away
-  (header button, or right-click on the sidebar row / a contact).
-- **Contacts correctness.** Book liveness comes from the EDS source
-  registry, so address books removed or contacts-disabled in GOA vanish
-  instead of haunting the list; iCloud photos render (the vCard parser
-  now survives quoted parameter values); deletes leave the list
-  immediately (tombstoned against stale cache re-reads).
-- **One settings window.** Accounts and Preferences share a window
-  behind an AdwViewSwitcher (GNOME HIG); a preference chooses which view
-  opens first (Preferences by default). Preferences regrouped into
-  focused sections (General, Notifications, Sidebar, Message List,
-  Conversations, Reading, Composing, System & Appearance, Date and
-  Time); a GOA account's editor hides the GNOME-owned connection fields
-  entirely; the accounts-list chip reads "GNOME Online Account".
-- **Bulk actions stop blocking.** The "Deleting N messages…" overlay is
-  gone: rows leave the list instantly, server work runs invisibly in the
-  workers, and further actions never wait. The refresh spinner spins
-  while anything runs in the background; the status bar narrates
-  ("Moving 200 messages to Trash on the server…") without revealing
-  itself, and gains two new routes in: long-press the refresh button, or
-  Ctrl+Shift+S. Bulk removals backfill the rendered window, so what
-  remains appears immediately.
-- **All Inboxes is instant.** Launch paints folders, unread counts and
-  every inbox slice straight from the disk cache before any worker
-  starts; each account's catch-up sync lands behind it. (Also fixes the
-  launch-order race that left the unified list empty.)
-- **Empty folders say so.** A proper "No Messages" status page — and the
-  "Loading more…" spinner no longer sticks forever on Graph/POP3 folders
-  (their backends never reported the index complete).
-- **Sidebar.** Contacts and Attachments pin to the bottom edge in a
-  fixed footer with a faint separator (from @thecalamityjoe87's PR #80,
-  issue #78); the All Inboxes chevron lines up with the account
-  chevrons and gets a 32px hit target; account section headers honour
-  the configured account label; the burger menu gains section breaks;
-  the attachments gallery header gets the sidebar toggle.
-- **Conversations & reader** (from the post-1.17.1 batch): opening a
-  conversation lands on its first unread; thread-wide delete with an
-  optional confirmation; Ctrl+A selects the visible cards; conversation
-  popout windows stay threaded; the inline composer no longer flashes
-  dark on open; header polish (pinned palette corner, address links,
-  honest previews, full-strength icons); Space previews the highlighted
-  attachment (issue #37).
-- **Under the hood:** per-folder IMAP IDLE watchers keep subfolder
-  unread chips near-instant on a one-hour activity lease, with
-  minute-by-minute verification that distrusts stale STATUS; the
-  compact-mode sidebar peek instruments itself and self-heals; demo mode
-  gains a sample address book for screenshots.
-
-## 1.17.2b — 2026-08-28
-
-- Beta-channel build matching stable 1.17.1 (see below) — Microsoft 365
-  over Graph, the GOA account flows, the sidebar action bar, and the
-  slimmer list header, on the beta app ID with shared stable data.
-
 ## 1.17.1 — 2026-08-28
 
 - **Microsoft 365 via GNOME Online Accounts works (issue #36).** GOA's
@@ -3085,16 +1927,6 @@ the community's feedback in discussion #81 — thanks @p-mitana,
   across from the sidebar toggle.
 - The demo inbox (VIREO_DEMO) opens on a six-message conversation for
   screenshots.
-
-## 1.17.1b — 2026-08-28
-
-- **The beta channel exists.** First release of Vireo's beta track: app ID
-  `co.hyprlab.Vireo.Beta`, ostree branch `beta` in the same signed repo,
-  x86_64 only, versioned as the stable version plus a `b` suffix. The beta
-  installs alongside stable with its own icon, shows "Vireo (beta)" in the
-  sidebar and About window (with a disclaimer), and shares the stable
-  install's accounts, settings, mail cache and keyring by redirecting its
-  XDG base dirs into `~/.var/app/co.hyprlab.Vireo`.
 
 ## 1.17.0 — 2026-08-28
 

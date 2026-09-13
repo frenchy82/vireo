@@ -93,6 +93,9 @@ pub struct MessageView {
     /// document (scroll resets to 0) and can reflow everything above — an
     /// element anchor survives that where a raw pixel offset lands short.
     saved_anchor: Option<(u32, u32, u32)>,
+    /// The list beside the pane shows Drafts: the empty state invites
+    /// editing a draft rather than reading a message.
+    drafts_view: bool,
     /// The saved anchor was set by the app, not by a scroll: the render
     /// lands it below the page's top gutter (where an unscrolled pane has
     /// its first card), not flush at the top the way a place the user
@@ -458,6 +461,8 @@ pub enum MessageViewInput {
     /// the viewport top and the offset into it — kept so a re-render can put
     /// the reader back where they were.
     ScrollAnchor { account_id: u32, id: u32, offset: u32 },
+    /// The list shows Drafts (or not): the empty pane's wording follows.
+    SetDraftsView(bool),
     /// Keep the pane where it is through the next render (a reply just
     /// arrived for the conversation on screen): when no scrolled-to place
     /// is recorded yet, the card at the top of the pane is pinned there,
@@ -575,9 +580,17 @@ impl Component for MessageView {
             set_transition_type: gtk::StackTransitionType::Crossfade,
 
             add_named[Some("empty")] = &adw::StatusPage {
-                set_icon_name: Some("co.hyprlab.Vireo-mail-read-symbolic"),
-                set_title: &i18n("No message selected"),
-                set_description: Some(i18n("Choose a message from the list to read it here.").as_str()),
+                // Drafts open in the editor, so the empty pane says so there.
+                #[watch]
+                set_icon_name: Some(if model.drafts_view { "co.hyprlab.Vireo-document-edit-symbolic" } else { "co.hyprlab.Vireo-mail-read-symbolic" }),
+                #[watch]
+                set_title: &if model.drafts_view { i18n("No draft selected") } else { i18n("No message selected") },
+                #[watch]
+                set_description: Some(if model.drafts_view {
+                    i18n("Choose a draft from the list to edit it here.")
+                } else {
+                    i18n("Choose a message from the list to read it here.")
+                }.as_str()),
             },
 
             add_named[Some("message")] = &gtk::Box {
@@ -872,6 +885,7 @@ impl Component for MessageView {
             did_autoscroll: false,
             saved_anchor: None,
             anchor_gutter: false,
+            drafts_view: false,
             frame_heights: std::collections::HashMap::new(),
             instant: false,
             selected_cards: Vec::new(),
@@ -1808,6 +1822,9 @@ impl Component for MessageView {
             MessageViewInput::ScrollAnchor { account_id, id, offset } => {
                 self.saved_anchor = Some((account_id, id, offset));
                 self.anchor_gutter = false;
+            }
+            MessageViewInput::SetDraftsView(on) => {
+                self.drafts_view = on;
             }
             MessageViewInput::HoldPlace { account_id, id } => {
                 if self.saved_anchor.is_none() {
@@ -4172,6 +4189,14 @@ fn inject_csp(html: &str, allow_remote: bool, dark: bool) -> String {
     // ahead of the email's own CSS, so a message that styles its body (a
     // full-bleed design, say) still wins.
     let body_pad = "body{margin:0;padding:20px;box-sizing:border-box;}";
+    // The frame's own document must never scroll: WebKit latches a wheel
+    // gesture to the innermost scrollable area under the pointer, and a
+    // frame document that can scroll sideways (a message wider than the
+    // pane whose width grows as the frame is widened, so the widening
+    // never quite catches it) swallows the vertical deltas the page
+    // needed. The wrapper widens the frame to the content and scrolls it
+    // in `.vireo-pan`; whatever is left over is clipped rather than
+    // scrollable. `scrollWidth`/`scrollHeight` still measure the content.
     // `color-scheme` makes the browser's default colours (for content that sets
     // none of its own) follow the app's light/dark setting; styled emails keep
     // their own colours untouched.
@@ -4180,7 +4205,8 @@ fn inject_csp(html: &str, allow_remote: bool, dark: bool) -> String {
     let theme = format!(
         "<meta name=\"color-scheme\" content=\"{supported}\">\
          <style>:root{{color-scheme:{scheme};}}{body_pad}\
-         @media print{{:root{{color-scheme:light;}}html,body{{background:#fff !important;}}}}\
+         html{{overflow:hidden !important;}}\
+         @media print{{:root{{color-scheme:light;}}html{{overflow:visible !important;}}html,body{{background:#fff !important;}}}}\
          </style>"
     );
     // `no-referrer` keeps the synthetic `vireo.localhost` base URI from leaking as
@@ -4298,8 +4324,8 @@ var b=d.body,e=d.documentElement;\
 var sy=window.scrollY;var _r=f.getBoundingClientRect();\
 var above=_r.bottom<=0;var old=_r.height||0;\
 f.style.width='';void f.offsetWidth;\
-var w=Math.max(b?b.scrollWidth:0,e?e.scrollWidth:0);\
-if(w>f.clientWidth+1)f.style.width=w+'px';\
+for(var k=0;k<8;k++){var w=Math.max(b?b.scrollWidth:0,e?e.scrollWidth:0);\
+if(w<=f.clientWidth+1)break;f.style.width=w+'px';void f.offsetWidth;}\
 var prev=f.style.height;f.style.height='0px';void f.offsetHeight;\
 var h=Math.max(b?b.scrollHeight:0,e?e.scrollHeight:0,b?b.offsetHeight:0);\
 if(h>0){f.style.height=h+'px';\
