@@ -2,9 +2,15 @@
 
 Vireo is a clean, fast, GNOME-native email client built with Rust and libadwaita for Wayland desktops. Privacy-first: no telemetry, remote content blocked by default, and credentials kept in the system keyring.
 
-## What's new in 1.31.0-beta.1
+## What's new in 1.31.0-beta.2
+
+Catch-up with stable 1.30.1: everything below, under the beta app ID.
+
+## What's new in 1.30.1
 
 **Swipe actions can be tuned to your trackpad.** Settings → Message List gained **Trackpad swipe sensitivity**, a dial from 1 to 10 in half steps. Until now a two-finger swipe had to travel a fixed distance that few trackpads manage in one go, so on some laptops a message never slid far enough to archive or delete. Raise the number if a swipe never gets far enough, lower it if messages slide when you did not mean them to. The default is 3.5, which puts the row roughly under your fingers. Mouse and touchscreen drags follow the pointer exactly as before and are not affected by the setting.
+
+**A swiped message leaves the list properly.** Once a swipe goes far enough to archive or delete, the message carries on off the side you sent it, with the action's colour filling behind it, while the row closes up and the messages below slide into its place. Before, it simply vanished the moment you let go.
 
 ## What's new in 1.30.0
 

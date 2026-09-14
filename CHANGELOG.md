@@ -1,24 +1,44 @@
 # Changelog
 
-## 1.31.0-beta.1 — 2026-09-14
+## 1.31.0-beta.2 — 2026-09-14
 
-Swipe actions can be tuned to the trackpad they are used on.
+Catch-up with stable 1.30.1: the beta channel carries exactly the 1.30.1
+code and documentation below, under the beta app ID. The version stays in
+the 1.31.0 preview line so the channel never counts backwards.
+
+## 1.30.1 — 2026-09-14
+
+Swipe actions can be tuned to the trackpad they are used on, and a
+committed swipe now leaves the list instead of blinking out of it.
 
 - **Trackpad swipe sensitivity** (Settings → Message List). libadwaita
   scales a touchpad's two-finger scroll against a fixed 400px of its own
   and never asks the widget how far a full swipe should be, so a message
   row had to be scrolled 240px sideways before the action armed — further
-  than most trackpads travel in one go, and on a ThinkPad it could not be
-  reached at all. The new setting runs from 1 to 10 in half steps and
+  than most trackpads travel in one go, and on some laptops it could not
+  be reached at all. The new setting runs from 1 to 10 in half steps and
   defaults to 3.5, roughly "the row moves with your fingers". It is stored
   as `swipe_sensitivity` in `privacy.toml`, greys out when swipe actions
-  are off, and applies to open message lists at once.
-- The factor is multiplied into the row's `AdwSwipeable::distance` and
-  divided back out of the tracker's progress, so a mouse or touchscreen
-  drag still moves the row exactly as far as the pointer went whatever the
-  setting says; only the trackpad path, which ignores `distance`, feels
-  it. Unit tests pin the pointer-exact drag, the shrinking trackpad
-  travel, and the clamp at the action strip.
+  are off, and applies to open message lists at once. The factor is
+  multiplied into the row's `AdwSwipeable::distance` and divided back out
+  of the tracker's progress, so a mouse or touchscreen drag still moves
+  the row exactly as far as the pointer went whatever the setting says;
+  only the trackpad path, which ignores `distance`, feels it.
+- **A committed swipe flies out and the list closes over it.** The row
+  carries on off the side it was dragged to over 200ms with the action
+  strip filling behind it, while its Revealer closes the row's height over
+  the same span, so the rows below slide up into the gap instead of
+  jumping once it is gone. The action fires as the exit lands, hung off
+  the animation rather than a timer, so a row removed mid-flight takes its
+  pending action with it; a row that survives its action (no Archive
+  folder configured, say) slides back in rather than sitting there
+  collapsed and off-screen.
+- Sends from glib timers and animation callbacks now go through the
+  fallible input sender. relm4's `input` aborts the process when the
+  component's runtime is gone — a committed swipe hits that every time,
+  since the row is removed just as the exit lands, and the Actions
+  Palette's auto-collapse timer could already hit it on any list rebuild
+  while a palette was open.
 
 ## 1.30.0 — 2026-09-14
 
