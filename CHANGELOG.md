@@ -1,9 +1,24 @@
 # Changelog
 
-## 1.30.1-beta.1 — 2026-09-14
+## 1.31.0-beta.1 — 2026-09-14
 
-Catch-up with stable 1.30.0: the beta channel carries exactly the 1.30.0
-code and documentation below, under the beta app ID.
+Swipe actions can be tuned to the trackpad they are used on.
+
+- **Trackpad swipe sensitivity** (Settings → Message List). libadwaita
+  scales a touchpad's two-finger scroll against a fixed 400px of its own
+  and never asks the widget how far a full swipe should be, so a message
+  row had to be scrolled 240px sideways before the action armed — further
+  than most trackpads travel in one go, and on a ThinkPad it could not be
+  reached at all. The new setting runs from 1 to 10 in half steps and
+  defaults to 3.5, roughly "the row moves with your fingers". It is stored
+  as `swipe_sensitivity` in `privacy.toml`, greys out when swipe actions
+  are off, and applies to open message lists at once.
+- The factor is multiplied into the row's `AdwSwipeable::distance` and
+  divided back out of the tracker's progress, so a mouse or touchscreen
+  drag still moves the row exactly as far as the pointer went whatever the
+  setting says; only the trackpad path, which ignores `distance`, feels
+  it. Unit tests pin the pointer-exact drag, the shrinking trackpad
+  travel, and the clamp at the action strip.
 
 ## 1.30.0 — 2026-09-14
 
