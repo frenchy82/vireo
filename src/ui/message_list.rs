@@ -1867,8 +1867,26 @@ impl MessageRow {
         if let Some(tex) = &self.avatar_texture {
             return Some(tex.clone().upcast());
         }
-        let name = self.face_name();
         let mut slot = self.initials_image.borrow_mut();
+        // A message from one of your own mailboxes wears that mailbox's emoji
+        // on its colour (#189), the same face the sidebar circle shows. It
+        // shares the slot with the initials, keyed by what it draws rather
+        // than by a name, so either way the avatar is handed the same object
+        // on every refresh.
+        if let Some((emoji, color)) = crate::avatar::own_face(&self.face_email())
+            .and_then(|face| face.emoji.map(|emoji| (emoji, face.color)))
+        {
+            let key = format!("{emoji}\u{1}{color}");
+            if slot.as_ref().is_none_or(|(n, _)| *n != key) {
+                let bg = gtk::gdk::RGBA::parse(&color).unwrap_or(gtk::gdk::RGBA::BLACK);
+                let fg = gtk::gdk::RGBA::parse(crate::color::readable_text(&color))
+                    .unwrap_or(gtk::gdk::RGBA::WHITE);
+                let face = crate::ui::initials::InitialsPaintable::solid(&emoji, bg, fg, 0.55);
+                *slot = Some((key, face));
+            }
+            return slot.as_ref().map(|(_, p)| p.clone().upcast());
+        }
+        let name = self.face_name();
         if slot.as_ref().is_none_or(|(n, _)| *n != name) {
             *slot = crate::ui::initials::InitialsPaintable::for_name(&name).map(|p| (name.clone(), p));
         }
@@ -1876,11 +1894,27 @@ impl MessageRow {
     }
 
     /// Fill the circle: a cached face if one is known, otherwise go and look.
-    /// The chain is contact photo → Gravatar → domain icon → initials, each
-    /// tier consulted only while its switch is on.
+    /// The chain is your own mailbox's picture (#189) → contact photo →
+    /// Gravatar → domain icon → initials, each tier consulted only while its
+    /// switch is on.
     fn load_face(&mut self, sender: &FactorySender<Self>) {
         let email = self.face_email();
         if email.is_empty() {
+            return;
+        }
+        // A mailbox of your own with a face of its own (#189): that is what
+        // the circle shows, ahead of any contact photo or domain icon. Its
+        // own Gravatar leads when the account asked for one (the app looks it
+        // up once a session); otherwise the picture, then the emoji, which
+        // `avatar_image` draws.
+        if let Some(face) = crate::avatar::own_face(&email) {
+            self.avatar_texture = face
+                .gravatar
+                .then(|| crate::avatar::own_gravatar(&email))
+                .flatten()
+                .or_else(|| {
+                    face.picture.as_deref().and_then(crate::ui::initials::avatar_texture)
+                });
             return;
         }
         match crate::avatar::lookup(&email, self.gravatar) {

@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.29.3-beta.1" date="2026-09-14" type="development">
+      <description>
+        <p>Catch-up with stable 1.29.2. Your own messages show your mailbox's picture or emoji in conversations and the message list, with a Settings switch to keep the old circle and a per-account "Use my Gravatar" option; leaving a settings editor now shows the page you chose, and an unchanged editor no longer asks about saving.</p>
+      </description>
+    </release>
     <release version="1.29.2-beta.1" date="2026-09-14" type="development">
       <description>
         <p>Catch-up with stable 1.29.1. "Send with Vireo" from GNOME Files, and "Open With Vireo" on a selection, now attach every selected file to one message instead of opening one message per file.</p>
