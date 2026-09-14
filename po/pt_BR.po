@@ -1412,6 +1412,15 @@ msgstr ""
 msgid "Mail account"
 msgstr "Conta de email"
 
+#. Every condition, joined the way the rule combines them (#192).
+#, fuzzy
+msgid " or "
+msgstr "Para ou Cc"
+
+#. Every condition, joined the way the rule combines them (#192).
+msgid " and "
+msgstr ""
+
 msgid ", tagged {tag}"
 msgstr ", com a etiqueta {tag}"
 
@@ -1491,46 +1500,61 @@ msgstr "Editar filtro"
 msgid "Add Filter"
 msgstr "Adicionar filtro"
 
+#, fuzzy
+msgid "Remove condition"
+msgstr "Remover conta?"
+
 msgid "Where"
 msgstr "Campo"
-
-msgid "From address"
-msgstr "Endereço do remetente"
-
-msgid "From name"
-msgstr "Nome do remetente"
-
-msgid "Subject"
-msgstr "Assunto"
-
-msgid "To or Cc"
-msgstr "Para ou Cc"
 
 msgid "Match"
 msgstr "Correspondência"
 
-msgid "contains"
-msgstr "contém"
-
-msgid "is exactly"
-msgstr "é exatamente"
-
-msgid "starts with"
-msgstr "começa por"
-
-msgid "ends with"
-msgstr "termina com"
+msgid "Commas separate alternatives; any one of them counts"
+msgstr ""
 
 msgid "Text to match"
 msgstr "Texto a procurar"
 
+msgid "Searched on the server; nothing is downloaded"
+msgstr ""
+
+msgid "From address when no Reply-To is set"
+msgstr ""
+
+#, fuzzy
+msgid "Add Condition"
+msgstr "Adicionar conta de armazenamento na nuvem"
+
+#, fuzzy
+msgid "Condition matching"
+msgstr "Conversas"
+
+msgid "All must match"
+msgstr ""
+
+msgid "Any one may match"
+msgstr ""
+
+#, fuzzy
+msgid "Condition {n}"
+msgstr "Conversas"
+
+#, fuzzy
+msgid "Or where"
+msgstr "Campo"
+
+msgid "And where"
+msgstr ""
+
+msgid "Then"
+msgstr ""
+
 msgid "Move to"
 msgstr "Mover para"
 
-msgid "Where matching mail is filed; or leave it in the Inbox and only tag it"
+msgid "Leave in Inbox to only tag matching mail"
 msgstr ""
-"Pasta onde a mensagem correspondente será arquivada; ou deixe-a na Caixa de "
-"entrada e apenas atribua uma etiqueta"
 
 #. Entry 0 files nowhere (a tag-only rule, #71): its path is "".
 msgid "Leave in Inbox"
@@ -2105,6 +2129,9 @@ msgstr "Bcc"
 
 msgid "Reply-To"
 msgstr "Responder a"
+
+msgid "Subject"
+msgstr "Assunto"
 
 msgid "More"
 msgstr "Mais"
@@ -4373,6 +4400,34 @@ msgstr "A caixa de entrada unificada no modo claro"
 
 msgid "Hyprlab"
 msgstr "Hyprlab"
+
+#, fuzzy
+#~ msgid "Conditions"
+#~ msgstr "Conversas"
+
+#~ msgid ""
+#~ "Where matching mail is filed; or leave it in the Inbox and only tag it"
+#~ msgstr ""
+#~ "Pasta onde a mensagem correspondente será arquivada; ou deixe-a na Caixa "
+#~ "de entrada e apenas atribua uma etiqueta"
+
+#~ msgid "From address"
+#~ msgstr "Endereço do remetente"
+
+#~ msgid "From name"
+#~ msgstr "Nome do remetente"
+
+#~ msgid "contains"
+#~ msgstr "contém"
+
+#~ msgid "is exactly"
+#~ msgstr "é exatamente"
+
+#~ msgid "starts with"
+#~ msgstr "começa por"
+
+#~ msgid "ends with"
+#~ msgstr "termina com"
 
 #~ msgid "Send Now"
 #~ msgstr "Enviar agora"

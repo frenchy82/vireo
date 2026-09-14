@@ -1387,6 +1387,15 @@ msgstr ""
 msgid "Mail account"
 msgstr "Levelezési fiók"
 
+#. Every condition, joined the way the rule combines them (#192).
+#, fuzzy
+msgid " or "
+msgstr "Címzett vagy Másolat"
+
+#. Every condition, joined the way the rule combines them (#192).
+msgid " and "
+msgstr ""
+
 msgid ", tagged {tag}"
 msgstr ", {tag} címkével"
 
@@ -1458,46 +1467,61 @@ msgstr "Szűrő szerkesztése"
 msgid "Add Filter"
 msgstr "Szűrő hozzáadása"
 
+#, fuzzy
+msgid "Remove condition"
+msgstr "Fiók eltávolítása"
+
 msgid "Where"
 msgstr "Hol"
-
-msgid "From address"
-msgstr "Feladó címe"
-
-msgid "From name"
-msgstr "Feladó neve"
-
-msgid "Subject"
-msgstr "Tárgy"
-
-msgid "To or Cc"
-msgstr "Címzett vagy Másolat"
 
 msgid "Match"
 msgstr "Egyezés"
 
-msgid "contains"
-msgstr "tartalmazza"
-
-msgid "is exactly"
-msgstr "pontosan ez"
-
-msgid "starts with"
-msgstr "ezzel kezdődik"
-
-msgid "ends with"
-msgstr "ezzel végződik"
+msgid "Commas separate alternatives; any one of them counts"
+msgstr ""
 
 msgid "Text to match"
 msgstr "Egyeztetendő szöveg"
 
+msgid "Searched on the server; nothing is downloaded"
+msgstr ""
+
+msgid "From address when no Reply-To is set"
+msgstr ""
+
+#, fuzzy
+msgid "Add Condition"
+msgstr "Felhőfiók hozzáadása"
+
+#, fuzzy
+msgid "Condition matching"
+msgstr "Beszélgetések"
+
+msgid "All must match"
+msgstr ""
+
+msgid "Any one may match"
+msgstr ""
+
+#, fuzzy
+msgid "Condition {n}"
+msgstr "Beszélgetések"
+
+#, fuzzy
+msgid "Or where"
+msgstr "Hol"
+
+msgid "And where"
+msgstr ""
+
+msgid "Then"
+msgstr ""
+
 msgid "Move to"
 msgstr "Áthelyezés ide"
 
-msgid "Where matching mail is filed; or leave it in the Inbox and only tag it"
+msgid "Leave in Inbox to only tag matching mail"
 msgstr ""
-"Az egyező levelek helye; vagy hagyja őket a Beérkezett üzenetek között, és "
-"csak címkézze őket"
 
 #. Entry 0 files nowhere (a tag-only rule, #71): its path is "".
 msgid "Leave in Inbox"
@@ -2066,6 +2090,9 @@ msgstr "Titkos másolat"
 
 msgid "Reply-To"
 msgstr "Válaszcím"
+
+msgid "Subject"
+msgstr "Tárgy"
 
 msgid "More"
 msgstr "Továbbiak"
@@ -4257,6 +4284,34 @@ msgstr "Az egységes beérkezett nézet világos módban"
 msgid "Hyprlab"
 msgstr "Hyprlab"
 
+#, fuzzy
+#~ msgid "Conditions"
+#~ msgstr "Beszélgetések"
+
+#~ msgid ""
+#~ "Where matching mail is filed; or leave it in the Inbox and only tag it"
+#~ msgstr ""
+#~ "Az egyező levelek helye; vagy hagyja őket a Beérkezett üzenetek között, "
+#~ "és csak címkézze őket"
+
+#~ msgid "From address"
+#~ msgstr "Feladó címe"
+
+#~ msgid "From name"
+#~ msgstr "Feladó neve"
+
+#~ msgid "contains"
+#~ msgstr "tartalmazza"
+
+#~ msgid "is exactly"
+#~ msgstr "pontosan ez"
+
+#~ msgid "starts with"
+#~ msgstr "ezzel kezdődik"
+
+#~ msgid "ends with"
+#~ msgstr "ezzel végződik"
+
 #~ msgid "Send Now"
 #~ msgstr "Küldés most"
 
@@ -4286,9 +4341,6 @@ msgstr "Hyprlab"
 
 #~ msgid "Show name initials instead of an emoji"
 #~ msgstr "Névmonogram megjelenítése emodzsi helyett"
-
-#~ msgid "Remove Account"
-#~ msgstr "Fiók eltávolítása"
 
 #~ msgid ""
 #~ "Include the folder's unread mail in the unread count and the tray icon"

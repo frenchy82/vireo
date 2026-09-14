@@ -1300,6 +1300,14 @@ msgstr ""
 msgid "Mail account"
 msgstr ""
 
+#. Every condition, joined the way the rule combines them (#192).
+msgid " or "
+msgstr ""
+
+#. Every condition, joined the way the rule combines them (#192).
+msgid " and "
+msgstr ""
+
 msgid ", tagged {tag}"
 msgstr ""
 
@@ -1369,43 +1377,55 @@ msgstr ""
 msgid "Add Filter"
 msgstr ""
 
+msgid "Remove condition"
+msgstr ""
+
 msgid "Where"
-msgstr ""
-
-msgid "From address"
-msgstr ""
-
-msgid "From name"
-msgstr ""
-
-msgid "Subject"
-msgstr ""
-
-msgid "To or Cc"
 msgstr ""
 
 msgid "Match"
 msgstr ""
 
-msgid "contains"
-msgstr ""
-
-msgid "is exactly"
-msgstr ""
-
-msgid "starts with"
-msgstr ""
-
-msgid "ends with"
+msgid "Commas separate alternatives; any one of them counts"
 msgstr ""
 
 msgid "Text to match"
 msgstr ""
 
+msgid "Searched on the server; nothing is downloaded"
+msgstr ""
+
+msgid "From address when no Reply-To is set"
+msgstr ""
+
+msgid "Add Condition"
+msgstr ""
+
+msgid "Condition matching"
+msgstr ""
+
+msgid "All must match"
+msgstr ""
+
+msgid "Any one may match"
+msgstr ""
+
+msgid "Condition {n}"
+msgstr ""
+
+msgid "Or where"
+msgstr ""
+
+msgid "And where"
+msgstr ""
+
+msgid "Then"
+msgstr ""
+
 msgid "Move to"
 msgstr ""
 
-msgid "Where matching mail is filed; or leave it in the Inbox and only tag it"
+msgid "Leave in Inbox to only tag matching mail"
 msgstr ""
 
 #. Entry 0 files nowhere (a tag-only rule, #71): its path is "".
@@ -1904,6 +1924,9 @@ msgid "Bcc"
 msgstr ""
 
 msgid "Reply-To"
+msgstr ""
+
+msgid "Subject"
 msgstr ""
 
 msgid "More"

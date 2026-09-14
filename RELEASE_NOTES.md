@@ -2,9 +2,21 @@
 
 Vireo is a clean, fast, GNOME-native email client built with Rust and libadwaita for Wayland desktops. Privacy-first: no telemetry, remote content blocked by default, and credentials kept in the system keyring.
 
-## What's new in 1.29.4-beta.1
+## What's new in 1.30.1-beta.1
 
-Catch-up with stable 1.29.3: everything below, under the beta app ID.
+Catch-up with stable 1.30.0: everything below, under the beta app ID.
+
+## What's new in 1.30.0
+
+**Filters can match the message body** (#191, requested by [@yioannides](https://github.com/yioannides)). *Where* now offers **Message body**, so a rule that files anything with "unsubscribe" in it into Newsletters is one condition. The text is searched on the server as the Inbox syncs, one search per alternative over the mail just listed, so nothing is downloaded for it; the list preview is checked too. A body condition always means "contains", the only search a server offers, and the editor says so.
+
+**Filters can match the Reply-To address** (#191). *Where* also offers **Reply-To address**: the Reply-To header, or the From address when the sender set none.
+
+**A filter can hold several conditions** (#192, requested by [@yioannides](https://github.com/yioannides)). The filter editor is now a page of groups: the account, one titled group per condition with its own Where, Match and Text rows and a remove button in its header, an **Add Condition** row, and *Then* for what a match does. A **Condition matching** chooser, shown once there are two, says whether all must match (the default) or any one may. The Filters list prints every condition of a rule.
+
+**A condition can name several alternatives** (#192). Commas separate them in the text to match: `invoice, receipt` matches either, with the whole matcher applied to each. A value that held a comma on purpose now reads as two alternatives.
+
+**Fixed: the filter editor's "Move to" list was empty after Settings reopened.** Since 1.27.0, reopening Settings after an account, filter, tag or sender changed left the list with only *Leave in Inbox*. It lists the folders again.
 
 ## What's new in 1.29.3
 

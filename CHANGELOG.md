@@ -1,9 +1,53 @@
 # Changelog
 
-## 1.29.4-beta.1 — 2026-09-14
+## 1.30.1-beta.1 — 2026-09-14
 
-Catch-up with stable 1.29.3: the beta channel carries exactly the 1.29.3
+Catch-up with stable 1.30.0: the beta channel carries exactly the 1.30.0
 code and documentation below, under the beta app ID.
+
+## 1.30.0 — 2026-09-14
+
+Filters can look at the message body and the Reply-To address, hold
+several conditions, and take several alternatives per condition.
+
+- **Filters can match the message body** (#191, requested by
+  [@yioannides](https://github.com/yioannides)). *Where* gained
+  **Message body**: a rule that files anything with "unsubscribe" in it
+  into Newsletters is now one condition. The text is searched on the
+  server as the Inbox syncs (IMAP `SEARCH BODY`, Microsoft Graph
+  `$search`), one search per alternative over the mail just listed, so
+  nothing is downloaded for it; the list preview counts too, which is
+  all a POP3 account or a server that refuses the search has to go on.
+  Body conditions always mean "contains", the only search a server
+  offers, and the editor pins the matcher and says so.
+- **Filters can match the Reply-To address** (#191). *Where* also gained
+  **Reply-To address**: the Reply-To header, or the From address when
+  the sender set none, so a rule on where replies go works for mail
+  from a person and mail from a system alike.
+- **A filter can hold several conditions** (#192, requested by
+  [@yioannides](https://github.com/yioannides)). The filter editor is
+  now a page of groups: the account; one titled group per condition
+  (*Condition 1*, *Condition 2*…), each its own Where/Match/Text set
+  with a remove button in its header; an **Add Condition** row; and
+  *Then*, what a match does (Move to, Tag with, Count unread mail). A
+  **Condition matching** group below Add Condition, shown once there are two,
+  says whether all must match (the default) or any one may; the
+  later conditions' Where rows read *And where* / *Or where* to match.
+  The Filters list prints every condition of a rule.
+- **A condition can name several alternatives** (#192). Commas separate
+  them in the text to match: `invoice, receipt` matches either, with
+  the whole matcher applied to each (`@a.org, @b.org` with *ends with*
+  is two endings). A value with no comma is one alternative as before;
+  a value that held a comma on purpose now reads as two.
+- The filters file keeps the first condition where earlier versions
+  read it, and only writes the new keys when a rule needs them, so a
+  rule with one condition still loads in those versions unchanged.
+- **The filter editor's "Move to" list is no longer empty after Settings
+  reopens.** Since 1.27.0, reopening Settings after an account, filter,
+  tag or sender changed built a fresh Accounts panel that was never told
+  the accounts' folders, so "Move to" offered only *Leave in Inbox* and
+  an existing rule's folder showed as that. The panel now gets the
+  folders as the first one does.
 
 ## 1.29.3 — 2026-09-14
 
