@@ -19,6 +19,7 @@ mod i18n;
 mod logo;
 mod models;
 mod mutf7;
+mod nautilus_ext;
 mod notify;
 mod oauth;
 mod pgp;
@@ -127,6 +128,7 @@ fn main() {
             let mut attach_paths = Vec::new();
             for f in files {
                 let uri = f.uri().to_string();
+                tracing::info!("open: {}", if uri.starts_with("mailto:") { "mailto: URI" } else { uri.as_str() });
                 if uri.starts_with("mailto:") {
                     app::queue_mailto(uri);
                 } else if uri.starts_with("mid:") || uri.starts_with("MID:") {
@@ -145,8 +147,16 @@ fn main() {
             }
             // `open` replaces `activate` when a URI is passed: activate
             // explicitly so the window (and on first launch, the whole UI)
-            // still comes up, with the composer opening over it.
-            app.activate();
+            // still comes up, with the composer opening over it. The signal
+            // is emitted directly rather than through `app.activate()`:
+            // GApplication brackets that call with its own before_emit,
+            // whose platform data (built from this primary's environment)
+            // carries no activation token and so wipes the launcher's token
+            // the `Open` call has just installed on the display. The window
+            // would then present itself with nothing to hand the compositor
+            // (#187: busy pointer until GNOME's 15 s timeout, no focus).
+            use gtk::glib::prelude::ObjectExt;
+            app.emit_by_name::<()>("activate", &[]);
         });
     }
     // The embedded icon gresource lives at /co/hyprlab/Vireo regardless of the
@@ -163,8 +173,7 @@ fn main() {
     // must NOT be registered early either — relm4 builds the whole UI in a
     // `startup` handler it connects inside run(), and registration is what
     // emits `startup`. So remoteness is checked bus-side, touching nothing.
-    if primary_instance_running() {
-        relay_to_primary(&args);
+    if primary_instance_running() && relay_to_primary(&args) {
         return;
     }
 
@@ -203,53 +212,68 @@ pub(crate) fn primary_instance_running() -> bool {
     .is_some_and(|(owned,)| owned)
 }
 
-/// Forward this invocation to the running primary instance over D-Bus and
-/// return once it has been accepted: `Open` with any mailto: URIs, plain
+/// Forward this invocation to the running primary instance and return once
+/// it has been accepted: `Open` with any mailto:/mid:/file arguments, plain
 /// `Activate` (present the window) otherwise.
-fn relay_to_primary(args: &[String]) {
-    use gtk::gio::prelude::FileExt;
-    use gtk::glib::prelude::ToVariant;
-    let uris: Vec<String> = args
+///
+/// The hand-off goes through a throwaway `GtkApplication` registered as a
+/// remote instance rather than a hand-rolled D-Bus call, because of the
+/// launcher's activation token (issue #187). GNOME hands it to us in
+/// `XDG_ACTIVATION_TOKEN` (`DESKTOP_STARTUP_ID` on X11), and GTK 4 removes
+/// both from the environment in a library constructor -- before `main` even
+/// runs -- keeping the value for itself. Only GApplication's own remote
+/// path puts that stashed token into the platform data of the `Activate`
+/// call, and only with it does the primary's window complete the launch:
+/// without it, GNOME Shell keeps the busy pointer and its "starting" state
+/// for the whole 15 s timeout, during which clicking the icon again does
+/// nothing at all. (The token is also what lets the window take the focus
+/// from whoever launched us: Nautilus's "Send by email", a mailto: link in
+/// a browser.)
+///
+/// Returns false when no primary answered after all (it quit between the
+/// name check and the hand-off): the caller then starts normally.
+fn relay_to_primary(args: &[String]) -> bool {
+    use gtk::gio::prelude::ApplicationExt;
+    let files: Vec<gtk::gio::File> = args
         .iter()
         .skip(1)
         .map(|a| {
             if a.starts_with("mailto:") || a.starts_with("mid:") || a.starts_with("MID:") {
-                a.clone()
+                gtk::gio::File::for_uri(a)
             } else {
-                // A plain path or a non-mailto URI (e.g. file://): normalize
-                // to a URI the same way GLib does for HANDLES_OPEN arguments.
-                gtk::gio::File::for_commandline_arg(a).uri().to_string()
+                // A plain path or a non-mailto URI (e.g. file://): the same
+                // normalization GLib applies to HANDLES_OPEN arguments.
+                gtk::gio::File::for_commandline_arg(a)
             }
         })
         .collect();
-    let conn = match gtk::gio::bus_get_sync(gtk::gio::BusType::Session, gtk::gio::Cancellable::NONE)
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("could not reach the session bus to hand off: {e}");
-            return;
-        }
-    };
-    let path = format!("/{}", APP_ID.replace('.', "/"));
-    let platform: std::collections::HashMap<String, gtk::glib::Variant> = Default::default();
-    let (method, params) = if uris.is_empty() {
-        ("Activate", (platform,).to_variant())
-    } else {
-        ("Open", (uris, String::new(), platform).to_variant())
-    };
-    if let Err(e) = conn.call_sync(
-        Some(APP_ID),
-        &path,
-        "org.gtk.Application",
-        method,
-        Some(&params),
-        None,
-        gtk::gio::DBusCallFlags::NONE,
-        5000,
-        gtk::gio::Cancellable::NONE,
-    ) {
+    let remote = gtk::Application::builder()
+        .application_id(APP_ID)
+        .flags(gtk::gio::ApplicationFlags::HANDLES_OPEN)
+        .build();
+    if let Err(e) = remote.register(gtk::gio::Cancellable::NONE) {
         tracing::warn!("hand-off to the running instance failed: {e}");
+        return false;
     }
+    if !remote.is_remote() {
+        // The name was free after all: we own it now, and releasing it
+        // (dropping the object) lets the real app take it below.
+        tracing::info!("the running instance left before the hand-off; starting instead");
+        drop(remote);
+        return false;
+    }
+    tracing::info!("handing off to the running instance ({} argument(s))", files.len());
+    if files.is_empty() {
+        remote.activate();
+    } else {
+        remote.open(&files, "");
+    }
+    // The call has been delivered (both are synchronous round trips). The
+    // process ends right after this; letting the object go instead would
+    // only print GLib's "did not unregister from D-Bus" warning to the
+    // terminal, so it is deliberately left alive.
+    std::mem::forget(remote);
+    true
 }
 
 /// One-time migration for the 1.6.0 rename (Veem → Vireo): if an old config or

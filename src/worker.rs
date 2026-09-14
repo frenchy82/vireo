@@ -55,11 +55,16 @@ const BACKFILL_CHUNK: usize = 1_000;
 /// older attachment messages download on demand (with a spinner) when opened.
 const PREFETCH_LIMIT: usize = 25;
 
-/// Attachments gallery: cap on how many items to load per inbox, and the largest
-/// file whose bytes are loaded eagerly (for instant thumbnails/preview). Bigger
-/// files carry no bytes in the gallery and are fetched on demand when opened.
-const GALLERY_LIMIT: u32 = 300;
-const GALLERY_DATA_CAP: u64 = 6 * 1024 * 1024;
+/// How many messages one attachment scan describes. One FETCH per chunk, so
+/// bigger means fewer round trips; small enough that a chunk lands quickly and
+/// the gallery fills in visibly while the user is looking at it.
+const SCAN_CHUNK: u32 = 200;
+
+/// Most FETCHes one scan request will spend, counting the extra ones a failing
+/// batch costs as it is halved. Bounds the work a folder full of responses we
+/// cannot parse can demand in one pass; whatever is left keeps its place in the
+/// queue and is picked up by the next.
+const SCAN_SPLIT_BUDGET: u32 = 64;
 
 /// How many messages one body fetch asks for.
 ///
@@ -133,7 +138,6 @@ pub enum MailRequest {
     /// to be opened.
     SyncFolder { folder_id: u32, path: String },
     /// Load cached attachments across the account's folders, for the gallery.
-    LoadGallery,
     /// Load the full body of a single message.
     LoadBody {
         message_id: u32,
@@ -215,6 +219,9 @@ pub enum MailRequest {
     /// Assemble a conversation from the local cache across every folder of the
     /// account: the messages whose Message-ID or references match `ids`. Answers
     /// with [`WorkerEvent::Related`]; never touches the network.
+    /// Work through a folder's attachment-carrying messages that have never
+    /// been described, recording what each one holds without downloading it.
+    ScanAttachments { folder_path: String },
     LoadRelated { message_id: u32, ids: Vec<String> },
     /// Permanently erase messages from `path` (flag `\Deleted` + EXPUNGE), used
     /// when "delete" is asked for in Trash, where there is nowhere left to move to.
@@ -324,6 +331,9 @@ pub struct OutgoingMessage {
 /// An event pushed from the worker back to the UI.
 #[derive(Debug)]
 pub enum WorkerEvent {
+    /// A batch of a folder's attachments was described (not downloaded).
+    /// `remaining` is how many of its messages are still unscanned.
+    AttachmentsScanned { folder_path: String, added: u32, remaining: u32 },
     Account(Account),
     Folders(Vec<Folder>),
     Messages { folder_id: u32, messages: Vec<Message> },
@@ -350,7 +360,6 @@ pub enum WorkerEvent {
     /// cached keywords changed (empty when nothing did).
     KeywordsSynced { paths: Vec<String> },
     /// Cached attachments for an inbox, for the attachments gallery.
-    Gallery { items: Vec<crate::models::GalleryItem> },
     /// The background backfill for a folder finished — its whole index is now
     /// present, so the UI can stop expecting more rows to stream in.
     BackfillDone { folder_id: u32 },
@@ -1150,13 +1159,6 @@ async fn run_imap(
                     }
                 }
             }
-            MailRequest::LoadGallery => {
-                if let Some(c) = cache.as_ref() {
-                    let items = c.gallery_items(account_id, GALLERY_DATA_CAP, GALLERY_LIMIT);
-                    emit(WorkerEvent::Gallery { items });
-                }
-                continue; // cache-only, never hits the network
-            }
             MailRequest::LoadRelated { message_id, ids } => {
                 let messages = cache
                     .as_ref()
@@ -1232,7 +1234,7 @@ async fn run_imap(
 
         match req {
             // Served from cache before this network match; never reached here.
-            MailRequest::LoadGallery | MailRequest::LoadRelated { .. } => {}
+            MailRequest::LoadRelated { .. } => {}
             MailRequest::LoadMessages { folder_id, path }
             | MailRequest::SyncFolder { folder_id, path } => {
                 if !background {
@@ -1702,6 +1704,111 @@ async fn run_imap(
                 emit(WorkerEvent::Located { message_id: message_id.clone(), hit });
             }
 
+            MailRequest::ScanAttachments { folder_path } => {
+                // Ask the server what a batch of messages holds, without
+                // downloading any of it. BODYSTRUCTURE is a few hundred bytes
+                // per message, so a whole archive costs single-digit megabytes
+                // — the difference between a gallery that reaches back two
+                // decades and one that shows only what has been opened.
+                let Some(c) = cache.as_ref() else { continue };
+                let uids = c.unscanned_attachment_uids(account_id, folder_path.as_str(), SCAN_CHUNK);
+                if uids.is_empty() {
+                    emit(WorkerEvent::AttachmentsScanned {
+                        folder_path: folder_path.clone(),
+                        added: 0,
+                        remaining: 0,
+                    });
+                    continue;
+                }
+                let sess = session.as_mut().unwrap();
+                if sel(sess, folder_path.as_str()).await.is_err() {
+                    continue;
+                }
+
+                // One bad response must not cost the whole batch. A batch that
+                // will not parse is halved and retried, down to the single
+                // message responsible: its neighbours are described normally
+                // and only it is written off. Smaller responses also parse more
+                // often, so the split usually resolves the failure outright.
+                let mut added = 0u32;
+                let mut pending: Vec<Vec<u32>> = vec![uids];
+                let mut budget = SCAN_SPLIT_BUDGET;
+                while let Some(batch) = pending.pop() {
+                    if budget == 0 {
+                        break; // the rest keeps its place in the queue
+                    }
+                    budget -= 1;
+                    let set = uid_set(&batch);
+                    // BODYSTRUCTURE on its own, not beside ENVELOPE: the
+                    // servers that make us fall back to raw headers (iCloud)
+                    // usually choke on the ENVELOPE half — an unescaped quote
+                    // in a Message-ID — so asking for the structure alone
+                    // often parses where the combined fetch did not.
+                    let fetched: Result<Vec<Fetch>, _> =
+                        match fetch_uids(sess, &set, "BODYSTRUCTURE").await {
+                            Ok(stream) => stream.try_collect().await,
+                            Err(e) => Err(e),
+                        };
+                    match fetched {
+                        Ok(fetches) => {
+                            // Every UID asked about is answered, including the
+                            // ones holding nothing: an empty list is still an
+                            // answer, and recording it stops the message being
+                            // asked about on every pass forever.
+                            let mut seen: std::collections::HashSet<u32> =
+                                std::collections::HashSet::new();
+                            for f in &fetches {
+                                let Some(uid) = f.uid else { continue };
+                                seen.insert(uid);
+                                let metas = f
+                                    .bodystructure()
+                                    .map(structure_attachments)
+                                    .unwrap_or_default();
+                                added += metas.len() as u32;
+                                c.save_attachment_meta(account_id, folder_path.as_str(), uid, &metas);
+                            }
+                            for uid in batch.iter().filter(|u| !seen.contains(u)) {
+                                c.save_attachment_meta(account_id, folder_path.as_str(), *uid, &[]);
+                            }
+                        }
+                        // A dropped connection says nothing about these
+                        // messages. Leave them unscanned and let the next pass
+                        // have them, rather than recording an answer the server
+                        // never gave.
+                        Err(async_imap::error::Error::ConnectionLost) => {
+                            pending.clear();
+                            session.take();
+                            break;
+                        }
+                        Err(e) if batch.len() > 1 => {
+                            let mid = batch.len() / 2;
+                            pending.push(batch[mid..].to_vec());
+                            pending.push(batch[..mid].to_vec());
+                            tracing::debug!(
+                                "attachment scan of {folder_path}: splitting {} after {e}",
+                                batch.len()
+                            );
+                        }
+                        Err(e) => {
+                            // One message whose structure our parser will not
+                            // take. Record it as holding nothing rather than
+                            // retrying it forever; opening it still fetches the
+                            // message in full and lists what it really holds.
+                            tracing::warn!(
+                                "attachment scan of {folder_path} uid {}: {e}",
+                                batch[0]
+                            );
+                            c.save_attachment_meta(account_id, folder_path.as_str(), batch[0], &[]);
+                        }
+                    }
+                }
+
+                emit(WorkerEvent::AttachmentsScanned {
+                    folder_path: folder_path.clone(),
+                    added,
+                    remaining: c.unscanned_attachment_count(account_id, folder_path.as_str()),
+                });
+            }
             MailRequest::FindKeywords => {
                 // Every folder, read-only: EXAMINE answers with the mailbox's
                 // FLAGS line, which lists the keywords in use there, and a
@@ -6848,6 +6955,119 @@ fn structure_has_attachment(bs: &async_imap::imap_proto::types::BodyStructure) -
     }
 }
 
+/// Every attachment in a BODYSTRUCTURE, with what it is called, how big it is
+/// and which IMAP section holds it — all without downloading a byte of it. This
+/// is what lets the gallery reach back through an archive: the server describes
+/// the files, and only opening one actually fetches it.
+///
+/// What counts as an attachment is [`structure_has_attachment`]'s rule, kept
+/// deliberately identical so a message the list gives a paperclip to is a
+/// message the gallery lists parts for.
+fn structure_attachments(
+    bs: &async_imap::imap_proto::types::BodyStructure,
+) -> Vec<crate::models::AttachmentMeta> {
+    use async_imap::imap_proto::types::{BodyStructure as Bs, ContentEncoding};
+
+    /// A parameter's value, matched case-insensitively as RFC 2045 requires.
+    fn param(params: &async_imap::imap_proto::types::BodyParams, key: &str) -> Option<String> {
+        params.as_ref()?.iter().find_map(|(k, v)| {
+            k.eq_ignore_ascii_case(key).then(|| decode_header(v.as_bytes()))
+        })
+    }
+
+    fn walk(
+        bs: &Bs,
+        section: &str,
+        out: &mut Vec<crate::models::AttachmentMeta>,
+    ) {
+        match bs {
+            Bs::Multipart { bodies, .. } => {
+                for (i, child) in bodies.iter().enumerate() {
+                    let child_section = if section.is_empty() {
+                        format!("{}", i + 1)
+                    } else {
+                        format!("{section}.{}", i + 1)
+                    };
+                    walk(child, &child_section, out);
+                }
+            }
+            Bs::Text { common, other, .. }
+            | Bs::Basic { common, other, .. }
+            | Bs::Message { common, other, .. } => {
+                let declared = common
+                    .disposition
+                    .as_ref()
+                    .is_some_and(|d| d.ty.eq_ignore_ascii_case("attachment"));
+                // BODYSTRUCTURE reports the encoded size; base64 inflates by 4/3.
+                let size = match other.transfer_encoding {
+                    ContentEncoding::Base64 => other.octets as u64 / 4 * 3,
+                    _ => other.octets as u64,
+                };
+                let is_text = matches!(bs, Bs::Text { .. });
+                // A text part is only ever an attachment when it says so; for
+                // the rest, an inline part with a Content-ID is decoration
+                // unless it is big enough to be content (see the constant).
+                let counts = if is_text {
+                    declared
+                } else {
+                    declared || other.id.is_none() || size as usize >= INLINE_ATTACHMENT_MIN
+                };
+                if !counts {
+                    return;
+                }
+                let name = common
+                    .disposition
+                    .as_ref()
+                    .and_then(|d| param(&d.params, "filename"))
+                    .or_else(|| param(&common.ty.params, "name"))
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        // Unnamed, as Apple Mail's inline photos arrive: give it
+                        // the extension its type implies so the gallery can sort
+                        // and filter it like any other file.
+                        let ext = mime_extension(&common.ty.ty, &common.ty.subtype);
+                        format!("attachment-{}{ext}", out.len() + 1)
+                    });
+                out.push(crate::models::AttachmentMeta {
+                    idx: out.len() as u32,
+                    name,
+                    mime: format!(
+                        "{}/{}",
+                        common.ty.ty.to_lowercase(),
+                        common.ty.subtype.to_lowercase()
+                    ),
+                    size,
+                    section: section.to_string(),
+                });
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    // A message that is not multipart is one part, section 1.
+    walk(bs, if matches!(bs, Bs::Multipart { .. }) { "" } else { "1" }, &mut out);
+    out
+}
+
+/// A filename extension for a MIME type, for parts that arrive unnamed. Only
+/// the types that actually turn up without a filename are worth listing; the
+/// rest get none, and show as a generic file.
+fn mime_extension(ty: &str, subtype: &str) -> &'static str {
+    if !ty.eq_ignore_ascii_case("image") {
+        return "";
+    }
+    match subtype.to_ascii_lowercase().as_str() {
+        "jpeg" | "jpg" => ".jpg",
+        "png" => ".png",
+        "gif" => ".gif",
+        "heic" => ".heic",
+        "heif" => ".heif",
+        "webp" => ".webp",
+        "tiff" => ".tif",
+        _ => "",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // POP3 path
 // ---------------------------------------------------------------------------
@@ -7165,15 +7385,15 @@ async fn run_pop3(
                 // held: answer "not found" so the app can report the miss.
                 emit(WorkerEvent::Located { message_id: message_id.clone(), hit: None });
             }
+            // POP3 downloads every message in full, so an attachment is either
+            // already in the cache or does not exist: there is nothing a scan
+            // could add.
+            MailRequest::ScanAttachments { folder_path } => {
+                emit(WorkerEvent::AttachmentsScanned { folder_path, added: 0, remaining: 0 });
+            }
             // POP3 has no server-side keywords: nothing to find.
             MailRequest::FindKeywords => emit(WorkerEvent::KeywordsFound(Vec::new())),
             MailRequest::RefreshKeywords { .. } => emit(WorkerEvent::KeywordsSynced { paths: Vec::new() }),
-            MailRequest::LoadGallery => {
-                if let Some(c) = cache.as_ref() {
-                    let items = c.gallery_items(account_id, GALLERY_DATA_CAP, GALLERY_LIMIT);
-                    emit(WorkerEvent::Gallery { items });
-                }
-            }
             // POP3 keeps everything in the inbox, so a conversation never spans
             // folders and the reader already has all of it.
             MailRequest::LoadRelated { message_id, .. } => {
@@ -7578,6 +7798,12 @@ async fn run_mock(
                 // held: answer "not found" so the app can report the miss.
                 emit(WorkerEvent::Located { message_id: message_id.clone(), hit: None });
             }
+            // Demo mode seeds its in-memory cache up front (see
+            // `backend::seed_demo_cache`), so every attachment is already
+            // described and there is nothing to ask a server about.
+            MailRequest::ScanAttachments { folder_path } => {
+                emit(WorkerEvent::AttachmentsScanned { folder_path, added: 0, remaining: 0 });
+            }
             // What a scan of a lived-in mailbox turns up: Thunderbird's
             // built-ins and a few of the user's own, plus one the demo's tags
             // already know (dropped by the app before the report).
@@ -7596,10 +7822,6 @@ async fn run_mock(
                     f("travel_plans", 4, &["Inbox"]),
                     f("Work", 9, &["Inbox"]),
                 ]));
-            }
-            // The mock backend has no attachment cache.
-            MailRequest::LoadGallery => {
-                emit(WorkerEvent::Gallery { items: Vec::new() });
             }
             MailRequest::LoadRelated { message_id, .. } => {
                 emit(WorkerEvent::Related { message_id, messages: Vec::new() });
@@ -8736,15 +8958,19 @@ async fn run_graph(
                 }
                 emit(WorkerEvent::KeywordsSynced { paths });
             }
-            MailRequest::LoadGallery => {
-                if let Some(c) = cache.as_ref() {
-                    let items = c.gallery_items(account_id, GALLERY_DATA_CAP, GALLERY_LIMIT);
-                    emit(WorkerEvent::Gallery { items });
-                }
-            }
 
             // Cache-only, exactly like the IMAP path: assemble the conversation
             // from every folder's cached summaries.
+            // Graph has no equivalent of BODYSTRUCTURE in the shape this path
+            // uses: attachments come out of the raw MIME it downloads, so
+            // describing one costs the same as fetching it. Listing them
+            // through /messages/{id}/attachments would work, but it is a
+            // different call on a backend there is no account here to test
+            // against — so a Microsoft account's gallery still shows what has
+            // been downloaded rather than reaching back through the archive.
+            MailRequest::ScanAttachments { folder_path } => {
+                emit(WorkerEvent::AttachmentsScanned { folder_path, added: 0, remaining: 0 });
+            }
             MailRequest::LoadRelated { message_id, ids } => {
                 let messages = cache
                     .as_ref()
@@ -11359,5 +11585,253 @@ mod uid_set_tests {
         assert_eq!(uid_set(&[7, 7, 7]), "7");
         assert_eq!(uid_set(&[3, 4, 5, 9]), "3:5,9");
         assert_eq!(uid_set(&[]), "");
+    }
+}
+
+#[cfg(test)]
+mod attachment_scan_tests {
+    use super::{mime_extension, structure_attachments, INLINE_ATTACHMENT_MIN};
+    use async_imap::imap_proto::types::{
+        BodyContentCommon, BodyContentSinglePart, BodyStructure, ContentDisposition, ContentEncoding,
+        ContentType,
+    };
+    use std::borrow::Cow;
+
+    fn ctype(ty: &'static str, subtype: &'static str, name: Option<&'static str>) -> ContentType<'static> {
+        ContentType {
+            ty: Cow::Borrowed(ty),
+            subtype: Cow::Borrowed(subtype),
+            params: name.map(|n| vec![(Cow::Borrowed("name"), Cow::Borrowed(n))]),
+        }
+    }
+
+    fn disposition(ty: &'static str, filename: Option<&'static str>) -> ContentDisposition<'static> {
+        ContentDisposition {
+            ty: Cow::Borrowed(ty),
+            params: filename.map(|f| vec![(Cow::Borrowed("filename"), Cow::Borrowed(f))]),
+        }
+    }
+
+    fn single(
+        ty: &'static str,
+        subtype: &'static str,
+        octets: u32,
+        encoding: ContentEncoding<'static>,
+        disp: Option<ContentDisposition<'static>>,
+        content_id: Option<&'static str>,
+        name: Option<&'static str>,
+    ) -> BodyStructure<'static> {
+        BodyStructure::Basic {
+            common: BodyContentCommon {
+                ty: ctype(ty, subtype, name),
+                disposition: disp,
+                language: None,
+                location: None,
+            },
+            other: BodyContentSinglePart {
+                id: content_id.map(Cow::Borrowed),
+                md5: None,
+                description: None,
+                transfer_encoding: encoding,
+                octets,
+            },
+            extension: None,
+        }
+    }
+
+    fn text(subtype: &'static str, octets: u32) -> BodyStructure<'static> {
+        BodyStructure::Text {
+            common: BodyContentCommon {
+                ty: ctype("text", subtype, None),
+                disposition: None,
+                language: None,
+                location: None,
+            },
+            other: BodyContentSinglePart {
+                id: None,
+                md5: None,
+                description: None,
+                transfer_encoding: ContentEncoding::SevenBit,
+                octets,
+            },
+            lines: 10,
+            extension: None,
+        }
+    }
+
+    fn multipart(bodies: Vec<BodyStructure<'static>>) -> BodyStructure<'static> {
+        BodyStructure::Multipart {
+            common: BodyContentCommon {
+                ty: ctype("multipart", "mixed", None),
+                disposition: None,
+                language: None,
+                location: None,
+            },
+            bodies,
+            extension: None,
+        }
+    }
+
+    /// The ordinary case: a message with a body and one attached file. The body
+    /// is not an attachment; the file is, named from its disposition, and its
+    /// section is what a FETCH would ask for.
+    #[test]
+    fn a_body_and_one_attachment_yields_just_the_attachment() {
+        let bs = multipart(vec![
+            text("plain", 400),
+            single(
+                "application",
+                "pdf",
+                4000,
+                ContentEncoding::Base64,
+                Some(disposition("attachment", Some("report.pdf"))),
+                None,
+                None,
+            ),
+        ]);
+        let found = structure_attachments(&bs);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "report.pdf");
+        assert_eq!(found[0].mime, "application/pdf");
+        assert_eq!(found[0].section, "2", "the second part of the multipart");
+        assert_eq!(found[0].size, 3000, "base64 inflates by 4/3, so decode it back");
+    }
+
+    /// A newsletter's logo: inline, small, with a Content-ID. Decoration, not a
+    /// file anyone wants in their gallery.
+    #[test]
+    fn a_small_inline_image_with_a_content_id_is_decoration() {
+        let bs = multipart(vec![
+            text("html", 900),
+            single("image", "png", 2000, ContentEncoding::Base64, None, Some("logo@x"), None),
+        ]);
+        assert!(structure_attachments(&bs).is_empty());
+    }
+
+    /// The same shape, but big enough to be a photograph someone sent: Apple
+    /// Mail attaches pictures exactly this way, and they have to be saveable.
+    #[test]
+    fn a_large_inline_image_is_content_however_it_is_labelled() {
+        let octets = (INLINE_ATTACHMENT_MIN as u32 + 1) * 4 / 3 + 8;
+        let bs = multipart(vec![
+            text("plain", 40),
+            single("image", "jpeg", octets, ContentEncoding::Base64, None, Some("img@x"), None),
+        ]);
+        let found = structure_attachments(&bs);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "attachment-1.jpg", "unnamed, so named by its type");
+    }
+
+    /// Nested multiparts number their sections through: this is what an
+    /// alternative body beside an attachment looks like.
+    #[test]
+    fn nested_parts_are_numbered_through() {
+        let bs = multipart(vec![
+            multipart(vec![text("plain", 100), text("html", 200)]),
+            single(
+                "application",
+                "zip",
+                900,
+                ContentEncoding::Base64,
+                Some(disposition("attachment", Some("bundle.zip"))),
+                None,
+                None,
+            ),
+        ]);
+        let found = structure_attachments(&bs);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].section, "2");
+    }
+
+    /// A text part is only an attachment when it says so — otherwise every
+    /// message's own body would turn up in the gallery.
+    #[test]
+    fn a_text_part_counts_only_when_it_declares_itself() {
+        let plain = multipart(vec![text("plain", 500)]);
+        assert!(structure_attachments(&plain).is_empty());
+
+        let attached = multipart(vec![BodyStructure::Text {
+            common: BodyContentCommon {
+                ty: ctype("text", "csv", None),
+                disposition: Some(disposition("attachment", Some("rows.csv"))),
+                language: None,
+                location: None,
+            },
+            other: BodyContentSinglePart {
+                id: None,
+                md5: None,
+                description: None,
+                transfer_encoding: ContentEncoding::SevenBit,
+                octets: 700,
+            },
+            lines: 9,
+            extension: None,
+        }]);
+        let found = structure_attachments(&attached);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "rows.csv");
+        assert_eq!(found[0].size, 700, "not base64, so the octets stand");
+    }
+
+    /// The filename falls back to the content type's own `name` parameter,
+    /// which is where older clients put it.
+    #[test]
+    fn a_name_parameter_is_used_when_there_is_no_filename() {
+        let bs = multipart(vec![
+            text("plain", 10),
+            single(
+                "application",
+                "msword",
+                600,
+                ContentEncoding::SevenBit,
+                Some(disposition("attachment", None)),
+                None,
+                Some("minutes.doc"),
+            ),
+        ]);
+        assert_eq!(structure_attachments(&bs)[0].name, "minutes.doc");
+    }
+
+    /// An RFC 2047 filename is decoded, not shown as the encoded word.
+    #[test]
+    fn an_encoded_filename_is_decoded() {
+        let bs = multipart(vec![
+            text("plain", 10),
+            single(
+                "application",
+                "pdf",
+                600,
+                ContentEncoding::SevenBit,
+                Some(disposition("attachment", Some("=?utf-8?Q?rapport=20final?="))),
+                None,
+                None,
+            ),
+        ]);
+        assert_eq!(structure_attachments(&bs)[0].name, "rapport final");
+    }
+
+    /// A message that is not multipart at all is one part, section 1.
+    #[test]
+    fn a_single_part_message_is_section_one() {
+        let bs = single(
+            "application",
+            "pdf",
+            800,
+            ContentEncoding::SevenBit,
+            Some(disposition("attachment", Some("lone.pdf"))),
+            None,
+            None,
+        );
+        let found = structure_attachments(&bs);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].section, "1");
+    }
+
+    #[test]
+    fn only_image_types_get_a_guessed_extension() {
+        assert_eq!(mime_extension("image", "jpeg"), ".jpg");
+        assert_eq!(mime_extension("IMAGE", "PNG"), ".png");
+        assert_eq!(mime_extension("application", "pdf"), "");
+        assert_eq!(mime_extension("image", "svg+xml"), "");
     }
 }

@@ -6,27 +6,127 @@
 //! (rendered from their first page) show as thumbnails; other files show a type
 //! icon. Clicking a cell opens a large overlay preview.
 
+use adw::prelude::*;
 use gtk::gdk;
 use gtk::glib;
-use gtk::prelude::*;
 use relm4::prelude::*;
 
-use crate::models::{is_image_name, GalleryItem};
+use std::collections::HashMap;
+
+use crate::models::{ext_of, is_image_name, FolderKind, GalleryItem, GallerySort};
 use crate::ui::context_menu::{show_context_menu, MenuEntry};
-use crate::i18n::i18n;
+use crate::i18n::{i18n, i18n_f};
 
 /// Width of the table's trailing quick-actions column (three icon buttons);
 /// the header carries a spacer of the same width so the columns line up.
 const TABLE_ACTIONS_WIDTH: i32 = 100;
 
+/// How many attachments one page holds. Big enough that scrolling rarely waits,
+/// small enough that the first screen appears at once and a page's worth of
+/// cached thumbnails is not a burden.
+const PAGE_SIZE: u32 = 120;
+
+/// How close to the end of the list the scroll has to come before the next page
+/// is asked for, in px. Roughly two rows of thumbnails, so the page is usually
+/// already there by the time the user reaches it.
+const LOAD_MORE_MARGIN: f64 = 700.0;
+
+/// How long typing has to pause before the search runs, in ms. Each search is a
+/// query over the whole archive and a rebuilt grid, so running one per keystroke
+/// would spend most of its time on words half-typed.
+const SEARCH_DEBOUNCE_MS: u32 = 250;
+
+/// One page's worth of question for the cache: everything the database needs to
+/// narrow and order the archive before cutting the page out of it.
+#[derive(Debug, Clone)]
+pub struct GalleryRequest {
+    /// `(account id, folder path)` for every folder in scope.
+    pub folders: Vec<(u32, String)>,
+    pub account_id: Option<u32>,
+    pub tokens: Vec<String>,
+    pub bucket: u32,
+    pub sort: GallerySort,
+    pub offset: u32,
+    pub limit: u32,
+}
+
+/// One folder offered in the gallery's folder list.
+#[derive(Debug, Clone)]
+pub struct GalleryFolder {
+    pub path: String,
+    /// Display name, as the sidebar spells it.
+    pub name: String,
+    pub kind: FolderKind,
+}
+
+/// One account's share of the folder list: the account's own label and the
+/// folders whose attachments the gallery could draw on.
+#[derive(Debug, Clone)]
+pub struct GalleryAccount {
+    pub id: u32,
+    pub label: String,
+    pub folders: Vec<GalleryFolder>,
+}
+
+/// Whether a folder of this kind feeds the gallery unless the user says
+/// otherwise. Sent is the one eligible kind that starts off: what you sent is
+/// rarely what you are looking for, and its attachments are usually copies of
+/// files you already have. Drafts, Junk and Trash never reach the gallery at
+/// all (the cache query drops them), so they are not offered here.
+fn kind_default(kind: FolderKind) -> bool {
+    !matches!(kind, FolderKind::Sent)
+}
+
+/// Which master switch governs a folder kind: Archive folders follow "Include
+/// Archive", anything that is neither an inbox nor an archive follows "Include
+/// other folders", and inboxes follow neither (they are always on).
+fn kind_master(kind: FolderKind) -> Option<Master> {
+    match kind {
+        FolderKind::Inbox => None,
+        FolderKind::Archive => Some(Master::Archive),
+        _ => Some(Master::Other),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Master {
+    Archive,
+    Other,
+}
+
+/// Whether a folder's attachments are in scope: its master switch has to be on
+/// *and* it has to be ticked. A master that is off wins over a tick rather than
+/// clearing it, so turning the master back on restores each folder to whatever
+/// the user had chosen. `tick` is the user's own choice, or `None` when they
+/// have not touched this folder and its kind's default stands.
+fn in_scope(kind: FolderKind, include_archive: bool, include_other: bool, tick: Option<bool>) -> bool {
+    let master_on = match kind_master(kind) {
+        Some(Master::Archive) => include_archive,
+        Some(Master::Other) => include_other,
+        None => true,
+    };
+    master_on && tick.unwrap_or_else(|| kind_default(kind))
+}
+
 pub struct AttachmentsGallery {
-    /// Full set of attachments, unfiltered — the source for search and sort.
+    /// The pages loaded so far, already filtered and ordered by the database.
+    /// This is a window onto `total`, not the whole set: an archive of two
+    /// decades holds far more attachments than the UI can hold widgets for, so
+    /// the list grows a page at a time as the view is scrolled.
     all_items: Vec<GalleryItem>,
-    /// Indices into `all_items`, filtered by `query`/`type_filter` and ordered
-    /// by `sort`: the list actually shown and stepped through in the lightbox.
-    items: Vec<usize>,
+    /// How many attachments match the current query in total, across every
+    /// page — what the footer counts and how `has_more` is known.
+    total: u32,
+    /// A page request is in flight; the footer shows its spinner and no second
+    /// request is sent until it lands.
+    loading_more: bool,
+    /// Messages the scan has still to describe across the folders in scope.
+    /// Non-zero means the gallery is not yet showing everything there is.
+    scan_remaining: u32,
+    /// An attachment that was never downloaded is on its way from the server.
+    fetching: bool,
     query: String,
-    sort: SortBy,
+    sort: GallerySort,
     /// Index into `items` currently shown in the lightbox, if any.
     preview: Option<usize>,
     /// What the lightbox shows for the current item: a decoded image, or a
@@ -40,74 +140,66 @@ pub struct AttachmentsGallery {
     thumb_width: i32,
     /// The footer type dropdown's row: 0 = all, then one bucket per row.
     type_filter: u32,
+    /// Show only one account's attachments; `None` shows every account. Unlike
+    /// the folder scope this is a view filter, not a setting, so it resets to
+    /// "All accounts" each time the gallery is opened.
+    account_filter: Option<u32>,
+    /// Every account and the folders it offers, as fed by the app.
+    accounts: Vec<GalleryAccount>,
+    /// Pull from Archive folders (persisted master switch).
+    include_archive: bool,
+    /// Pull from folders that are neither Inbox nor Archive (persisted).
+    include_other: bool,
+    /// The folders the user ticked or unticked by hand, overriding
+    /// [`kind_default`]: account id -> path -> on. Persisted.
+    overrides: HashMap<u32, HashMap<String, bool>>,
+    /// Effective per-folder verdict, recomputed from the master switches and
+    /// `overrides` whenever either changes, so filtering is a lookup.
+    included: HashMap<u32, HashMap<String, bool>>,
     /// Debounce for the size slider — one rebuild after the drag settles.
     resize_timer: Option<glib::SourceId>,
+    /// Debounce for the search box — one query after the typing settles.
+    query_timer: Option<glib::SourceId>,
     flow: gtk::FlowBox,
     /// The table view's rows (the grid's sibling stack page).
     table: gtk::ListBox,
+    /// The folder list inside the footer's "Folders" popover, rebuilt whenever
+    /// the account/folder set changes.
+    folder_list: gtk::ListBox,
+    /// The account filter dropdown's model: "All accounts" then one row per
+    /// account, in `accounts` order.
+    account_names: gtk::StringList,
     /// The component's root widget, used to anchor the right-click context menu.
     root: gtk::Widget,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-enum SortBy {
-    #[default]
-    Newest,
-    Oldest,
-    Name,
-    NameDesc,
-    Sender,
-    SenderDesc,
-    Largest,
-    Smallest,
-    Type,
-    TypeDesc,
-}
-
-impl SortBy {
-    /// Map the sort dropdown's selected row to a criterion. The order must match
-    /// the `StringList` built in the view.
-    fn from_index(i: u32) -> SortBy {
-        match i {
-            1 => SortBy::Oldest,
-            2 => SortBy::Name,
-            3 => SortBy::NameDesc,
-            4 => SortBy::Sender,
-            5 => SortBy::SenderDesc,
-            6 => SortBy::Largest,
-            7 => SortBy::Smallest,
-            8 => SortBy::Type,
-            9 => SortBy::TypeDesc,
-            _ => SortBy::Newest,
-        }
-    }
-
-    /// The dropdown row for a criterion — [`SortBy::from_index`]'s inverse, so
-    /// a table-header click can move the dropdown's selection with it.
-    fn index(self) -> u32 {
-        match self {
-            SortBy::Newest => 0,
-            SortBy::Oldest => 1,
-            SortBy::Name => 2,
-            SortBy::NameDesc => 3,
-            SortBy::Sender => 4,
-            SortBy::SenderDesc => 5,
-            SortBy::Largest => 6,
-            SortBy::Smallest => 7,
-            SortBy::Type => 8,
-            SortBy::TypeDesc => 9,
-        }
-    }
-}
-
 #[derive(Debug)]
 pub enum GalleryInput {
-    /// Replace the gallery contents (already merged across accounts).
-    SetItems(Vec<GalleryItem>),
+    /// A page came back from the cache: `offset` 0 replaces the list, anything
+    /// else appends. `total` is how many the query matches altogether.
+    Page { items: Vec<GalleryItem>, total: u32, offset: u32 },
     SetLoading(bool),
+    /// The scroll came near the end — ask for the next page if there is one.
+    LoadMore,
+    /// The scan described more attachments. Refreshes the view only while the
+    /// user is still on the first page, so a scan landing mid-scroll cannot
+    /// pull the ground out from under them.
+    ScanProgress,
+    /// How many messages the scan still has to describe, across every folder in
+    /// scope; 0 once the archive is fully indexed.
+    ScanStatus(u32),
+    /// A file the gallery knew of but had not downloaded is being fetched, so
+    /// the lightbox can show a spinner instead of an empty frame.
+    SetFetching(bool),
+    /// A message's attachments arrived: fill in the bytes for every loaded row
+    /// of that message, so its thumbnail and preview appear in place.
+    Fetched { account_id: u32, uid: u32, items: Vec<crate::models::Attachment> },
     /// Filter the grid to items matching this search text (sender, subject,
     /// filename, folder, and type keywords like "pdf" or "spreadsheet").
+    /// Debounced — the query itself runs on [`GalleryInput::ApplyQuery`].
     SetQuery(String),
+    /// The typing settled — run the search.
+    ApplyQuery,
     /// Re-sort the grid; the value is the sort dropdown's selected row index.
     SetSort(u32),
     /// A table column header was clicked: sort by that column, or flip its
@@ -122,6 +214,17 @@ pub enum GalleryInput {
     ApplyThumbWidth,
     /// Show only one type bucket (the footer type dropdown's row; 0 = all).
     SetTypeFilter(u32),
+    /// The accounts and folders the gallery may draw on, sent by the app when
+    /// the gallery opens. Rebuilds the folder list and the account dropdown.
+    SetAccounts(Vec<GalleryAccount>),
+    /// Show only one account (the footer account dropdown's row; 0 = all).
+    SetAccountFilter(u32),
+    /// Master switch: pull from Archive folders.
+    SetIncludeArchive(bool),
+    /// Master switch: pull from folders that are neither Inbox nor Archive.
+    SetIncludeOther(bool),
+    /// One folder was ticked or unticked in the folder list.
+    SetFolder { account_id: u32, path: String, on: bool },
     /// A grid cell was activated (single click) — open the lightbox on that item.
     Activate(u32),
     Prev,
@@ -144,12 +247,25 @@ pub enum GalleryInput {
     /// A lightbox-size PDF render finished (keyed by content hash) — show it
     /// if that PDF is still the one being previewed.
     PreviewRendered(u64),
+    /// Showcase only (VIREO_SHOWCASE_GALLERY_FOLDERS): drop the footer's
+    /// folder popover open so a capture can see it.
+    ShowcaseFolders,
+    /// Showcase only (VIREO_SHOWCASE_GALLERY_SEARCH): focus the search box and
+    /// put text in it, as typing would, then report whether the box still has
+    /// the focus once the search has run. Guards the bug where a search that
+    /// matched nothing hid the toolbar the box lives in.
+    ShowcaseSearch(String),
 }
 
 #[derive(Debug)]
 pub enum GalleryOutput {
     /// Open the source message of an attachment in the reader.
     OpenMessage { account_id: u32, folder_path: String, uid: u32 },
+    /// Run this query against the cache and send the page back.
+    Load(GalleryRequest),
+    /// Fetch an attachment whose bytes were never downloaded, so it can be
+    /// opened or previewed.
+    Fetch { account_id: u32, folder_path: String, uid: u32 },
 }
 
 #[relm4::component(pub)]
@@ -172,8 +288,9 @@ impl Component for AttachmentsGallery {
                     add_css_class: "gallery-toolbar",
                     set_spacing: 8,
                     #[watch]
-                    set_visible: !model.all_items.is_empty(),
+                    set_visible: model.show_chrome(),
 
+                    #[name = "search_entry"]
                     gtk::SearchEntry {
                         set_hexpand: true,
                         set_placeholder_text: Some(i18n("Search by sender, subject, type, filename…").as_str()),
@@ -207,12 +324,25 @@ impl Component for AttachmentsGallery {
                     add_named[Some("noresults")] = &adw::StatusPage {
                         set_icon_name: Some("co.hyprlab.Vireo-system-search-symbolic"),
                         set_title: &i18n("No matching attachments"),
-                        set_description: Some(i18n("Try a different search or clear the filter.").as_str()),
+                        set_description: Some(i18n("Try a different search, or check which accounts and folders the footer is pulling from.").as_str()),
                     },
 
                     add_named[Some("grid")] = &gtk::ScrolledWindow {
                     set_hscrollbar_policy: gtk::PolicyType::Never,
                     set_vexpand: true,
+                    connect_edge_reached[sender] => move |_, pos| {
+                        if pos == gtk::PositionType::Bottom {
+                            sender.input(GalleryInput::LoadMore);
+                        }
+                    },
+                    #[wrap(Some)]
+                    set_vadjustment = &gtk::Adjustment {
+                        connect_value_changed[sender] => move |a| {
+                            if near_end(a) {
+                                sender.input(GalleryInput::LoadMore);
+                            }
+                        },
+                    },
 
                     #[local_ref]
                     flow -> gtk::FlowBox {
@@ -247,7 +377,7 @@ impl Component for AttachmentsGallery {
                                 connect_clicked => GalleryInput::SortColumn(0),
                                 gtk::Label {
                                     #[watch]
-                                    set_label: &column_header("Name", model.sort, SortBy::Name, SortBy::NameDesc),
+                                    set_label: &column_header("Name", model.sort, GallerySort::Name, GallerySort::NameDesc),
                                     set_xalign: 0.0,
                                 },
                             },
@@ -258,7 +388,7 @@ impl Component for AttachmentsGallery {
                                 connect_clicked => GalleryInput::SortColumn(1),
                                 gtk::Label {
                                     #[watch]
-                                    set_label: &column_header("Sender", model.sort, SortBy::Sender, SortBy::SenderDesc),
+                                    set_label: &column_header("Sender", model.sort, GallerySort::Sender, GallerySort::SenderDesc),
                                     set_xalign: 0.0,
                                 },
                             },
@@ -269,7 +399,7 @@ impl Component for AttachmentsGallery {
                                 connect_clicked => GalleryInput::SortColumn(4),
                                 gtk::Label {
                                     #[watch]
-                                    set_label: &column_header("Type", model.sort, SortBy::Type, SortBy::TypeDesc),
+                                    set_label: &column_header("Type", model.sort, GallerySort::Type, GallerySort::TypeDesc),
                                     set_xalign: 0.0,
                                 },
                             },
@@ -280,7 +410,7 @@ impl Component for AttachmentsGallery {
                                 connect_clicked => GalleryInput::SortColumn(2),
                                 gtk::Label {
                                     #[watch]
-                                    set_label: &column_header("Date", model.sort, SortBy::Oldest, SortBy::Newest),
+                                    set_label: &column_header("Date", model.sort, GallerySort::Oldest, GallerySort::Newest),
                                     set_xalign: 0.0,
                                 },
                             },
@@ -295,7 +425,7 @@ impl Component for AttachmentsGallery {
                                 connect_clicked => GalleryInput::SortColumn(3),
                                 gtk::Label {
                                     #[watch]
-                                    set_label: &column_header("Size", model.sort, SortBy::Smallest, SortBy::Largest),
+                                    set_label: &column_header("Size", model.sort, GallerySort::Smallest, GallerySort::Largest),
                                     set_xalign: 1.0,
                                 },
                             },
@@ -306,6 +436,19 @@ impl Component for AttachmentsGallery {
                         gtk::ScrolledWindow {
                             set_hscrollbar_policy: gtk::PolicyType::Never,
                             set_vexpand: true,
+                            connect_edge_reached[sender] => move |_, pos| {
+                                if pos == gtk::PositionType::Bottom {
+                                    sender.input(GalleryInput::LoadMore);
+                                }
+                            },
+                            #[wrap(Some)]
+                            set_vadjustment = &gtk::Adjustment {
+                                connect_value_changed[sender] => move |a| {
+                                    if near_end(a) {
+                                        sender.input(GalleryInput::LoadMore);
+                                    }
+                                },
+                            },
 
                             #[local_ref]
                             table -> gtk::ListBox {
@@ -325,7 +468,7 @@ impl Component for AttachmentsGallery {
                 gtk::ActionBar {
                     add_css_class: "gallery-footer",
                     #[watch]
-                    set_revealed: !model.all_items.is_empty(),
+                    set_revealed: model.show_chrome(),
 
                     pack_start = &gtk::Box {
                         add_css_class: "linked",
@@ -349,6 +492,83 @@ impl Component for AttachmentsGallery {
                             connect_clicked[sender] => move |_| {
                                 sender.input(GalleryInput::SetViewTable(true));
                             } @table_toggle,
+                        },
+                    },
+
+                    // Scope: which account and which folders feed the gallery.
+                    #[name = "account_dropdown"]
+                    pack_start = &gtk::DropDown {
+                        set_tooltip_text: Some(i18n("Show only this account").as_str()),
+                        // Pointless with one account, and it would be the only
+                        // control there that could never change anything.
+                        #[watch]
+                        set_visible: model.accounts.len() > 1,
+                        set_model: Some(&model.account_names),
+                        connect_selected_notify[sender] => move |d| {
+                            sender.input(GalleryInput::SetAccountFilter(d.selected()));
+                        },
+                    },
+
+                    #[name = "folders_button"]
+                    pack_start = &gtk::MenuButton {
+                        set_icon_name: "co.hyprlab.Vireo-folder-symbolic",
+                        set_tooltip_text: Some(i18n("Folders to pull from").as_str()),
+
+                        #[wrap(Some)]
+                        set_popover = &gtk::Popover {
+                            add_css_class: "gallery-folders-popover",
+
+                            #[name = "folders_box"]
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Vertical,
+                                set_spacing: 10,
+                                set_width_request: 320,
+
+                                gtk::ListBox {
+                                    add_css_class: "boxed-list",
+                                    set_selection_mode: gtk::SelectionMode::None,
+
+                                    #[name = "archive_row"]
+                                    adw::SwitchRow {
+                                        set_title: &i18n("Include Archive"),
+                                        #[watch]
+                                        #[block_signal(archive_toggle)]
+                                        set_active: model.include_archive,
+                                        connect_active_notify[sender] => move |r| {
+                                            sender.input(GalleryInput::SetIncludeArchive(r.is_active()));
+                                        } @archive_toggle,
+                                    },
+                                    #[name = "other_row"]
+                                    adw::SwitchRow {
+                                        set_title: &i18n("Include other folders"),
+                                        set_subtitle: &i18n("Everything that is not an inbox or an archive"),
+                                        #[watch]
+                                        #[block_signal(other_toggle)]
+                                        set_active: model.include_other,
+                                        connect_active_notify[sender] => move |r| {
+                                            sender.input(GalleryInput::SetIncludeOther(r.is_active()));
+                                        } @other_toggle,
+                                    },
+                                },
+
+                                gtk::Label {
+                                    set_label: &i18n("Pulling attachments from"),
+                                    set_xalign: 0.0,
+                                    add_css_class: "heading",
+                                },
+
+                                gtk::ScrolledWindow {
+                                    set_hscrollbar_policy: gtk::PolicyType::Never,
+                                    set_propagate_natural_height: true,
+                                    set_max_content_height: 380,
+
+                                    #[local_ref]
+                                    folder_list -> gtk::ListBox {
+                                        add_css_class: "boxed-list",
+                                        set_selection_mode: gtk::SelectionMode::None,
+                                    },
+                                },
+                            },
                         },
                     },
 
@@ -394,7 +614,29 @@ impl Component for AttachmentsGallery {
                     pack_end = &gtk::Label {
                         add_css_class: "dim-label",
                         #[watch]
-                        set_label: &count_text(model.items.len(), model.all_items.len()),
+                        set_label: &count_text(model.all_items.len(), model.total as usize),
+                    },
+
+                    // What the network is doing, in the one place the gallery
+                    // keeps its status: a page on its way, or the scan still
+                    // working back through the archive.
+                    pack_end = &gtk::Box {
+                        set_spacing: 6,
+                        set_valign: gtk::Align::Center,
+                        #[watch]
+                        set_visible: model.loading_more || model.scan_remaining > 0,
+
+                        gtk::Spinner {
+                            #[watch]
+                            set_spinning: model.loading_more || model.scan_remaining > 0,
+                            set_width_request: 16,
+                            set_height_request: 16,
+                        },
+                        gtk::Label {
+                            add_css_class: "dim-label",
+                            #[watch]
+                            set_label: &scan_text(model.loading_more, model.scan_remaining),
+                        },
                     },
 
                     pack_end = &gtk::Scale {
@@ -454,7 +696,7 @@ impl Component for AttachmentsGallery {
                         add_css_class: "circular",
                         add_css_class: "osd",
                         #[watch]
-                        set_sensitive: model.items.len() > 1,
+                        set_sensitive: model.all_items.len() > 1,
                         connect_clicked => GalleryInput::Prev,
                     },
 
@@ -521,7 +763,7 @@ impl Component for AttachmentsGallery {
                         add_css_class: "circular",
                         add_css_class: "osd",
                         #[watch]
-                        set_sensitive: model.items.len() > 1,
+                        set_sensitive: model.all_items.len() > 1,
                         connect_clicked => GalleryInput::Next,
                     },
                 },
@@ -564,24 +806,42 @@ impl Component for AttachmentsGallery {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let (view_table, thumb_width, sort_index) = crate::config::load_gallery_view();
+        let (include_archive, include_other, saved_folders) = crate::config::load_gallery_scope();
+        let mut overrides: HashMap<u32, HashMap<String, bool>> = HashMap::new();
+        for (id, path, on) in saved_folders {
+            overrides.entry(id).or_default().insert(path, on);
+        }
         let model = AttachmentsGallery {
             all_items: Vec::new(),
-            items: Vec::new(),
+            total: 0,
+            loading_more: false,
+            scan_remaining: 0,
+            fetching: false,
             query: String::new(),
-            sort: SortBy::from_index(sort_index),
+            sort: GallerySort::from_index(sort_index),
             preview: None,
             preview_texture: None,
             loading: false,
             view_table,
             thumb_width,
             type_filter: 0,
+            account_filter: None,
+            accounts: Vec::new(),
+            include_archive,
+            include_other,
+            overrides,
+            included: HashMap::new(),
             resize_timer: None,
+            query_timer: None,
             flow: gtk::FlowBox::new(),
             table: gtk::ListBox::new(),
+            folder_list: gtk::ListBox::new(),
+            account_names: gtk::StringList::new(&[i18n("All accounts").as_str()]),
             root: root.clone().upcast(),
         };
         let flow = &model.flow;
         let table = &model.table;
+        let folder_list = &model.folder_list;
         let widgets = view_output!();
 
         // Double-clicking the preview opens the document in its external app.
@@ -620,53 +880,104 @@ impl Component for AttachmentsGallery {
         _root: &Self::Root,
     ) {
         match msg {
-            GalleryInput::SetItems(items) => {
-                self.all_items = items;
+            GalleryInput::Page { items, total, offset } => {
+                if offset == 0 {
+                    // The first page of a fresh query replaces everything.
+                    self.all_items = items;
+                } else if offset as usize == self.all_items.len() {
+                    self.all_items.extend(items);
+                } else {
+                    // A page for a query that has since changed: its offset no
+                    // longer lines up with what is loaded, so appending it
+                    // would interleave rows from two different orderings. Drop
+                    // it and wait for the page the current query asked for.
+                    self.loading_more = false;
+                    self.update_view(widgets, sender);
+                    return;
+                }
+                self.total = total;
                 self.loading = false;
-                self.preview = None;
-                self.preview_texture = None;
-                self.apply();
+                self.loading_more = false;
                 self.rebuild_view(&sender);
+            }
+            GalleryInput::LoadMore => self.load_more(&sender),
+            GalleryInput::ScanProgress => {
+                if self.all_items.len() <= PAGE_SIZE as usize {
+                    self.reload(&sender);
+                }
+            }
+            GalleryInput::ScanStatus(remaining) => self.scan_remaining = remaining,
+            GalleryInput::SetFetching(on) => self.fetching = on,
+            GalleryInput::Fetched { account_id, uid, items } => {
+                let mut touched = false;
+                for row in self
+                    .all_items
+                    .iter_mut()
+                    .filter(|i| i.account_id == account_id && i.uid == uid && i.data.is_none())
+                {
+                    // Match on the name rather than the index: the scan numbers
+                    // parts as the server describes them and the fetch numbers
+                    // them as the parser finds them, which need not agree.
+                    if let Some(found) = items.iter().find(|a| a.name == row.name) {
+                        row.data = Some(found.data.clone());
+                        row.size = found.data.len() as u64;
+                        row.downloaded = true;
+                        touched = true;
+                    }
+                }
+                if touched {
+                    self.rebuild_view(&sender);
+                    if self.preview.is_some() {
+                        self.refresh_preview(&sender);
+                    }
+                }
             }
             GalleryInput::SetQuery(q) => {
-                self.query = q;
-                self.preview = None;
-                self.apply();
-                self.rebuild_view(&sender);
+                if self.query != q {
+                    self.query = q;
+                    if let Some(t) = self.query_timer.take() {
+                        t.remove();
+                    }
+                    let s = sender.clone();
+                    self.query_timer = Some(glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(SEARCH_DEBOUNCE_MS as u64),
+                        move || s.input(GalleryInput::ApplyQuery),
+                    ));
+                }
+            }
+            GalleryInput::ApplyQuery => {
+                self.query_timer = None;
+                self.reload(&sender);
             }
             GalleryInput::SetSort(i) => {
-                let sort = SortBy::from_index(i);
+                let sort = GallerySort::from_index(i);
                 if self.sort != sort {
                     self.sort = sort;
-                    self.preview = None;
-                    self.apply();
-                    self.rebuild_view(&sender);
                     crate::config::save_gallery_sort(i);
+                    self.reload(&sender);
                 }
             }
             GalleryInput::SortColumn(col) => {
                 // First click sorts a column its natural way; a second flips it.
                 let sort = match (col, self.sort) {
-                    (0, SortBy::Name) => SortBy::NameDesc,
-                    (0, _) => SortBy::Name,
-                    (1, SortBy::Sender) => SortBy::SenderDesc,
-                    (1, _) => SortBy::Sender,
-                    (2, SortBy::Newest) => SortBy::Oldest,
-                    (2, _) => SortBy::Newest,
-                    (3, SortBy::Largest) => SortBy::Smallest,
-                    (3, _) => SortBy::Largest,
-                    (4, SortBy::Type) => SortBy::TypeDesc,
-                    (4, _) | (_, _) => SortBy::Type,
+                    (0, GallerySort::Name) => GallerySort::NameDesc,
+                    (0, _) => GallerySort::Name,
+                    (1, GallerySort::Sender) => GallerySort::SenderDesc,
+                    (1, _) => GallerySort::Sender,
+                    (2, GallerySort::Newest) => GallerySort::Oldest,
+                    (2, _) => GallerySort::Newest,
+                    (3, GallerySort::Largest) => GallerySort::Smallest,
+                    (3, _) => GallerySort::Largest,
+                    (4, GallerySort::Type) => GallerySort::TypeDesc,
+                    (4, _) | (_, _) => GallerySort::Type,
                 };
                 // The dropdown follows; its notify handler sees the same value
                 // and does nothing further.
                 widgets.sort_dropdown.set_selected(sort.index());
                 if self.sort != sort {
                     self.sort = sort;
-                    self.preview = None;
-                    self.apply();
-                    self.rebuild_view(&sender);
                     crate::config::save_gallery_sort(sort.index());
+                    self.reload(&sender);
                 }
             }
             GalleryInput::SetViewTable(table) => {
@@ -701,14 +1012,61 @@ impl Component for AttachmentsGallery {
             GalleryInput::SetTypeFilter(bucket) => {
                 if self.type_filter != bucket {
                     self.type_filter = bucket;
-                    self.preview = None;
-                    self.apply();
-                    self.rebuild_view(&sender);
+                    self.reload(&sender);
+                }
+            }
+            GalleryInput::SetAccounts(accounts) => {
+                self.accounts = accounts;
+                self.rebuild_account_names();
+                // The dropdown's rows just changed under it; start from "All
+                // accounts" rather than whichever row the old list had there.
+                self.account_filter = None;
+                widgets.account_dropdown.set_selected(0);
+                self.recompute_scope();
+                self.rebuild_folder_list(&sender);
+                self.reload(&sender);
+            }
+            GalleryInput::SetAccountFilter(row) => {
+                // Row 0 is "All accounts"; the rest index `accounts` in order.
+                let filter = (row as usize)
+                    .checked_sub(1)
+                    .and_then(|i| self.accounts.get(i))
+                    .map(|a| a.id);
+                if self.account_filter != filter {
+                    self.account_filter = filter;
+                    // Keeps the dropdown honest when the message came from
+                    // somewhere other than the dropdown itself. Setting it to
+                    // the row it already holds emits nothing, so this cannot
+                    // loop back round.
+                    widgets.account_dropdown.set_selected(row);
+                    self.reload(&sender);
+                }
+            }
+            GalleryInput::SetIncludeArchive(on) => {
+                if self.include_archive != on {
+                    self.include_archive = on;
+                    self.scope_changed(&sender);
+                }
+            }
+            GalleryInput::SetIncludeOther(on) => {
+                if self.include_other != on {
+                    self.include_other = on;
+                    self.scope_changed(&sender);
+                }
+            }
+            GalleryInput::SetFolder { account_id, path, on } => {
+                let entry = self.overrides.entry(account_id).or_default();
+                if entry.insert(path, on) != Some(on) {
+                    // The list already draws this tick; rebuilding it here
+                    // would tear down the check button mid-signal.
+                    self.recompute_scope();
+                    self.save_scope();
+                    self.reload(&sender);
                 }
             }
             GalleryInput::SetLoading(on) => self.loading = on,
             GalleryInput::Activate(i) => {
-                if (i as usize) < self.items.len() {
+                if (i as usize) < self.all_items.len() {
                     self.preview = Some(i as usize);
                     self.refresh_preview(&sender);
                 }
@@ -731,7 +1089,7 @@ impl Component for AttachmentsGallery {
             }
             GalleryInput::OpenCurrent => {
                 if let Some(i) = self.preview {
-                    self.open_item(i);
+                    self.open_item(i, &sender);
                 }
             }
             GalleryInput::GoToCurrent => {
@@ -739,16 +1097,58 @@ impl Component for AttachmentsGallery {
                     self.goto_item(i, &sender);
                 }
             }
-            GalleryInput::OpenItem(i) => self.open_item(i),
-            GalleryInput::DownloadItem(i) => self.download_item(i),
+            GalleryInput::OpenItem(i) => self.open_item(i, &sender),
+            GalleryInput::DownloadItem(i) => self.download_item(i, &sender),
             GalleryInput::GoToItem(i) => self.goto_item(i, &sender),
             GalleryInput::OpenExternal(i) => {
                 // Double-click: skip/close the preview and open the file directly.
                 self.preview = None;
-                self.open_item(i);
+                self.open_item(i, &sender);
             }
             GalleryInput::ContextMenu { index, x, y } => {
                 self.show_context_menu(index, x, y, &sender)
+            }
+            GalleryInput::ShowcaseSearch(text) => {
+                let entry = widgets.search_entry.clone();
+                entry.grab_focus();
+                // Goes through `search-changed`, so this is the same path a
+                // typed character takes, debounce and all.
+                entry.set_text(&text);
+                glib::timeout_add_seconds_local_once(2, move || {
+                    // `has_focus` also needs the window to be the active one,
+                    // which it need not be under a private bus; `is_focus` is
+                    // the question actually being asked — is this still the
+                    // toplevel's focus widget.
+                    let focus = entry
+                        .root()
+                        .and_downcast::<gtk::Window>()
+                        .and_then(|w| gtk::prelude::GtkWindowExt::focus(&w));
+                    // A GtkSearchEntry is composite: the focus widget is the
+                    // GtkText inside it, so ask whether the focus is anywhere
+                    // within the entry rather than whether it *is* the entry.
+                    let kept = focus
+                        .as_ref()
+                        .is_some_and(|f| f == entry.upcast_ref::<gtk::Widget>() || f.is_ancestor(&entry));
+                    tracing::info!(
+                        target: "vireo::showcase",
+                        "gallery search focus: kept={kept} holder={} toolbar_visible={} text={:?}",
+                        focus.map(|w| w.type_().name().to_string()).unwrap_or_else(|| "none".into()),
+                        entry.parent().is_some_and(|p| p.is_visible()),
+                        entry.text()
+                    );
+                });
+            }
+            GalleryInput::ShowcaseFolders => {
+                widgets.folders_button.popup();
+                // A popover is its own surface, so the window snapshot never
+                // has it: capture its contents directly, as the context menu
+                // does (see `ui::context_menu`).
+                if let Ok(path) = std::env::var("VIREO_SHOWCASE") {
+                    let content = widgets.folders_box.clone();
+                    glib::timeout_add_seconds_local_once(1, move || {
+                        crate::app::showcase_capture(content.upcast_ref(), &path);
+                    });
+                }
             }
         }
         self.update_view(widgets, sender);
@@ -759,44 +1159,243 @@ impl AttachmentsGallery {
     fn page(&self) -> &'static str {
         if self.loading && self.all_items.is_empty() {
             "loading"
-        } else if self.all_items.is_empty() {
-            "empty"
-        } else if self.items.is_empty() {
+        } else if !self.all_items.is_empty() {
+            if self.view_table {
+                "table"
+            } else {
+                "grid"
+            }
+        } else if self.is_narrowed() {
+            // Nothing matched, but something would without the search or the
+            // filters — a different message from an empty gallery.
             "noresults"
-        } else if self.view_table {
-            "table"
         } else {
-            "grid"
+            "empty"
         }
     }
 
-    /// Recompute the displayed `items` (indices into `all_items`) from the
-    /// current search `query`, `type_filter` and `sort`.
-    fn apply(&mut self) {
-        let query = self.query.to_ascii_lowercase();
-        let tokens: Vec<&str> = query.split_whitespace().collect();
-        let mut items: Vec<usize> = self
-            .all_items
-            .iter()
-            .enumerate()
-            .filter(|(_, it)| self.type_filter == 0 || type_bucket(&it.name) == self.type_filter)
-            .filter(|(_, it)| {
-                if tokens.is_empty() {
-                    return true;
-                }
-                let hay = item_haystack(it);
-                tokens.iter().all(|t| hay.contains(t))
-            })
-            .map(|(i, _)| i)
-            .collect();
-        sort_indices(&mut items, &self.all_items, self.sort);
-        self.items = items;
+    /// Whether the search bar and the footer are on show. They stay up while a
+    /// search narrows the gallery to nothing: the entry being typed into lives
+    /// in the toolbar, and a toolbar that hid itself the moment a query matched
+    /// nothing would take the focus with it mid-word.
+    fn show_chrome(&self) -> bool {
+        !self.all_items.is_empty() || self.is_narrowed() || self.scan_remaining > 0
     }
 
-    /// The `GalleryItem` at display position `display` (mapping through the
-    /// filtered/sorted `items` into `all_items`).
+    /// Whether the user has narrowed the view at all. Used only to choose
+    /// between the two empty states, so an archive with no attachments in it
+    /// doesn't tell the user to try a different search they never made.
+    fn is_narrowed(&self) -> bool {
+        !self.query.trim().is_empty() || self.type_filter != 0 || self.account_filter.is_some()
+    }
+
+    /// Ask for the first page again, dropping whatever is loaded: what every
+    /// change to the scope, the search, the type filter or the sort has to do,
+    /// because all four are applied by the database and not here.
+    /// Ask for the first page again: what every change to the scope, the
+    /// search, the type filter or the sort has to do, because all four are
+    /// applied by the database and not here.
+    ///
+    /// What is already on screen deliberately stays there until the
+    /// replacement page arrives. Emptying the list first would take the
+    /// toolbar and footer down with it — and the search entry lives in the
+    /// toolbar, so a search would lose the focus of whoever was typing it
+    /// after the first letter.
+    fn reload(&mut self, sender: &ComponentSender<Self>) {
+        self.preview = None;
+        self.preview_texture = None;
+        self.loading = true;
+        self.request_page(0, sender);
+    }
+
+    /// Ask for the next page, unless one is already on its way or the last page
+    /// has already landed.
+    fn load_more(&mut self, sender: &ComponentSender<Self>) {
+        if self.loading_more || !self.has_more() {
+            return;
+        }
+        let offset = self.all_items.len() as u32;
+        self.request_page(offset, sender);
+    }
+
+    fn has_more(&self) -> bool {
+        (self.all_items.len() as u32) < self.total
+    }
+
+    /// The query as it stands, for the app to run against the cache.
+    fn request_page(&mut self, offset: u32, sender: &ComponentSender<Self>) {
+        self.loading_more = true;
+        let folders: Vec<(u32, String)> = self
+            .accounts
+            .iter()
+            .flat_map(|a| {
+                a.folders
+                    .iter()
+                    .filter(|f| self.folder_included(a.id, &f.path))
+                    .map(|f| (a.id, f.path.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let _ = sender.output(GalleryOutput::Load(GalleryRequest {
+            folders,
+            account_id: self.account_filter,
+            tokens: self
+                .query
+                .split_whitespace()
+                .map(|t| t.to_lowercase())
+                .collect(),
+            bucket: self.type_filter,
+            sort: self.sort,
+            offset,
+            limit: PAGE_SIZE,
+        }));
+    }
+
+    /// Whether attachments from this folder are in scope. A folder the app has
+    /// not listed (a new one on the server, or the list not having arrived yet)
+    /// counts as in scope, matching the worker's own default.
+    fn folder_included(&self, account_id: u32, path: &str) -> bool {
+        self.included
+            .get(&account_id)
+            .and_then(|m| m.get(path))
+            .copied()
+            .unwrap_or(true)
+    }
+
+    /// Recompute the effective per-folder verdict from the two master switches
+    /// and the user's own ticks. A master switch that is off wins over a tick,
+    /// so turning "Include Archive" back on restores each archive folder to
+    /// whatever the user had chosen for it.
+    fn recompute_scope(&mut self) {
+        self.included = self
+            .accounts
+            .iter()
+            .map(|acct| {
+                let ticks = self.overrides.get(&acct.id);
+                let folders = acct
+                    .folders
+                    .iter()
+                    .map(|f| {
+                        let tick = ticks.and_then(|m| m.get(&f.path)).copied();
+                        let on = in_scope(f.kind, self.include_archive, self.include_other, tick);
+                        (f.path.clone(), on)
+                    })
+                    .collect();
+                (acct.id, folders)
+            })
+            .collect();
+    }
+
+    /// The user's own tick for a folder, before the master switches have their
+    /// say — what the folder list shows in its check box.
+    fn folder_ticked(&self, account_id: u32, path: &str, kind: FolderKind) -> bool {
+        self.overrides
+            .get(&account_id)
+            .and_then(|m| m.get(path))
+            .copied()
+            .unwrap_or_else(|| kind_default(kind))
+    }
+
+    /// Rebuild the footer popover's folder list: every account's folders, each
+    /// with a check box, under the account's own label when there is more than
+    /// one account. Rows whose master switch is off are shown insensitive, so
+    /// it is clear the switch and not the tick is what is holding them back.
+    fn rebuild_folder_list(&self, sender: &ComponentSender<Self>) {
+        while let Some(row) = self.folder_list.first_child() {
+            self.folder_list.remove(&row);
+        }
+        let multi = self.accounts.len() > 1;
+        for acct in &self.accounts {
+            if multi {
+                let header = gtk::ListBoxRow::new();
+                header.set_activatable(false);
+                header.set_selectable(false);
+                header.add_css_class("gallery-folder-heading");
+                let label = gtk::Label::new(Some(&acct.label));
+                label.set_xalign(0.0);
+                label.add_css_class("heading");
+                label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                header.set_child(Some(&label));
+                self.folder_list.append(&header);
+            }
+            for folder in &acct.folders {
+                let row = adw::ActionRow::new();
+                row.set_title(&glib::markup_escape_text(&folder.name));
+                row.add_prefix(&gtk::Image::from_icon_name(folder.kind.icon()));
+                let check = gtk::CheckButton::new();
+                check.set_active(self.folder_ticked(acct.id, &folder.path, folder.kind));
+                check.set_valign(gtk::Align::Center);
+                let s = sender.clone();
+                let account_id = acct.id;
+                let path = folder.path.clone();
+                check.connect_toggled(move |c| {
+                    s.input(GalleryInput::SetFolder {
+                        account_id,
+                        path: path.clone(),
+                        on: c.is_active(),
+                    });
+                });
+                row.add_suffix(&check);
+                row.set_activatable_widget(Some(&check));
+                // An inbox always counts; the rest answer to a master switch.
+                row.set_sensitive(match kind_master(folder.kind) {
+                    Some(Master::Archive) => self.include_archive,
+                    Some(Master::Other) => self.include_other,
+                    None => true,
+                });
+                self.folder_list.append(&row);
+            }
+        }
+    }
+
+    /// Refill the account dropdown's rows from `accounts`, keeping "All
+    /// accounts" first.
+    fn rebuild_account_names(&self) {
+        while self.account_names.n_items() > 1 {
+            self.account_names.remove(self.account_names.n_items() - 1);
+        }
+        for acct in &self.accounts {
+            self.account_names.append(&acct.label);
+        }
+    }
+
+    /// Persist the folder scope, dropping ticks that agree with their kind's
+    /// default so the file only records genuine choices.
+    fn save_scope(&self) {
+        let kinds: HashMap<(u32, &str), FolderKind> = self
+            .accounts
+            .iter()
+            .flat_map(|a| a.folders.iter().map(move |f| ((a.id, f.path.as_str()), f.kind)))
+            .collect();
+        let mut folders: Vec<(u32, String, bool)> = self
+            .overrides
+            .iter()
+            .flat_map(|(id, m)| m.iter().map(move |(path, on)| (*id, path.clone(), *on)))
+            .filter(|(id, path, on)| {
+                // Keep a tick for a folder we have not been told about: it may
+                // belong to an account that is offline right now.
+                kinds
+                    .get(&(*id, path.as_str()))
+                    .is_none_or(|k| kind_default(*k) != *on)
+            })
+            .collect();
+        folders.sort();
+        crate::config::save_gallery_scope(self.include_archive, self.include_other, &folders);
+    }
+
+    /// Re-apply the scope to the loaded items and repaint both the grid/table
+    /// and the folder list's tick marks.
+    fn scope_changed(&mut self, sender: &ComponentSender<Self>) {
+        self.recompute_scope();
+        self.save_scope();
+        self.rebuild_folder_list(sender);
+        self.reload(sender);
+    }
+
+    /// The `GalleryItem` at display position `display`. The database returns
+    /// rows already filtered and in order, so position is a direct index.
     fn item_at(&self, display: usize) -> Option<&GalleryItem> {
-        self.items.get(display).and_then(|&i| self.all_items.get(i))
+        self.all_items.get(display)
     }
 
     fn current(&self) -> Option<&GalleryItem> {
@@ -804,11 +1403,11 @@ impl AttachmentsGallery {
     }
 
     fn step(&mut self, delta: i32, sender: &ComponentSender<Self>) {
-        if self.items.is_empty() {
+        if self.all_items.is_empty() {
             return;
         }
         if let Some(i) = self.preview {
-            let n = self.items.len() as i32;
+            let n = self.all_items.len() as i32;
             self.preview = Some((((i as i32 + delta) % n + n) % n) as usize);
             self.refresh_preview(sender);
         }
@@ -821,7 +1420,14 @@ impl AttachmentsGallery {
     fn refresh_preview(&mut self, sender: &ComponentSender<Self>) {
         self.preview_texture = None;
         let Some(item) = self.current() else { return };
-        let Some(data) = item.data.as_ref() else { return };
+        let Some(data) = item.data.as_ref() else {
+            // Never downloaded (or too big to have ridden along with the page):
+            // ask for it, and the spinner shows until `Fetched` circles back.
+            if !self.fetching {
+                self.fetch_item(item, sender);
+            }
+            return;
+        };
         if item.is_image() {
             self.preview_texture = texture_from(data);
             return;
@@ -863,7 +1469,7 @@ impl AttachmentsGallery {
             }
             child = next;
         }
-        for display in 0..self.items.len() {
+        for display in 0..self.all_items.len() {
             if let Some(item) = self.item_at(display) {
                 self.flow
                     .append(&build_cell(display, item, self.thumb_width, sender));
@@ -875,27 +1481,45 @@ impl AttachmentsGallery {
         while let Some(row) = self.table.first_child() {
             self.table.remove(&row);
         }
-        for display in 0..self.items.len() {
+        for display in 0..self.all_items.len() {
             if let Some(item) = self.item_at(display) {
                 self.table.append(&build_row(display, item, sender));
             }
         }
     }
 
-    /// Open item `index` in its default application (if its bytes are cached).
-    fn open_item(&self, index: usize) {
-        if let Some(item) = self.item_at(index) {
-            if let Some(data) = &item.data {
+    /// Open item `index` in its default application. A file whose bytes were
+    /// never downloaded — most of an archive — is fetched first, and opens when
+    /// [`GalleryInput::Fetched`] brings it back.
+    fn open_item(&self, index: usize, sender: &ComponentSender<Self>) {
+        let Some(item) = self.item_at(index) else { return };
+        match &item.data {
+            Some(data) => {
                 let parent = self.flow.root().and_downcast::<gtk::Window>();
                 open_bytes(&item.name, data, parent.as_ref());
             }
+            None => self.fetch_item(item, sender),
         }
     }
 
+    /// Ask the app to download the message this item belongs to.
+    fn fetch_item(&self, item: &GalleryItem, sender: &ComponentSender<Self>) {
+        let _ = sender.output(GalleryOutput::Fetch {
+            account_id: item.account_id,
+            folder_path: item.folder_path.clone(),
+            uid: item.uid,
+        });
+    }
+
     /// Save item `index` to a file the user chooses.
-    fn download_item(&self, index: usize) {
+    fn download_item(&self, index: usize, sender: &ComponentSender<Self>) {
         let Some(item) = self.item_at(index) else { return };
-        let Some(data) = item.data.clone() else { return };
+        let Some(data) = item.data.clone() else {
+            // Not in hand yet: fetch it, and the user can save it once the
+            // thumbnail fills in.
+            self.fetch_item(item, sender);
+            return;
+        };
         let dialog = gtk::FileDialog::builder()
             .title(&i18n("Save Attachment"))
             .initial_name(&item.name)
@@ -928,17 +1552,19 @@ impl AttachmentsGallery {
     /// point `(x, y)` (relative to cell `index`). Download/Open are only enabled
     /// when the file's bytes are cached.
     fn show_context_menu(&self, index: usize, x: f64, y: f64, sender: &ComponentSender<Self>) {
-        let Some(item) = self.item_at(index) else { return };
-        let has_data = item.data.is_some();
+        if self.item_at(index).is_none() {
+            return;
+        }
 
+        // Both act on a file that was never downloaded too: they fetch it
+        // first. Greying them out would be wrong now that most of an archive's
+        // attachments are known but not held.
         let s = sender.clone();
         let open = MenuEntry::new(i18n("Open"), move || s.input(GalleryInput::OpenItem(index)))
-            .icon("co.hyprlab.Vireo-document-open-symbolic")
-            .enabled(has_data);
+            .icon("co.hyprlab.Vireo-document-open-symbolic");
         let s = sender.clone();
         let download = MenuEntry::new(i18n("Download…"), move || s.input(GalleryInput::DownloadItem(index)))
-            .icon("co.hyprlab.Vireo-folder-download-symbolic")
-            .enabled(has_data);
+            .icon("co.hyprlab.Vireo-folder-download-symbolic");
         let s = sender.clone();
         let goto = MenuEntry::new(i18n("Go to Message"), move || s.input(GalleryInput::GoToItem(index)))
             .icon("co.hyprlab.Vireo-mail-unread-symbolic");
@@ -1139,73 +1765,6 @@ fn folder_label(path: &str) -> String {
     }
 }
 
-/// The lowercase extension of a filename (empty when there is none).
-/// The file's extension, lower-cased, or empty when the name has none: a
-/// generated "attachment-1", or a dotless name from a sender's client.
-/// Whatever follows the last dot only counts as an extension when it looks
-/// like one (short, alphanumeric), so "Report v1.2 draft" has none either.
-fn ext_of(name: &str) -> String {
-    let Some((_, ext)) = name.rsplit_once('.') else { return String::new() };
-    if ext.is_empty() || ext.len() > 8 || !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return String::new();
-    }
-    ext.to_ascii_lowercase()
-}
-
-/// Searchable category words for a file, keyed off its extension, so a query
-/// like "image" or "spreadsheet" matches even when the word isn't in the name.
-fn type_keywords(name: &str) -> &'static str {
-    match ext_of(name).as_str() {
-        "pdf" => "pdf document",
-        "doc" | "docx" | "odt" | "rtf" => "word document",
-        "xls" | "xlsx" | "ods" | "csv" => "excel spreadsheet",
-        "ppt" | "pptx" | "odp" => "powerpoint presentation slides",
-        "zip" | "gz" | "tar" | "7z" | "rar" | "xz" | "bz2" => "archive compressed",
-        "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" => "audio music sound",
-        "mp4" | "mov" | "mkv" | "webm" | "avi" | "m4v" => "video movie",
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "heic" | "heif" | "avif" | "ico" => {
-            "image photo picture"
-        }
-        "ics" => "calendar event",
-        "txt" | "md" => "text document",
-        _ => "file",
-    }
-}
-
-/// Lowercase text blob a search query is matched against: filename, sender,
-/// subject, folder, and type keywords.
-fn item_haystack(item: &GalleryItem) -> String {
-    format!(
-        "{} {} {} {} {}",
-        item.name,
-        item.from_name,
-        item.subject,
-        folder_label(&item.folder_path),
-        type_keywords(&item.name),
-    )
-    .to_ascii_lowercase()
-}
-
-/// Order the display indices (into `all`) by the chosen criterion.
-fn sort_indices(idx: &mut [usize], all: &[GalleryItem], sort: SortBy) {
-    use std::cmp::Reverse;
-    match sort {
-        SortBy::Newest => idx.sort_by_key(|&a| Reverse(all[a].timestamp)),
-        SortBy::Oldest => idx.sort_by_key(|&a| all[a].timestamp),
-        SortBy::Largest => idx.sort_by_key(|&a| Reverse(all[a].size)),
-        SortBy::Smallest => idx.sort_by_key(|&a| all[a].size),
-        SortBy::Name => idx.sort_by_key(|&a| all[a].name.to_ascii_lowercase()),
-        SortBy::NameDesc => idx.sort_by_key(|&a| Reverse(all[a].name.to_ascii_lowercase())),
-        SortBy::Sender => idx.sort_by_key(|&a| all[a].from_name.to_ascii_lowercase()),
-        SortBy::SenderDesc => idx.sort_by_key(|&a| Reverse(all[a].from_name.to_ascii_lowercase())),
-        SortBy::Type => {
-            idx.sort_by_key(|&a| (ext_of(&all[a].name), all[a].name.to_ascii_lowercase()))
-        }
-        SortBy::TypeDesc => {
-            idx.sort_by_key(|&a| Reverse((ext_of(&all[a].name), all[a].name.to_ascii_lowercase())))
-        }
-    }
-}
 
 /// One table row: mini thumbnail/type icon, name, sender, type, date, size —
 /// the same widths as the header buttons, so the columns line up.
@@ -1332,13 +1891,34 @@ fn build_row(
 
 /// A column header's label, carrying the sort arrow when it is the active
 /// column: `asc`/`desc` are the two criteria that column maps to.
-fn column_header(label: &str, current: SortBy, asc: SortBy, desc: SortBy) -> String {
+fn column_header(label: &str, current: GallerySort, asc: GallerySort, desc: GallerySort) -> String {
     if current == asc {
         format!("{label} \u{2191}")
     } else if current == desc {
         format!("{label} \u{2193}")
     } else {
         label.to_string()
+    }
+}
+
+/// Whether a scroller has come close enough to its end to be worth asking for
+/// the next page. `upper - page_size` is the furthest the view can scroll, so
+/// this is "within a couple of rows of the bottom".
+fn near_end(a: &gtk::Adjustment) -> bool {
+    a.upper() - a.page_size() - a.value() < LOAD_MORE_MARGIN
+}
+
+/// The footer's network status: a page arriving, or how much of the archive the
+/// scan has still to describe. Empty when there is nothing happening.
+fn scan_text(loading_more: bool, scan_remaining: u32) -> String {
+    if scan_remaining > 0 {
+        // Deliberately counts messages, not attachments: until a message has
+        // been described there is no telling how many files it holds.
+        i18n_f("Indexing {n} messages…", &[("n", &scan_remaining.to_string())])
+    } else if loading_more {
+        i18n("Loading more…")
+    } else {
+        String::new()
     }
 }
 
@@ -1362,19 +1942,6 @@ fn date_text(timestamp: i64) -> String {
 
 /// The footer type dropdown's bucket for a filename. Row 0 is "All types";
 /// the rest must match the `StringList` built in the view.
-fn type_bucket(name: &str) -> u32 {
-    match ext_of(name).as_str() {
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "heic" | "heif" | "avif" | "ico" => 1,
-        "pdf" => 2,
-        "doc" | "docx" | "odt" | "rtf" | "txt" | "md" | "xls" | "xlsx" | "ods" | "csv" | "ppt"
-        | "pptx" | "odp" | "ics" => 3,
-        "zip" | "gz" | "tar" | "7z" | "rar" | "xz" | "bz2" => 4,
-        "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "mp4" | "mov" | "mkv" | "webm" | "avi"
-        | "m4v" => 5,
-        _ => 6,
-    }
-}
-
 /// The gallery's cover-cropped thumbnail picture for a ready texture.
 fn gallery_picture(tex: &gdk::Texture) -> gtk::Picture {
     let pic = gtk::Picture::for_paintable(tex);
@@ -2026,9 +2593,53 @@ mod imp {
 mod tests {
     use super::*;
 
+    /// The gallery's default catch: inboxes, archives and custom folders, but
+    /// not Sent.
+    #[test]
+    fn sent_is_the_only_kind_off_by_default() {
+        for kind in [FolderKind::Inbox, FolderKind::Starred, FolderKind::Archive, FolderKind::Custom] {
+            assert!(in_scope(kind, true, true, None), "{kind:?} should be on by default");
+        }
+        assert!(!in_scope(FolderKind::Sent, true, true, None));
+    }
+
+    #[test]
+    fn a_tick_overrides_the_kind_default_either_way() {
+        assert!(in_scope(FolderKind::Sent, true, true, Some(true)));
+        assert!(!in_scope(FolderKind::Custom, true, true, Some(false)));
+    }
+
+    #[test]
+    fn each_master_switch_governs_only_its_own_kinds() {
+        // Archive off takes the archive down and leaves the rest alone.
+        assert!(!in_scope(FolderKind::Archive, false, true, None));
+        assert!(in_scope(FolderKind::Inbox, false, true, None));
+        assert!(in_scope(FolderKind::Custom, false, true, None));
+        // "Other" off takes everything that is neither inbox nor archive.
+        assert!(!in_scope(FolderKind::Custom, true, false, None));
+        assert!(!in_scope(FolderKind::Starred, true, false, None));
+        assert!(in_scope(FolderKind::Inbox, true, false, None));
+        assert!(in_scope(FolderKind::Archive, true, false, None));
+    }
+
+    /// An inbox answers to neither switch: there is always something to show.
+    #[test]
+    fn an_inbox_survives_both_switches_being_off() {
+        assert!(in_scope(FolderKind::Inbox, false, false, None));
+    }
+
+    /// A master switch that is off beats a tick, but does not erase it: the
+    /// tick is what comes back when the switch returns.
+    #[test]
+    fn a_master_switch_outranks_a_tick_without_clearing_it() {
+        assert!(!in_scope(FolderKind::Archive, false, true, Some(true)));
+        assert!(in_scope(FolderKind::Archive, true, true, Some(true)));
+    }
+
     fn item(name: &str, from: &str, subject: &str, folder: &str, ts: i64, size: u64) -> GalleryItem {
         GalleryItem {
             account_id: 1,
+            downloaded: true,
             folder_path: folder.into(),
             uid: 1,
             name: name.into(),
@@ -2040,27 +2651,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn haystack_matches_sender_subject_folder_and_type() {
-        let it = item("Budget.XLSX", "Bob Jones", "Q3 numbers", "Archive", 1, 10);
-        let hay = item_haystack(&it);
-        // filename, sender, subject, folder — all lowercased and searchable.
-        for needle in ["budget", "xlsx", "bob", "jones", "q3", "numbers", "archive"] {
-            assert!(hay.contains(needle), "haystack missing {needle}: {hay}");
-        }
-        // type keywords derived from the extension.
-        assert!(hay.contains("spreadsheet"));
-        assert!(hay.contains("excel"));
-        assert!(!hay.contains("image"));
-    }
 
-    #[test]
-    fn type_keywords_cover_common_kinds() {
-        assert!(type_keywords("a.pdf").contains("document"));
-        assert!(type_keywords("a.png").contains("image"));
-        assert!(type_keywords("a.mp3").contains("audio"));
-        assert!(type_keywords("a.ics").contains("calendar"));
-    }
 
     /// A minimal one-page PDF, built by hand — just enough structure for
     /// poppler to load and render, with no dependency on an external file.
@@ -2102,32 +2693,23 @@ mod tests {
         out
     }
 
-    #[test]
-    fn type_buckets_match_the_footer_dropdown_rows() {
-        assert_eq!(type_bucket("photo.JPG"), 1);
-        assert_eq!(type_bucket("report.pdf"), 2);
-        assert_eq!(type_bucket("notes.docx"), 3);
-        assert_eq!(type_bucket("backup.tar"), 4);
-        assert_eq!(type_bucket("song.flac"), 5);
-        assert_eq!(type_bucket("unknown.xyz"), 6);
-    }
 
     #[test]
     fn sort_index_roundtrips_every_criterion() {
         for i in 0..10 {
-            assert_eq!(SortBy::from_index(i).index(), i);
+            assert_eq!(GallerySort::from_index(i).index(), i);
         }
     }
 
     #[test]
     fn column_headers_carry_the_sort_arrow() {
         use super::column_header;
-        assert_eq!(column_header("Name", SortBy::Name, SortBy::Name, SortBy::NameDesc), "Name ↑");
+        assert_eq!(column_header("Name", GallerySort::Name, GallerySort::Name, GallerySort::NameDesc), "Name ↑");
         assert_eq!(
-            column_header("Name", SortBy::NameDesc, SortBy::Name, SortBy::NameDesc),
+            column_header("Name", GallerySort::NameDesc, GallerySort::Name, GallerySort::NameDesc),
             "Name ↓"
         );
-        assert_eq!(column_header("Name", SortBy::Newest, SortBy::Name, SortBy::NameDesc), "Name");
+        assert_eq!(column_header("Name", GallerySort::Newest, GallerySort::Name, GallerySort::NameDesc), "Name");
     }
 
     #[test]
@@ -2159,38 +2741,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn sort_indices_orders_each_criterion() {
-        // c: oldest/smallest, name "a"; a: newest, name "c"; b: middle, name "b", largest.
-        let all = vec![
-            item("c.txt", "Zed", "s", "INBOX", 300, 5),   // 0
-            item("b.txt", "Amy", "s", "INBOX", 200, 90),  // 1
-            item("a.txt", "Mel", "s", "INBOX", 100, 5),   // 2
-        ];
-        let mut idx = vec![0, 1, 2];
-
-        sort_indices(&mut idx, &all, SortBy::Newest);
-        assert_eq!(idx, vec![0, 1, 2]); // ts 300, 200, 100
-        sort_indices(&mut idx, &all, SortBy::Oldest);
-        assert_eq!(idx, vec![2, 1, 0]);
-        sort_indices(&mut idx, &all, SortBy::Name);
-        assert_eq!(idx, vec![2, 1, 0]); // a, b, c
-        sort_indices(&mut idx, &all, SortBy::NameDesc);
-        assert_eq!(idx, vec![0, 1, 2]); // c, b, a
-        sort_indices(&mut idx, &all, SortBy::Largest);
-        assert_eq!(idx[0], 1); // b is 90 bytes
-        sort_indices(&mut idx, &all, SortBy::Smallest);
-        assert_eq!(idx.last(), Some(&1)); // b (90 bytes) is largest → last
-        sort_indices(&mut idx, &all, SortBy::Sender);
-        assert_eq!(idx, vec![1, 2, 0]); // Amy, Mel, Zed
-        sort_indices(&mut idx, &all, SortBy::SenderDesc);
-        assert_eq!(idx, vec![0, 2, 1]); // Zed, Mel, Amy
-        // All .txt here, so type ties and falls back to name order.
-        sort_indices(&mut idx, &all, SortBy::Type);
-        assert_eq!(idx, vec![2, 1, 0]); // a, b, c
-        sort_indices(&mut idx, &all, SortBy::TypeDesc);
-        assert_eq!(idx, vec![0, 1, 2]); // c, b, a
-    }
 
     #[test]
     fn icon_color_class_maps_types() {

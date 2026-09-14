@@ -98,8 +98,12 @@ use crate::ui::message_list::{
     BulkAction, MessageList, MessageListInput, MessageListOutput, RowAction,
 };
 use crate::ui::attachments_gallery::{
-    AttachmentsGallery, GalleryInput, GalleryOutput,
+    AttachmentsGallery, GalleryAccount, GalleryFolder, GalleryInput, GalleryOutput, GalleryRequest,
 };
+
+/// Largest cached attachment whose bytes ride along with a gallery page, so a
+/// thumbnail or preview is instant. Anything bigger is fetched when opened.
+const GALLERY_DATA_CAP: i64 = 6 * 1024 * 1024;
 use crate::ui::contacts_page::{ContactsPage, ContactsPageInput, ContactsPageOutput};
 use crate::ui::attachment_drawer::{AttachmentDrawer, AttachmentDrawerInput};
 use crate::ui::message_view::{MessageView, MessageViewInput, MessageViewOutput};
@@ -608,7 +612,12 @@ pub struct AppModel {
     /// Messages waiting to be sent, per account, as last reported by its worker.
     outbox_by_account: HashMap<u32, Vec<crate::models::OutboxItem>>,
     /// Gallery items per account inbox, merged for display.
-    gallery_by_account: HashMap<u32, Vec<crate::models::GalleryItem>>,
+    /// How many attachments the gallery's current query matches, carried
+    /// between pages so only the first one pays for the COUNT.
+    gallery_total: u32,
+    /// Messages each in-scope folder has still to have described, so the
+    /// gallery's footer can show one figure for the whole scan.
+    gallery_scan_left: HashMap<(u32, String), u32>,
     /// Messages popped out into their own windows, keyed by (account, message).
     popouts: HashMap<(u32, u32), PopOut>,
     /// The conversation currently shown in the reader (newest first), with bodies
@@ -678,8 +687,12 @@ pub enum AppMsg {
     RetryAllOutbox,
     /// Send Later (#145): the half-minute clock that sends due queued mail.
     SendDueScheduled,
-    /// Cached gallery attachments for an account inbox arrived.
-    GalleryItems { account_id: u32, items: Vec<crate::models::GalleryItem> },
+    /// The gallery wants a page of attachments matching this query.
+    GalleryLoad(Box<GalleryRequest>),
+    /// Download an attachment the gallery knows of but has never fetched.
+    GalleryFetch { account_id: u32, folder_path: String, uid: u32 },
+    /// A chunk of a folder's attachments was described by the scan.
+    AttachmentsScanned { account_id: u32, folder_path: String, added: u32, remaining: u32 },
     /// Gallery "Go to Message" — open the attachment's source message.
     OpenAttachmentMessage { account_id: u32, folder_path: String, uid: u32 },
     FolderSelected { account_id: u32, folder_id: u32, name: String, path: String },
@@ -1004,6 +1017,9 @@ pub enum AppMsg {
     /// Vireo", or the command line): open a fresh composer with them attached
     /// (Isaac's PR #96).
     OpenWithFiles(Vec<std::path::PathBuf>),
+    /// The click on a "message ready" desktop alert: raise the window and
+    /// the composer it announced.
+    PresentComposers,
     ContactAdded(Result<crate::contacts::AddOutcome, String>),
     ViewSource,
     /// User clicked "Load attachments" for a message whose attachments weren't
@@ -2050,6 +2066,10 @@ impl SimpleComponent for AppModel {
                     GalleryOutput::OpenMessage { account_id, folder_path, uid } => {
                         AppMsg::OpenAttachmentMessage { account_id, folder_path, uid }
                     }
+                    GalleryOutput::Load(req) => AppMsg::GalleryLoad(Box::new(req)),
+                    GalleryOutput::Fetch { account_id, folder_path, uid } => {
+                        AppMsg::GalleryFetch { account_id, folder_path, uid }
+                    }
                 });
 
         // Built here (not in the model literal) because the contacts page
@@ -2365,7 +2385,19 @@ impl SimpleComponent for AppModel {
             tag_view_dirty: false,
             keyword_sync_at: HashMap::new(),
             tag_provider: gtk::CssProvider::new(),
-            cache: crate::cache::Cache::open().ok(),
+            // Demo mode gets a cache that never touches disk, seeded with the
+            // sample mail: the gallery's paging, search and sort are database
+            // queries, so the demo has to run them against a real database or
+            // it would be exercising nothing.
+            cache: if demo_mode() {
+                let c = crate::cache::Cache::in_memory().ok();
+                if let Some(c) = c.as_ref() {
+                    crate::backend::seed_demo_cache(c);
+                }
+                c
+            } else {
+                crate::cache::Cache::open().ok()
+            },
             filter_moved: Default::default(),
             single_message_card: config::load_single_message_card(),
             thread_expansion: config::load_thread_expansion(),
@@ -2407,7 +2439,8 @@ impl SimpleComponent for AppModel {
             showing_contacts: false,
             showing_outbox: false,
             outbox_by_account: HashMap::new(),
-            gallery_by_account: HashMap::new(),
+            gallery_total: 0,
+            gallery_scan_left: HashMap::new(),
         };
         model.prime_from_cache();
         if let Some(display) = gtk::gdk::Display::default() {
@@ -2740,6 +2773,22 @@ impl SimpleComponent for AppModel {
                 win.present();
             });
             app.add_action(&present);
+
+            // "Message ready" alerts (a hand-off whose window stayed behind):
+            // the click raises the composer too, and the alert goes away by
+            // itself once any window of ours has the focus.
+            let present_compose =
+                gtk::gio::SimpleAction::new(crate::notify::PRESENT_COMPOSE_ACTION, None);
+            let psender = sender.clone();
+            present_compose.connect_activate(move |_, _| {
+                psender.input(AppMsg::PresentComposers);
+            });
+            app.add_action(&present_compose);
+            model.window.connect_is_active_notify(|w| {
+                if w.is_active() {
+                    crate::notify::withdraw_compose_ready();
+                }
+            });
 
             let ty = gtk::glib::VariantTy::new("(uuu)").unwrap();
             let open = gtk::gio::SimpleAction::new(crate::notify::OPEN_MESSAGE_ACTION, Some(ty));
@@ -3351,6 +3400,47 @@ impl SimpleComponent for AppModel {
                         let _ = s.send(AppMsg::MoveToMenu);
                     });
                 }
+                // VIREO_SHOWCASE_GALLERY=1 opens the attachments gallery at
+                // 3s; add VIREO_SHOWCASE_GALLERY_FOLDERS=1 to drop its folder
+                // popover open a second later, or VIREO_SHOWCASE_GALLERY_ACCOUNT=<row>
+                // to pick that row of its account filter (0 = all accounts).
+                if std::env::var("VIREO_SHOWCASE_GALLERY").is_ok() {
+                    let s = sender.input_sender().clone();
+                    let g = model.gallery.sender().clone();
+                    gtk::glib::timeout_add_seconds_local_once(3, move || {
+                        let _ = s.send(AppMsg::ShowAttachments);
+                        let row: Option<u32> = std::env::var("VIREO_SHOWCASE_GALLERY_ACCOUNT")
+                            .ok()
+                            .and_then(|v| v.parse().ok());
+                        let folders = std::env::var("VIREO_SHOWCASE_GALLERY_FOLDERS").is_ok();
+                        // VIREO_SHOWCASE_GALLERY_SEARCH=<text> types into the
+                        // search box and reports whether it keeps the focus.
+                        let search = std::env::var("VIREO_SHOWCASE_GALLERY_SEARCH").ok();
+                        // VIREO_SHOWCASE_GALLERY_MORE=<n> pages down n times,
+                        // as scrolling to the end would.
+                        let more: u32 = std::env::var("VIREO_SHOWCASE_GALLERY_MORE")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                        gtk::glib::timeout_add_seconds_local_once(1, move || {
+                            if let Some(row) = row {
+                                let _ = g.send(GalleryInput::SetAccountFilter(row));
+                            }
+                            for i in 0..more {
+                                let g = g.clone();
+                                gtk::glib::timeout_add_seconds_local_once(1 + i, move || {
+                                    let _ = g.send(GalleryInput::LoadMore);
+                                });
+                            }
+                            if let Some(text) = search {
+                                let _ = g.send(GalleryInput::ShowcaseSearch(text));
+                            }
+                            if folders {
+                                let _ = g.send(GalleryInput::ShowcaseFolders);
+                            }
+                        });
+                    });
+                }
                 // VIREO_SHOWCASE_RAIL=1 collapses the sidebar to the rail
                 // at 3s (the user's own toggle, fold-ups and all).
                 if std::env::var("VIREO_SHOWCASE_RAIL").is_ok() {
@@ -3672,29 +3762,81 @@ impl SimpleComponent for AppModel {
                 self.showing_outbox = false;
                 self.showing_gallery = true;
                 self.showing_contacts = false;
-                self.gallery_by_account.clear();
-                // Clear first, then flag loading — SetItems resets the loading
-                // flag, so the other order cancels the spinner it just showed.
-                self.gallery.emit(GalleryInput::SetItems(Vec::new()));
                 self.gallery.emit(GalleryInput::SetLoading(true));
-                // Load each account's attachments (across all gallery folders)
-                // from the cache.
-                let ids: Vec<u32> = self.accounts.iter().map(|a| a.id).collect();
-                for account_id in ids {
-                    self.send_to(account_id, MailRequest::LoadGallery);
-                }
+                // Handing over the folder list is what starts the load: the
+                // gallery asks for its first page once it knows the scope, so
+                // the query is never run against an empty one.
+                self.gallery.emit(GalleryInput::SetAccounts(self.gallery_scope()));
+                // Keep the scan working through whatever is still unindexed, so
+                // the archive fills in behind the user as they browse.
+                self.start_attachment_scan();
             }
 
-            AppMsg::GalleryItems { account_id, items } => {
-                self.gallery_by_account.insert(account_id, items);
-                let mut merged: Vec<crate::models::GalleryItem> = self
-                    .gallery_by_account
-                    .values()
-                    .flatten()
-                    .cloned()
-                    .collect();
-                merged.sort_by_key(|i| std::cmp::Reverse(i.timestamp));
-                self.gallery.emit(GalleryInput::SetItems(merged));
+            AppMsg::GalleryFetch { account_id, folder_path, uid } => {
+                // The gallery knows this file exists because the scan described
+                // it, but its bytes were never downloaded. Reuse the reader's
+                // own fetch: it stores what comes back, so the next visit finds
+                // it cached and the thumbnail appears.
+                self.send_to(
+                    account_id,
+                    MailRequest::LoadAttachments {
+                        message_id: uid,
+                        path: folder_path,
+                        uid,
+                        download: true,
+                    },
+                );
+                self.gallery.emit(GalleryInput::SetFetching(true));
+            }
+
+            AppMsg::AttachmentsScanned { account_id, folder_path, added, remaining } => {
+                let folder_path_key = folder_path.clone();
+                // Keep going while this folder has more to describe. The reply
+                // to each chunk is what asks for the next, so the scan runs at
+                // whatever pace the server answers and never piles up requests.
+                if remaining > 0 && self.showing_gallery {
+                    self.send_to(account_id, MailRequest::ScanAttachments { folder_path });
+                }
+                // Only refresh when the scan actually found something, and only
+                // while the gallery is on screen — a chunk of mail with no
+                // attachments after all should not reshuffle what's on show.
+                if added > 0 && self.showing_gallery {
+                    self.gallery.emit(GalleryInput::ScanProgress);
+                }
+                self.gallery_scan_left.insert((account_id, folder_path_key), remaining);
+                let left: u32 = self.gallery_scan_left.values().sum();
+                self.gallery.emit(GalleryInput::ScanStatus(left));
+            }
+
+            AppMsg::GalleryLoad(req) => {
+                let Some(cache) = self.cache.as_ref() else {
+                    self.gallery.emit(GalleryInput::Page {
+                        items: Vec::new(),
+                        total: 0,
+                        offset: req.offset,
+                    });
+                    return;
+                };
+                let q = crate::cache::GalleryQuery {
+                    folders: &req.folders,
+                    account_id: req.account_id,
+                    tokens: &req.tokens,
+                    bucket: req.bucket,
+                    sort: req.sort,
+                    limit: req.limit,
+                    offset: req.offset,
+                    data_cap: GALLERY_DATA_CAP,
+                };
+                let items = cache.gallery_page(&q);
+                // Only worth counting for the first page: the total cannot
+                // change while the user scrolls one set of results.
+                let total = if req.offset == 0 {
+                    cache.gallery_total(&q)
+                } else {
+                    self.gallery_total
+                };
+                self.gallery_total = total;
+                self.gallery.emit(GalleryInput::Page { items, total, offset: req.offset });
             }
 
             AppMsg::OpenAttachmentMessage { account_id, folder_path, uid } => {
@@ -5819,7 +5961,15 @@ impl SimpleComponent for AppModel {
                 // files pre-attached. The relay normalizes every stray
                 // command-line argument into a file URI, so keep only the
                 // ones that name a real file.
-                paths.retain(|p| p.is_file());
+                let named = paths.len();
+                paths.retain(|p| {
+                    let ok = p.is_file();
+                    if !ok {
+                        tracing::warn!("file hand-off ignored (not a readable file): {}", p.display());
+                    }
+                    ok
+                });
+                tracing::info!("file hand-off: {named} named, {} readable", paths.len());
                 if paths.is_empty() {
                     return;
                 }
@@ -5831,11 +5981,13 @@ impl SimpleComponent for AppModel {
                     .unwrap_or_else(|| self.active_account());
                 let prefill = ComposePrefill { attachments: paths, ..Default::default() };
                 let (account, prefill) = self.new_message_from(account, prefill);
+                let attached = prefill.attachments.len();
                 if self.compose_inline {
                     self.open_inline_reply(account, prefill, None, &sender);
                 } else {
                     self.open_compose(account, prefill, &sender);
                 }
+                self.after_hand_off(attached, Vec::new());
             }
 
             AppMsg::CopyReaderSelection => {
@@ -5957,14 +6109,20 @@ impl SimpleComponent for AppModel {
                 // exist as regular files. Whatever attaches shows up as a
                 // normal removable chip in the composer, so nothing rides
                 // along invisibly if a web link (rather than Nautilus)
-                // carried the parameter.
-                prefill.attachments.retain(|p| {
-                    let ok = p.is_file();
-                    if !ok {
-                        tracing::info!("mailto attach ignored (not a file): {}", p.display());
-                    }
-                    ok
-                });
+                // carried the parameter. The ones that don't are reported,
+                // not dropped in silence: from inside the Flatpak sandbox a
+                // path the file manager can see may be one Vireo cannot.
+                let (attachments, dropped): (Vec<_>, Vec<_>) =
+                    std::mem::take(&mut prefill.attachments).into_iter().partition(|p| p.is_file());
+                for p in &dropped {
+                    tracing::warn!("mailto attach ignored (not a readable file): {}", p.display());
+                }
+                tracing::info!(
+                    "mailto hand-off: {} attachment(s) named, {} readable",
+                    attachments.len() + dropped.len(),
+                    attachments.len()
+                );
+                prefill.attachments = attachments;
                 self.leave_gallery();
                 let account = self
                     .current
@@ -5972,10 +6130,22 @@ impl SimpleComponent for AppModel {
                     .map(|m| m.account_id)
                     .unwrap_or_else(|| self.active_account());
                 let (account, prefill) = self.new_message_from(account, prefill);
+                let attached = prefill.attachments.len();
                 if self.compose_inline {
                     self.open_inline_reply(account, prefill, None, &sender);
                 } else {
                     self.open_compose(account, prefill, &sender);
+                }
+                self.after_hand_off(attached, dropped);
+            }
+
+            AppMsg::PresentComposers => {
+                self.window.set_visible(true);
+                self.window.present();
+                // The newest standalone composer is the one the alert was
+                // about; transient for the main window, it sits above it.
+                if let Some(h) = self.composers.last() {
+                    h.window.present();
                 }
             }
 
@@ -7415,6 +7585,17 @@ impl SimpleComponent for AppModel {
             AppMsg::Attachments { account_id, message_id, items } => {
                 self.attachment_cache
                     .insert((account_id, message_id), items.clone());
+                // A file the gallery asked for: hand the bytes straight over so
+                // the thumbnail and the preview fill in without a reload, which
+                // would throw away the user's place in the list.
+                if self.showing_gallery {
+                    self.gallery.emit(GalleryInput::SetFetching(false));
+                    self.gallery.emit(GalleryInput::Fetched {
+                        account_id,
+                        uid: message_id,
+                        items: items.clone(),
+                    });
+                }
                 if self
                     .current
                     .as_ref()
@@ -9231,14 +9412,65 @@ impl AppModel {
         window.present();
     }
 
+    /// Set the attachment scan going over every folder in the gallery's scope,
+    /// newest mail first. One chunk per folder per pass; each answer asks for
+    /// the next, so the archive fills in behind the user while they browse and
+    /// stops as soon as a folder is fully described.
+    fn start_attachment_scan(&mut self) {
+        let folders: Vec<(u32, String)> = self
+            .gallery_scope()
+            .iter()
+            .flat_map(|a| a.folders.iter().map(|f| (a.id, f.path.clone())).collect::<Vec<_>>())
+            .collect();
+        for (account_id, folder_path) in folders {
+            self.send_to(account_id, MailRequest::ScanAttachments { folder_path });
+        }
+    }
+
+    /// The accounts and folders the attachments gallery may draw on: every
+    /// folder the cache's gallery query can return, which is all of them bar
+    /// Drafts, Junk and Trash. The folders are already in sidebar order.
+    fn gallery_scope(&self) -> Vec<GalleryAccount> {
+        self.accounts
+            .iter()
+            .map(|a| GalleryAccount {
+                id: a.id,
+                label: a.label.clone(),
+                folders: self
+                    .folders
+                    .get(&a.id)
+                    .map(|fs| {
+                        fs.iter()
+                            .filter(|f| {
+                                !matches!(
+                                    f.kind,
+                                    FolderKind::Drafts | FolderKind::Junk | FolderKind::Trash
+                                )
+                            })
+                            .map(|f| GalleryFolder {
+                                path: f.path.clone(),
+                                name: f.name.clone(),
+                                kind: f.kind,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+            .collect()
+    }
+
     /// Leave the attachments gallery, dropping its data. The gallery loads
     /// every item's bytes eagerly (up to 300 × 6 MiB per account) and reloads
     /// from scratch on each visit anyway, so keeping two copies of that around
     /// for the rest of the session bought nothing but memory (issue #106).
     fn leave_gallery(&mut self) {
         if std::mem::take(&mut self.showing_gallery) {
-            self.gallery_by_account.clear();
-            self.gallery.emit(GalleryInput::SetItems(Vec::new()));
+            self.gallery_total = 0;
+            self.gallery.emit(GalleryInput::Page {
+                items: Vec::new(),
+                total: 0,
+                offset: 0,
+            });
         }
     }
 
@@ -10241,8 +10473,47 @@ impl AppModel {
             let _ = s.send(AppMsg::ComposeClosed(id));
             gtk::glib::Propagation::Proceed
         });
+        win.connect_is_active_notify(|w| {
+            if w.is_active() {
+                crate::notify::withdraw_compose_ready();
+            }
+        });
         win.present();
         win
+    }
+
+    /// The tail of a composer opened from outside the app (a mailto: link, a
+    /// file manager's "Send by email" or "Open With"): say which files could
+    /// not be attached, and if the window has not come to the front by the
+    /// time the compositor would have let it, post a desktop alert whose
+    /// click brings it up. The activation token a launcher passes along is
+    /// what lets a window take the focus; a stale or missing one (a link
+    /// relayed from a terminal, an older launcher) leaves the window where it
+    /// was, behind whatever the user is looking at, and this is the next
+    /// best thing.
+    fn after_hand_off(&self, attached: usize, dropped: Vec<std::path::PathBuf>) {
+        if !dropped.is_empty() {
+            let names: Vec<String> = dropped
+                .iter()
+                .map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string()))
+                .collect();
+            let text = crate::i18n::ni18n_f(
+                "Could not attach {names}: Vireo cannot read the file.",
+                "Could not attach {n} files (Vireo cannot read them): {names}",
+                dropped.len() as u32,
+                &[("n", &dropped.len().to_string()), ("names", &names.join(", "))],
+            );
+            self.notifications.emit(NotifyInput::Push { text, error: true, connectivity: false });
+        }
+        let main = self.window.clone();
+        let composer = self.composers.last().map(|h| h.window.clone());
+        gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(900), move || {
+            let ours = main.is_active() || composer.as_ref().is_some_and(|w| w.is_active());
+            if !ours {
+                tracing::info!("hand-off: window did not get the focus, posting an alert");
+                crate::notify::compose_ready(attached as u32);
+            }
+        });
     }
 
     /// Open a standalone compose window (New Message, compose-to, edit-draft).
@@ -14212,6 +14483,9 @@ struct TagScan {
 
 fn map_event(account_id: u32, event: WorkerEvent) -> AppMsg {
     match event {
+        WorkerEvent::AttachmentsScanned { folder_path, added, remaining } => {
+            AppMsg::AttachmentsScanned { account_id, folder_path, added, remaining }
+        }
         WorkerEvent::BulkComplete => AppMsg::BulkComplete,
         WorkerEvent::Related { message_id, messages } => {
             AppMsg::Related { account_id, message_id, messages }
@@ -14230,7 +14504,6 @@ fn map_event(account_id: u32, event: WorkerEvent) -> AppMsg {
         WorkerEvent::Restored { folder_id, message_ids } => {
             AppMsg::UndoRestored { account_id, folder_id, message_ids }
         }
-        WorkerEvent::Gallery { items } => AppMsg::GalleryItems { account_id, items },
         WorkerEvent::BackfillDone { folder_id } => AppMsg::BackfillDone { account_id, folder_id },
         WorkerEvent::FolderUnread { folder_id, unread } => {
             AppMsg::FolderUnread { account_id, folder_id, unread }

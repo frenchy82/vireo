@@ -315,6 +315,12 @@ pub struct Preferences {
     editor_open: bool,
     /// Which side page's editor is up: "accounts" or "cloud".
     editor_page: &'static str,
+    /// The GNOME Files extension (#188): installed, loaded, loader present.
+    nautilus: crate::nautilus_ext::State,
+    /// The terminal command that installs the nautilus-python package on
+    /// this machine, for the copyable row; `None` on a distribution whose
+    /// package manager is not known.
+    nautilus_cmd: Option<&'static str>,
 }
 
 /// The reader toolbar editor (Settings → Appearance → Toolbar): one drop zone per
@@ -600,6 +606,59 @@ const SIDE_PAGES: &[(&str, &[SidePage])] = &[
     ),
 ];
 
+/// The Files extension row's subtitle: where it stands, and where it lives.
+fn nautilus_status_text(state: &crate::nautilus_ext::State) -> String {
+    use crate::nautilus_ext::Status;
+    let state_text = match state.status {
+        Status::NotInstalled => i18n("Not installed"),
+        Status::Installed if state.loaded => i18n("Installed and loaded by Files"),
+        Status::Installed if state.loader == Some(false) => {
+            i18n("Installed, but the nautilus-python package is missing, so Files cannot load it")
+        }
+        Status::Installed => i18n(
+            "Installed. Files has not loaded it yet: restart Files, and make sure the \
+             nautilus-python package is installed",
+        ),
+        Status::Outdated => i18n("Installed, but not this version's copy"),
+    };
+    let state = state_text;
+    match crate::nautilus_ext::path() {
+        Some(p) => {
+            let shown = p.display().to_string();
+            let shown = match std::env::var("HOME") {
+                Ok(home) if !home.is_empty() && shown.starts_with(&home) => {
+                    format!("~{}", &shown[home.len()..])
+                }
+                _ => shown,
+            };
+            format!("{state} — {shown}")
+        }
+        None => state,
+    }
+}
+
+/// Hide the "editable" pencil an `adw::EntryRow` draws whatever its
+/// `editable` says (the icon carries the `edit-icon` style class).
+fn hide_edit_icon(widget: &gtk::Widget) {
+    let mut child = widget.first_child();
+    while let Some(c) = child {
+        if c.has_css_class("edit-icon") {
+            c.set_visible(false);
+        } else {
+            hide_edit_icon(&c);
+        }
+        child = c.next_sibling();
+    }
+}
+
+/// A plain error alert over the settings window.
+fn report(parent: &adw::Window, heading: &str, body: &str) {
+    let dialog = adw::MessageDialog::new(Some(parent), Some(heading), Some(body));
+    dialog.add_response("ok", &i18n("OK"));
+    dialog.set_close_response("ok");
+    dialog.present();
+}
+
 fn side_page(id: &str) -> Option<&'static SidePage> {
     SIDE_PAGES.iter().flat_map(|(_, pages)| pages.iter()).find(|p| p.id == id)
 }
@@ -614,6 +673,14 @@ pub enum PrefInput {
     ChangeDateStyle(u32),
     ChangeClockStyle(u32),
     ChangeLanguage(u32),
+    /// The GNOME Files extension (#188): install this build's copy, remove
+    /// the installed one, ask Files to quit so it reloads.
+    NautilusInstall,
+    NautilusRemove,
+    NautilusRestartFiles,
+    /// Re-read the extension's state (the System page came into view; Files
+    /// may have loaded the extension since).
+    NautilusRefresh,
     ToggleThreading(bool),
     ToggleThreadsExpanded(bool),
     ToggleThreadNewestFirst(bool),
@@ -2026,6 +2093,84 @@ impl Component for Preferences {
                                         },
                                     },
                                 },
+
+                                // The Files right-click extension (#188).
+                                add = &adw::PreferencesGroup {
+                                    set_title: &i18n("GNOME Files"),
+                                    set_description: Some(
+                                        i18n("Add \"Send with Vireo\" to the right-click menu in Files (Nautilus): \
+                                              the selected files open in a new message, attached. This installs \
+                                              a small extension in your home folder. It also needs the \
+                                              nautilus-python package (python3-nautilus on Debian and Ubuntu), \
+                                              and Files has to be restarted before the entry appears.").as_str()
+                                    ),
+
+                                    adw::ActionRow {
+                                        set_title: &i18n("Right-click menu entry"),
+                                        #[watch]
+                                        set_subtitle: &nautilus_status_text(&model.nautilus),
+                                        add_suffix = &gtk::Button {
+                                            set_label: &i18n("Remove"),
+                                            set_valign: gtk::Align::Center,
+                                            #[watch]
+                                            set_visible: model.nautilus.status != crate::nautilus_ext::Status::NotInstalled,
+                                            connect_clicked => PrefInput::NautilusRemove,
+                                        },
+                                        add_suffix = &gtk::Button {
+                                            #[watch]
+                                            set_label: &if model.nautilus.status == crate::nautilus_ext::Status::Outdated {
+                                                i18n("Update")
+                                            } else {
+                                                i18n("Install")
+                                            },
+                                            set_valign: gtk::Align::Center,
+                                            add_css_class: "suggested-action",
+                                            #[watch]
+                                            set_visible: model.nautilus.status != crate::nautilus_ext::Status::Installed,
+                                            connect_clicked => PrefInput::NautilusInstall,
+                                        },
+                                    },
+
+                                    // The loader's install command, ready to paste, while
+                                    // there is no sign Files can load the extension.
+                                    #[name = "nautilus_cmd_row"]
+                                    adw::EntryRow {
+                                        set_title: &i18n("Install the nautilus-python package first: paste this in a terminal"),
+                                        set_text: model.nautilus_cmd.unwrap_or_default(),
+                                        set_editable: false,
+                                        add_css_class: "monospace",
+                                        #[watch]
+                                        set_visible: model.nautilus_cmd.is_some()
+                                            && !model.nautilus.loaded
+                                            && model.nautilus.loader != Some(true),
+                                        add_suffix = &gtk::Button {
+                                            set_icon_name: "co.hyprlab.Vireo-edit-copy-symbolic",
+                                            set_valign: gtk::Align::Center,
+                                            set_tooltip_text: Some(i18n("Copy").as_str()),
+                                            add_css_class: "flat",
+                                            connect_clicked[cmd = model.nautilus_cmd.unwrap_or_default().to_string()] => move |b| {
+                                                b.clipboard().set_text(&cmd);
+                                                b.set_icon_name("co.hyprlab.Vireo-verified-checkmark-symbolic");
+                                                let b = b.clone();
+                                                gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(1200), move || {
+                                                    b.set_icon_name("co.hyprlab.Vireo-edit-copy-symbolic");
+                                                });
+                                            },
+                                        },
+                                    },
+
+                                    adw::ActionRow {
+                                        set_title: &i18n("Restart Files"),
+                                        set_subtitle: &i18n("Closes every Files window, the same as \"nautilus -q\". \
+                                                       The next one opens with the entry, or without it once \
+                                                       removed."),
+                                        add_suffix = &gtk::Button {
+                                            set_label: &i18n("Restart"),
+                                            set_valign: gtk::Align::Center,
+                                            connect_clicked => PrefInput::NautilusRestartFiles,
+                                        },
+                                    },
+                                },
                             },
 
                             add_named[Some("backup")] = &adw::PreferencesPage {
@@ -2076,6 +2221,8 @@ impl Component for Preferences {
     ) -> ComponentParts<Self> {
         let t_init = std::time::Instant::now();
         let mut model = Preferences {
+            nautilus: crate::nautilus_ext::State::read(),
+            nautilus_cmd: crate::platform::nautilus_python_install_command(),
             notifications: init.notifications,
             toolbar: init.reader_toolbar.clone(),
             toolbar_editor: None,
@@ -2147,6 +2294,10 @@ impl Component for Preferences {
         ] {
             no_truncate(row);
         }
+
+        // The install-command field is read-only: the row's pencil, which
+        // says "type here", would be a lie.
+        hide_edit_icon(widgets.nautilus_cmd_row.upcast_ref());
 
         // Language combo: the system's, then every catalogue shipped.
         let choices = language_choices();
@@ -2629,7 +2780,7 @@ impl Component for Preferences {
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, message: Self::Input, sender: ComponentSender<Self>, _root: &Self::Root) {
+    fn update(&mut self, message: Self::Input, sender: ComponentSender<Self>, root: &Self::Root) {
         match message {
             PrefInput::ToggleSenderLogos(on) => {
                 let _ = sender.output(PrefOutput::SetSenderLogos(on));
@@ -2648,6 +2799,27 @@ impl Component for Preferences {
                 if let Some((_, code)) = language_choices().get(i as usize) {
                     let _ = sender.output(PrefOutput::SetLanguage(code.clone()));
                 }
+            }
+            PrefInput::NautilusInstall => {
+                if let Err(e) = crate::nautilus_ext::install() {
+                    report(root, &i18n("Could not install the extension"), &e);
+                }
+                self.nautilus = crate::nautilus_ext::State::read();
+            }
+            PrefInput::NautilusRemove => {
+                if let Err(e) = crate::nautilus_ext::remove() {
+                    report(root, &i18n("Could not remove the extension"), &e);
+                }
+                self.nautilus = crate::nautilus_ext::State::read();
+            }
+            PrefInput::NautilusRestartFiles => {
+                if let Err(e) = crate::nautilus_ext::quit_files() {
+                    report(root, &i18n("Could not restart Files"), &e);
+                }
+                self.nautilus = crate::nautilus_ext::State::read();
+            }
+            PrefInput::NautilusRefresh => {
+                self.nautilus = crate::nautilus_ext::State::read();
             }
             PrefInput::ToggleAvatars(on) => {
                 let _ = sender.output(PrefOutput::SetAvatars(on));
@@ -2972,6 +3144,9 @@ impl Component for Preferences {
                     self.ask_to_leave_editor(&id, &sender);
                 } else {
                     self.show_page(&id);
+                    if id == "system" {
+                        sender.input(PrefInput::NautilusRefresh);
+                    }
                     let _ = sender.output(PrefOutput::PageShown(id));
                 }
             }
