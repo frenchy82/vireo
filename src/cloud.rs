@@ -109,6 +109,34 @@ pub struct CloudAccount {
     /// Why, in a phrase for the greyed-out rows.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub link_note: String,
+    /// A self-hosted server (Nextcloud-kind, Seafile) reached through
+    /// Cloudflare, whose proxy refuses a request body over 100 MB: uploads
+    /// go in `CLOUDFLARE_CHUNK` pieces the server reassembles.
+    #[serde(default)]
+    pub cloudflare: bool,
+}
+
+/// The piece size for an account behind Cloudflare: under the proxy's
+/// 100 MB request limit with room for the multipart framing.
+pub const CLOUDFLARE_CHUNK: u64 = 90 * 1000 * 1000;
+
+/// The byte ranges an upload of `size` goes in, `chunk` at a time:
+/// (offset, length), the last one shorter. A zero-byte file is one
+/// empty range, so it is still created.
+fn chunk_ranges(size: u64, chunk: u64) -> Vec<(u64, u64)> {
+    let chunk = chunk.max(1);
+    if size == 0 {
+        return vec![(0, 0)];
+    }
+    (0..size).step_by(chunk as usize).map(|off| (off, chunk.min(size - off))).collect()
+}
+
+/// A reader over one piece of the file on disk.
+fn file_slice(path: &Path, name: &str, offset: u64, len: u64) -> Result<std::io::Take<std::fs::File>, String> {
+    use std::io::Seek;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("could not read {name}: {e}"))?;
+    f.seek(std::io::SeekFrom::Start(offset)).map_err(|e| format!("could not read {name}: {e}"))?;
+    Ok(f.take(len))
 }
 
 /// One entry of the Service picker: a kind, and for the WebDAV kinds the
@@ -211,6 +239,7 @@ impl CloudAccount {
             link_expiry: None,
             link_password: None,
             link_note: String::new(),
+            cloudflare: false,
         }
     }
 
@@ -421,6 +450,61 @@ fn http_err(what: &str, e: ureq::Error) -> String {
     }
 }
 
+/// Cloudflare's proxy caps a request body at 100 MB; a bigger upload to a
+/// server behind it comes back as its own 413 page (or the connection is
+/// cut, seen as a 5xx or a transport error), which reads like the server
+/// broke. When that is what happened to a file over the piece size on an
+/// account without the switch, say so and name the switch.
+fn cloudflare_error(account: &CloudAccount, what: &str, name: &str, size: u64, e: &ureq::Error) -> Option<String> {
+    let (status, via_cloudflare) = match e {
+        ureq::Error::Status(code, resp) => {
+            let server = resp.header("server").unwrap_or("").to_ascii_lowercase();
+            (Some(*code), server.contains("cloudflare") || resp.header("cf-ray").is_some())
+        }
+        ureq::Error::Transport(_) => (None, false),
+    };
+    cloudflare_hint(account, what, name, size, status, via_cloudflare)
+}
+
+/// The wording, from what is known: the answer came from Cloudflare
+/// itself (a 413 or a 5xx with its headers), or the connection was cut
+/// while a file over the limit was on its way.
+fn cloudflare_hint(
+    account: &CloudAccount,
+    what: &str,
+    name: &str,
+    size: u64,
+    status: Option<u16>,
+    via_cloudflare: bool,
+) -> Option<String> {
+    if account.cloudflare || size <= CLOUDFLARE_CHUNK {
+        return None;
+    }
+    let switch = format!(
+        "Turn on \"Server is behind Cloudflare\" for this account under Settings → Cloud Storage and try again: the file is then uploaded in {} pieces.",
+        human_size(CLOUDFLARE_CHUNK)
+    );
+    match (status, via_cloudflare) {
+        (Some(413), true) => Some(format!(
+            "{what}: {name} is {}, and Cloudflare, which sits in front of this server, refuses uploads over 100 MB (HTTP 413). {switch}",
+            human_size(size)
+        )),
+        (Some(code), true) if (500..600).contains(&code) => Some(format!(
+            "{what}: Cloudflare, which sits in front of this server, cut off the upload of {name} ({}, HTTP {code}); it refuses uploads over 100 MB. {switch}",
+            human_size(size)
+        )),
+        (Some(413), false) => Some(format!(
+            "{what}: the server refused {name} as too large ({}, HTTP 413). If it is reached through Cloudflare, that is the proxy's 100 MB limit: {switch}",
+            human_size(size)
+        )),
+        (None, _) => Some(format!(
+            "{what}: the connection was cut while uploading {name} ({}). If the server is reached through Cloudflare, that is the proxy's 100 MB limit: {switch}",
+            human_size(size)
+        )),
+        _ => None,
+    }
+}
+
 /// The readable part of an error body: the message field of a JSON error
 /// when there is one, else the first bit of the text.
 fn short_error(body: &str) -> String {
@@ -604,14 +688,55 @@ fn nextcloud_upload_and_share(
         remote = stamped_name(&name);
     }
 
-    let file = std::fs::File::open(path).map_err(|e| format!("could not read {name}: {e}"))?;
-    ureq::put(&format!("{root}{dir}/{}", seg(&remote)))
-        .set("Authorization", &authz)
-        .set("Content-Length", &size.to_string())
-        .set("Content-Type", "application/octet-stream")
-        .timeout(timeout)
-        .send(file)
-        .map_err(|e| http_err("Upload failed", e))?;
+    let target = format!("{root}{dir}/{}", seg(&remote));
+    if account.cloudflare && size > CLOUDFLARE_CHUNK {
+        // Chunked upload (the "uploads" DAV endpoint): the pieces go into a
+        // one-off folder, numbered so they sort in order, and a MOVE of its
+        // `.file` has the server stitch them into the target. Nextcloud's
+        // v2 wants the target named on every request (Destination);
+        // ownCloud and OpenCloud ignore that header and work the same way.
+        let upload = format!(
+            "{}/remote.php/dav/uploads/{}/vireo-{}",
+            account.base(),
+            seg(account.user.trim()),
+            crate::rng::token(12).map_err(|e| e.to_string())?
+        );
+        ureq::request("MKCOL", &upload)
+            .set("Authorization", &authz)
+            .set("Destination", &target)
+            .timeout(Duration::from_secs(60))
+            .call()
+            .map_err(|e| http_err("Could not start the chunked upload", e))?;
+        for (i, (offset, len)) in chunk_ranges(size, CLOUDFLARE_CHUNK).into_iter().enumerate() {
+            let piece = file_slice(path, &name, offset, len)?;
+            ureq::put(&format!("{upload}/{:05}", i + 1))
+                .set("Authorization", &authz)
+                .set("Destination", &target)
+                .set("Content-Length", &len.to_string())
+                .set("Content-Type", "application/octet-stream")
+                .timeout(timeout)
+                .send(piece)
+                .map_err(|e| http_err(&format!("Upload failed at piece {}", i + 1), e))?;
+        }
+        ureq::request("MOVE", &format!("{upload}/.file"))
+            .set("Authorization", &authz)
+            .set("Destination", &target)
+            .set("OC-Total-Length", &size.to_string())
+            .timeout(timeout)
+            .call()
+            .map_err(|e| http_err("Uploaded the pieces, but the server could not put them together", e))?;
+    } else {
+        let file = std::fs::File::open(path).map_err(|e| format!("could not read {name}: {e}"))?;
+        ureq::put(&target)
+            .set("Authorization", &authz)
+            .set("Content-Length", &size.to_string())
+            .set("Content-Type", "application/octet-stream")
+            .timeout(timeout)
+            .send(file)
+            .map_err(|e| {
+                cloudflare_error(account, "Upload failed", &name, size, &e).unwrap_or_else(|| http_err("Upload failed", e))
+            })?;
+    }
 
     // The public link.
     let share_path = format!("/{folder}/{remote}");
@@ -1043,10 +1168,10 @@ fn seafile_library(account: &CloudAccount, token: &str) -> Result<String, String
 
 /// The multipart body of a Seafile upload, streamed: the fields and the
 /// file's head, the file itself, the closing boundary.
-fn multipart_upload(
+fn multipart_upload<R: Read>(
     fields: &[(&str, &str)],
     name: &str,
-    file: std::fs::File,
+    file: R,
     size: u64,
 ) -> Result<(String, u64, impl Read), String> {
     let boundary = format!("----VireoUpload{}", crate::rng::token(24).map_err(|e| e.to_string())?);
@@ -1113,19 +1238,50 @@ fn seafile_upload_and_share(
     if link.is_empty() {
         return Err("Could not get an upload link: the server gave none.".to_string());
     }
-    let file = std::fs::File::open(path).map_err(|e| format!("could not read {name}: {e}"))?;
-    // replace=0: a taken name gets a numbered one, reported back.
-    let (ctype, len, body) = multipart_upload(&[("parent_dir", parent.as_str()), ("replace", "0")], &name, file, size)?;
     let sep = if link.contains('?') { '&' } else { '?' };
-    let uploaded: serde_json::Value = ureq::post(&format!("{link}{sep}ret-json=1"))
-        .set("Authorization", &authz)
-        .set("Content-Type", &ctype)
-        .set("Content-Length", &len.to_string())
-        .timeout(Duration::from_secs(60 * 60))
-        .send(body)
-        .map_err(|e| seafile_err("Upload failed", e))?
-        .into_json()
-        .map_err(|e| format!("Upload failed: could not read the answer: {e}"))?;
+    let link = format!("{link}{sep}ret-json=1");
+    // replace=0: a taken name gets a numbered one, reported back.
+    let fields = [("parent_dir", parent.as_str()), ("replace", "0")];
+    let uploaded: serde_json::Value = if account.cloudflare && size > CLOUDFLARE_CHUNK {
+        // Resumable upload: the same link takes the file in pieces, each a
+        // multipart post with Content-Range saying where it goes and
+        // Content-Disposition naming the file the pieces belong to. The
+        // file server keeps them until the last one lands, and only that
+        // answer names the file.
+        let safe = name.replace('\\', "_").replace('"', "_").replace(['\r', '\n'], " ");
+        let mut last = serde_json::Value::Null;
+        for (i, (offset, len)) in chunk_ranges(size, CLOUDFLARE_CHUNK).into_iter().enumerate() {
+            let piece = file_slice(path, &name, offset, len)?;
+            let (ctype, body_len, body) = multipart_upload(&fields, &name, piece, len)?;
+            let end = (offset + len).saturating_sub(1);
+            last = ureq::post(&link)
+                .set("Authorization", &authz)
+                .set("Content-Type", &ctype)
+                .set("Content-Length", &body_len.to_string())
+                .set("Content-Range", &format!("bytes {offset}-{end}/{size}"))
+                .set("Content-Disposition", &format!("attachment; filename=\"{safe}\""))
+                .timeout(Duration::from_secs(60 * 60))
+                .send(body)
+                .map_err(|e| seafile_err(&format!("Upload failed at piece {}", i + 1), e))?
+                .into_json()
+                .map_err(|e| format!("Upload failed: could not read the answer: {e}"))?;
+        }
+        last
+    } else {
+        let file = std::fs::File::open(path).map_err(|e| format!("could not read {name}: {e}"))?;
+        let (ctype, len, body) = multipart_upload(&fields, &name, file, size)?;
+        ureq::post(&link)
+            .set("Authorization", &authz)
+            .set("Content-Type", &ctype)
+            .set("Content-Length", &len.to_string())
+            .timeout(Duration::from_secs(60 * 60))
+            .send(body)
+            .map_err(|e| {
+                cloudflare_error(account, "Upload failed", &name, size, &e).unwrap_or_else(|| seafile_err("Upload failed", e))
+            })?
+            .into_json()
+            .map_err(|e| format!("Upload failed: could not read the answer: {e}"))?
+    };
     let remote = uploaded[0]["name"]
         .as_str()
         .or_else(|| uploaded["name"].as_str())
@@ -1448,6 +1604,44 @@ mod tests {
         let p = generate_password();
         assert_eq!(p.len(), 12);
         assert!(p.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn chunk_ranges_cover_the_file_exactly() {
+        assert_eq!(chunk_ranges(0, 90), vec![(0, 0)]);
+        assert_eq!(chunk_ranges(90, 90), vec![(0, 90)]);
+        assert_eq!(chunk_ranges(91, 90), vec![(0, 90), (90, 1)]);
+        assert_eq!(chunk_ranges(250, 100), vec![(0, 100), (100, 100), (200, 50)]);
+        let total: u64 = chunk_ranges(1_234_567, CLOUDFLARE_CHUNK).iter().map(|(_, l)| l).sum();
+        assert_eq!(total, 1_234_567);
+        assert!(CLOUDFLARE_CHUNK < 100 * 1000 * 1000);
+    }
+
+    #[test]
+    fn cloudflare_hint_names_the_limit_and_the_switch() {
+        let mut a = CloudAccount::empty();
+        let big = 150 * 1000 * 1000;
+        // Cloudflare's own 413: unmistakable.
+        let m = cloudflare_hint(&a, "Upload failed", "big.iso", big, Some(413), true).unwrap();
+        assert!(m.contains("Cloudflare") && m.contains("100 MB") && m.contains("Server is behind Cloudflare"), "{m}");
+        assert!(m.contains("90.0 MB pieces"), "{m}");
+        // A 502 with Cloudflare's headers: the proxy cut it off.
+        assert!(cloudflare_hint(&a, "Upload failed", "big.iso", big, Some(502), true).unwrap().contains("cut off"));
+        // Connection dropped, no headers to go by: a "possibly" hint.
+        assert!(cloudflare_hint(&a, "Upload failed", "big.iso", big, None, false).unwrap().contains("If the server is reached through Cloudflare"));
+        // A small file, or the switch already on, or a plain server error: not this.
+        assert!(cloudflare_hint(&a, "Upload failed", "small.pdf", 1000, Some(413), true).is_none());
+        assert!(cloudflare_hint(&a, "Upload failed", "big.iso", big, Some(500), false).is_none());
+        a.cloudflare = true;
+        assert!(cloudflare_hint(&a, "Upload failed", "big.iso", big, Some(413), true).is_none());
+    }
+
+    #[test]
+    fn cloudflare_flag_defaults_off_and_round_trips() {
+        let a: CloudAccount = toml::from_str("name = \"x\"\n").unwrap();
+        assert!(!a.cloudflare);
+        let b: CloudAccount = toml::from_str("name = \"x\"\ncloudflare = true\n").unwrap();
+        assert!(b.cloudflare);
     }
 
     #[test]

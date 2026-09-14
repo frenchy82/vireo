@@ -50,7 +50,7 @@ trackers by default — no telemetry, no analytics.
 - **Runs in the background** (optional) — closing the window keeps mail arriving; Vireo appears under *Background Apps* in the GNOME system menu, and can start at login without opening a window.
 - **Privacy-first reading** — remote content blocked by default, per-sender allow/block lists, and a per-message light/dark content theme.
 - **OpenPGP** — read encrypted and signed mail, sign and encrypt what you send, and manage keys from Settings, through the GnuPG already on your computer. See [OpenPGP](#openpgp-encrypted-and-signed-mail) below.
-- **Send from Files** — a *Send with Vireo* entry in the GNOME Files right-click menu opens a new message with the selected files attached (optional; see [below](#send-with-vireo-from-gnome-files)). *Email…* and *Open With Vireo* work too.
+- **Send from Files** — a *Send with Vireo* entry in the GNOME Files right-click menu sends the selected files into a new message, a draft or a reply of your choosing, with an offer to upload big ones to cloud storage instead (optional; see [below](#send-with-vireo-from-gnome-files)). *Email…* and *Open With Vireo* work too.
 - **GNOME-native** — adaptive three-pane layout, per-account colours and emoji avatars, light/dark following the system, optional GNOME Contacts.
 
 See **[RELEASE_NOTES.md](RELEASE_NOTES.md)** for the full list.
@@ -235,6 +235,13 @@ of the generated one.
 - **Nextcloud, ownCloud, OpenCloud** — the server URL, your user name and an
   app password (made under *Security* in the server's personal settings).
   Uploads go over WebDAV; links come from the files-sharing API.
+- **Behind Cloudflare** (Nextcloud-kind and Seafile accounts) — a
+  self-hosted server reached through a Cloudflare domain or tunnel cannot
+  take a request over 100 MB, Cloudflare's proxy limit. Switch on *Server
+  is behind Cloudflare* in the account's editor and files bigger than 90 MB
+  go up in 90 MB pieces the server stitches back together (Nextcloud's
+  chunked-upload endpoint, Seafile's resumable upload); smaller files go
+  as one request as before.
 - **Seafile** — the server URL, your e-mail and your password. If the
   account uses two-step verification, also enter the current code from your
   authenticator app: Vireo signs in with it once, gets an API token from the
@@ -405,6 +412,19 @@ files on a mounted share reach the app through their mount path.
 Files also has its own *Email…* entry, which sends the selection to whatever
 app handles `mailto:` links; if that is Vireo, it does the same thing without
 the extension.
+
+**What the files go into**
+
+When the files arrive, Vireo asks what they are for: a **new message**, a
+**draft** you pick from a list of every account's drafts, or a **reply** to a
+message you pick (the one you are reading comes first; a search box narrows
+the list by sender, subject or account). Files that together exceed the size
+limit (20 MB by default) bring a second question when a cloud storage account
+is set up: attach them anyway, or upload them and put download links in the
+message instead. Each dialog has an *Always do this* box, and **Settings →
+System → GNOME Files** holds the same choices, so the questions can be
+skipped: what the files go into, what happens over the limit, and the limit
+itself.
 
 ## Privacy
 

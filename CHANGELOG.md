@@ -1,9 +1,60 @@
 # Changelog
 
-## 1.29.3-beta.1 — 2026-09-14
+## 1.29.4-beta.1 — 2026-09-14
 
-Catch-up with stable 1.29.2: the beta channel carries exactly the 1.29.2
+Catch-up with stable 1.29.3: the beta channel carries exactly the 1.29.3
 code and documentation below, under the beta app ID.
+
+## 1.29.3 — 2026-09-14
+
+Files sent from GNOME Files ask where they should go, and big ones offer
+to go to cloud storage instead.
+
+- **Files from GNOME Files go where you say** (#188 follow-up). *Send
+  with Vireo*, *Open With Vireo* and Files' own *Email…* entry used to
+  open a new message with the files attached and nothing else on offer.
+  Now a dialog asks what the files are for: a **new message**, a
+  **draft** picked from a list of every account's drafts, or a **reply**
+  to a message picked from a list (the one on screen first, then every
+  Inbox and the other folders listed this run, with a search box that
+  narrows by sender, subject or account). A draft or reply picked from
+  the list has its body fetched first when the cache lacks it; a reply
+  to the message being read splits the reading pane the way Reply does,
+  any other opens in a window. Drafts folders never listed this run are
+  synced before the draft list shows, so it does not miss a draft the
+  cache has not seen. A `mailto:` that carries `attach=` (Files'
+  *Email…*) gets the same dialog and keeps its recipient and subject
+  for the new-message case.
+- **Big files can go to cloud storage instead.** When the files together
+  exceed the size limit (20 MB by default) and a cloud storage account
+  is set up, a second dialog offers to attach them anyway or upload them
+  and put download links in the message (the composer's upload dialog
+  opens on them, terms and all). Without a cloud account they are
+  attached as before.
+- **Settings → System → GNOME Files** gained the defaults: what the
+  files go into (ask, a new message, a draft, a reply), what happens
+  over the limit (ask, attach, upload) and the limit in MB. Both dialogs
+  carry an *Always do this* box that writes the same preference.
+- Under the hood: the hand-off's "did the window come to the front"
+  check now counts any Vireo window, so the dialog asking about the
+  files does not trigger the "message ready" desktop alert.
+- **Cloud storage behind Cloudflare.** A self-hosted Nextcloud, ownCloud,
+  OpenCloud or Seafile reached through a Cloudflare domain or tunnel
+  rejected any upload over 100 MB (the proxy's request limit). The
+  account editor has a "Server is behind Cloudflare" switch: with it on,
+  files over 90 MB go up in 90 MB pieces the server puts back together
+  (the WebDAV `uploads` chunking endpoint with a final MOVE; Seafile's
+  resumable upload with Content-Range on the same upload link). Smaller
+  files and the other services are unchanged. Not tried against a live
+  server behind Cloudflare. With the switch off, an upload over 90 MB
+  that Cloudflare's proxy refuses (its own 413 page, or a 5xx carrying
+  its headers) or that is cut off mid-way no longer reads as a bare
+  "HTTP 502": the message says the file's size, that Cloudflare's 100 MB
+  limit is the likely cause, and names the switch to turn on.
+- **French** (PR #193 by [@frenchy82](https://github.com/frenchy82)): the
+  1.29.2 strings (mailbox face, Gravatar, settings wording) translated;
+  1128 of 1163 strings, the 35 left being this release's own (the Files
+  hand-off dialogs, the GNOME Files settings rows, the Cloudflare switch).
 
 ## 1.29.2 — 2026-09-14
 
