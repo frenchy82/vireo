@@ -33,6 +33,7 @@ finish-args:
   - --talk-name=org.gnome.evolution.dataserver.*  # GNOME Contacts (Evolution Data Server)
   - --talk-name=org.gnome.Contacts                 # "Open GNOME Contacts" button (D-Bus activation)
   - --talk-name=org.kde.StatusNotifierWatcher      # optional tray icon (#116); absent on plain GNOME
+  - --talk-name=org.gnome.Nautilus                 # "Restart Files" after installing the Files extension (#188)
   # Deliberately NOT --talk-name=org.freedesktop.Flatpak — see the stable
   # manifest for why (it would permit arbitrary host command execution).
   # Read the host's Evolution Data Server address books.
@@ -56,6 +57,17 @@ finish-args:
   - --filesystem=~/.var/app/co.hyprlab.Vireo:create
   # Read the old Veem app's data so first-run migration matches stable's.
   - --filesystem=~/.var/app/com.getveem.Veem:ro
+  # The GNOME Files right-click extension (#188) is a Python file Nautilus
+  # loads on the host; Settings → System installs the bundled copy there.
+  - --filesystem=xdg-data/nautilus-python/extensions:create
+  # A file manager's "Send by email" (#90) hands the files over as attach=
+  # paths inside a mailto: URI, which reach the sandbox as-is, so the app has
+  # to be able to read them where they are: the home directory and removable
+  # drives, read-only. Everything the app writes goes through portals or the
+  # narrower entries above (a more specific entry wins over this one).
+  - --filesystem=home:ro
+  - --filesystem=/run/media:ro
+  - --filesystem=/media:ro
   # The chosen app icon (Settings → App icon) is written over the app's icon
   # name in the user's icon directory, which every desktop searches before the
   # Flatpak export's — that is how the dock and app grid follow the choice.
