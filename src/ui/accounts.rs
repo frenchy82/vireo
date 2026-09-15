@@ -150,6 +150,12 @@ pub struct AccountsWindow {
     /// The tag finder's button: its spinner turns while the mailboxes are
     /// being read, and its label says so.
     find_tags_spinner: Option<gtk::Spinner>,
+    /// The Apply Now button's spinner and label, turned on while a manual
+    /// filter run is under way (#198).
+    apply_filters_spinner: Option<gtk::Spinner>,
+    apply_filters_label: Option<gtk::Label>,
+    /// Whether a manual filter run is under way; a second press does nothing.
+    filters_applying: bool,
     find_tags_label: Option<gtk::Label>,
     tag_scanning: bool,
     /// Paths behind the currently-open editor's folder combos (index 0 in the
@@ -302,6 +308,10 @@ pub enum AccountsInput {
     AddBlacklistText(String),
     RemoveBlacklistRow(String),
     AddFilter,
+    /// Run the rules over the mail already in the inboxes (#198).
+    ApplyFilters,
+    /// The app says whether that run is still going (#198).
+    FiltersApplying(bool),
     RemoveFilter(usize),
     /// Save whichever editor page is up (account, filter or tag): the
     /// settings window's leave-editor prompt.
@@ -367,6 +377,8 @@ pub enum AccountsOutput {
     AddBlacklist(String),
     RemoveBlacklist(String),
     SetFilters(Vec<crate::config::FilterRule>),
+    /// Apply the rules to mail that is already there (#198).
+    ApplyFilters,
     SetTags(Vec<crate::config::Tag>),
     /// The tag finder wants every account scanned for keywords in use.
     FindTags,
@@ -677,13 +689,16 @@ impl Component for AccountsWindow {
                                     set_description: Some(
                                         i18n("File incoming mail into folders or tag it automatically, \
                                          by sender, subject or recipients. Applied to each \
-                                         account's Inbox as Vireo syncs it.").as_str()
+                                         account's Inbox as Vireo syncs it, or to the mail already \
+                                         there with Apply Now; a folder's right-click menu runs \
+                                         them over that one folder.").as_str()
                                     ),
                                     // At the header's end, like the other
                                     // panels' buttons.
                                     #[wrap(Some)]
                                     set_header_suffix = &gtk::Box {
                                         set_orientation: gtk::Orientation::Vertical,
+                                        set_spacing: 6,
                                         set_valign: gtk::Align::Start,
                                         set_halign: gtk::Align::End,
                                         set_margin_start: 24,
@@ -691,6 +706,32 @@ impl Component for AccountsWindow {
                                             set_label: &i18n("Add Filter…"),
                                             set_size_request: (130, -1),
                                             connect_clicked => AccountsInput::AddFilter,
+                                        },
+                                        // Rules normally meet mail as it
+                                        // arrives; this holds them up against
+                                        // what is already in the Inbox (#198).
+                                        #[name = "apply_filters_btn"]
+                                        gtk::Button {
+                                            set_size_request: (130, -1),
+                                            set_tooltip_text: Some(
+                                                i18n("Run every rule over the mail already in your inboxes").as_str()
+                                            ),
+                                            connect_clicked => AccountsInput::ApplyFilters,
+                                            // A spinner inside the button
+                                            // while the run is under way, as
+                                            // the tag finder has.
+                                            gtk::Box {
+                                                set_spacing: 6,
+                                                set_halign: gtk::Align::Center,
+                                                #[name = "apply_filters_spinner"]
+                                                gtk::Spinner {
+                                                    set_visible: false,
+                                                },
+                                                #[name = "apply_filters_label"]
+                                                gtk::Label {
+                                                    set_label: &i18n("Apply Now"),
+                                                },
+                                            },
                                         },
                                     },
 
@@ -1384,6 +1425,9 @@ impl Component for AccountsWindow {
             tags: init.tags,
             tags_list: None,
             find_tags_spinner: None,
+            apply_filters_spinner: None,
+            apply_filters_label: None,
+            filters_applying: false,
             find_tags_label: None,
             tag_scanning: false,
         };
@@ -1431,6 +1475,8 @@ impl Component for AccountsWindow {
         model.rebuild_filter_rows(&sender);
         model.tags_list = Some(widgets.tags_list.clone());
         model.find_tags_spinner = Some(widgets.find_tags_spinner.clone());
+        model.apply_filters_spinner = Some(widgets.apply_filters_spinner.clone());
+        model.apply_filters_label = Some(widgets.apply_filters_label.clone());
         model.find_tags_label = Some(widgets.find_tags_label.clone());
         model.rebuild_tag_rows(&sender);
         let t_list = std::time::Instant::now();
@@ -2403,6 +2449,13 @@ impl Component for AccountsWindow {
             AccountsInput::AddFilter => {
                 self.open_filter_page(&widgets.nav, &sender, None);
             }
+            AccountsInput::ApplyFilters => {
+                if !self.filters_applying {
+                    self.set_filters_applying(true);
+                    let _ = sender.output(AccountsOutput::ApplyFilters);
+                }
+            }
+            AccountsInput::FiltersApplying(on) => self.set_filters_applying(on),
             AccountsInput::EditFilter(i) => {
                 if let Some(rule) = self.filter_rules.get(i).cloned() {
                     self.open_filter_page(&widgets.nav, &sender, Some((i, rule)));
@@ -3960,10 +4013,20 @@ impl AccountsWindow {
             row.connect_activated(move |_| s.input(AccountsInput::EditFilter(i)));
             // Every condition, joined the way the rule combines them (#192).
             let joiner = if r.any { i18n(" or ") } else { i18n(" and ") };
-            let title: Vec<String> = r.conditions().iter().map(Self::condition_label).collect();
-            row.set_title(&title.join(&joiner));
+            let conditions: Vec<String> = r.conditions().iter().map(Self::condition_label).collect();
+            let conditions = conditions.join(&joiner);
+            // A named rule (#197) is listed by its name, with the conditions
+            // moved down beside what it does; an unnamed one reads exactly
+            // as it always did.
+            let named = !r.name.trim().is_empty();
+            row.set_title(if named { r.name.trim() } else { conditions.as_str() });
             // "account → folder", "account, tagged Work", or both (#71).
-            let mut subtitle = r.account_email.clone();
+            let mut subtitle = String::new();
+            if named {
+                subtitle.push_str(&conditions);
+                subtitle.push('\n');
+            }
+            subtitle.push_str(&r.account_email);
             if !r.dest_path.is_empty() {
                 let dest = self
                     .folders_by_email
@@ -3983,6 +4046,9 @@ impl AccountsWindow {
                 subtitle.push_str(&i18n_f(", tagged {tag}", &[("tag", &name)]));
             }
             row.set_subtitle(&subtitle);
+            // A named rule's subtitle runs to two lines (the conditions,
+            // then where the mail goes); an unnamed one keeps the one it had.
+            row.set_subtitle_lines(if named { 0 } else { 1 });
             // The trash button removes; a chevron says the row opens the
             // rule's editor, as the account and cloud rows do. The rule's
             // "count unread" switch lives in the editor.
@@ -3997,6 +4063,19 @@ impl AccountsWindow {
             next.add_css_class("dim-label");
             row.add_suffix(&next);
             list.append(&row);
+        }
+    }
+
+    /// The Apply Now button while a filter run is under way (#198): a turning
+    /// spinner beside a label saying so. A press meanwhile starts nothing.
+    fn set_filters_applying(&mut self, on: bool) {
+        self.filters_applying = on;
+        if let Some(spinner) = &self.apply_filters_spinner {
+            spinner.set_visible(on);
+            spinner.set_spinning(on);
+        }
+        if let Some(label) = &self.apply_filters_label {
+            label.set_label(&if on { i18n("Applying…") } else { i18n("Apply Now") });
         }
     }
 
@@ -4515,6 +4594,11 @@ impl AccountsWindow {
         scrolled.set_child(Some(&clamp));
 
         let account_group = adw::PreferencesGroup::new();
+        // A name of your own for the rule (#197): what the filters list
+        // calls it, in place of spelling its conditions out. Optional.
+        let name_row = adw::EntryRow::new();
+        name_row.set_title(&i18n("Name (optional)"));
+        account_group.add(&name_row);
         let account_row = adw::ComboRow::new();
         account_row.set_title(&i18n("Account"));
         let email_refs: Vec<&str> = emails.iter().map(|s| s.as_str()).collect();
@@ -4753,6 +4837,7 @@ impl AccountsWindow {
         // Editing: every field starts from the rule as it stands.
         let edit_index = edit.as_ref().map(|(i, _)| *i);
         if let Some((_, rule)) = &edit {
+            name_row.set_text(&rule.name);
             if let Some(idx) = emails
                 .iter()
                 .position(|e| e.eq_ignore_ascii_case(&rule.account_email))
@@ -4833,7 +4918,7 @@ impl AccountsWindow {
         }
 
         let s = sender.clone();
-        self.push_form_content(nav, "filter", &title, &verb, scrolled.upcast_ref(), Vec::new(), move || {
+        self.push_form_content(nav, "filter", &title, &verb, scrolled.upcast_ref(), vec![name_row.clone()], move || {
             // Every condition with text; a blank extra one is dropped. The
             // matcher of a body condition is whatever the pinned row says.
             let conditions: Vec<crate::config::FilterCondition> = conds
@@ -4867,6 +4952,7 @@ impl AccountsWindow {
                 return false;
             }
             let mut rule = FilterRule {
+                name: name_row.text().trim().to_string(),
                 account_email: email.clone(),
                 field: FilterField::FromAddress,
                 matcher: FilterMatch::Contains,

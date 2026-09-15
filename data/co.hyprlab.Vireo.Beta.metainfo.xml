@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.31.2-beta.1" date="2026-09-15" type="development">
+      <description>
+        <p>Catch-up with stable 1.31.1. Filter rules can be given a name of their own (#197), and the rules can be run over mail that is already in a folder rather than only meeting mail as it arrives (#198): Apply Now in Settings sweeps every inbox, a folder's right-click menu sweeps that folder, and a dialog shows a live count while the run works. French and Russian translations updated.</p>
+      </description>
+    </release>
     <release version="1.31.1-beta.1" date="2026-09-15" type="development">
       <description>
         <p>Catch-up with stable 1.31.0. Appearance themes (Settings, Appearance: System, Midnight, Tidal, Rose, Earth, Forest, each light and dark), a Drafts folder assigned under Special Folders now shows its count, Settings rows reworded, Mail Accounts marks aligned, Portuguese translations updated.</p>
