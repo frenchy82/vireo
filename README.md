@@ -51,6 +51,7 @@ trackers by default — no telemetry, no analytics.
 - **Privacy-first reading** — remote content blocked by default, per-sender allow/block lists, and a per-message light/dark content theme.
 - **OpenPGP** — read encrypted and signed mail, sign and encrypt what you send, and manage keys from Settings, through the GnuPG already on your computer. See [OpenPGP](#openpgp-encrypted-and-signed-mail) below.
 - **Send from Files** — a *Send with Vireo* entry in the GNOME Files right-click menu sends the selected files into a new message, a draft or a reply of your choosing, with an offer to upload big ones to cloud storage instead (optional; see [below](#send-with-vireo-from-gnome-files)). *Email…* and *Open With Vireo* work too.
+- **Appearance themes** — five palettes (Rose, Forest, Tidal, Earth and Midnight) in Settings → Appearance, each carrying its own light and dark version, or the stock GNOME colours Vireo has always worn.
 - **GNOME-native** — adaptive three-pane layout, per-account colours and emoji avatars, light/dark following the system, optional GNOME Contacts.
 
 See **[RELEASE_NOTES.md](RELEASE_NOTES.md)** for the full list.
@@ -523,7 +524,8 @@ upstream — their work ships in the app and is credited in the About window:
 - [**Paulo Fino**](https://github.com/somepaulo) ([#178](https://github.com/hyprlab/vireo/pull/178),
   [#179](https://github.com/hyprlab/vireo/issues/179),
   [#182](https://github.com/hyprlab/vireo/pull/182),
-  [#183](https://github.com/hyprlab/vireo/issues/183)) — the Portuguese (Portugal)
+  [#183](https://github.com/hyprlab/vireo/issues/183),
+  [#194](https://github.com/hyprlab/vireo/pull/194)) — the Portuguese (Portugal)
   and Brazilian Portuguese translations, the request for a language chooser, and
   the report that the chosen language never reached the Flatpak.
 - [**Anton Palgunov**](https://github.com/Toxblh) ([#7](https://github.com/hyprlab/vireo/pull/7),
@@ -587,5 +589,11 @@ can fill a sender's avatar: they come from
 [gilbarbara/logos](https://github.com/gilbarbara/logos) (MIT) and
 [Simple Icons](https://simpleicons.org) (CC0), remain their owners' marks, and
 are listed with their sources in [data/logos/README.md](data/logos/README.md).
+
+The appearance themes (Rose, Forest, Tidal, Earth and Midnight) are the theme
+library from [T3 Code](https://github.com/pingdotgg/t3code) (MIT, © 2026 T3
+Tools Inc.), converted to sRGB, renamed, and mapped onto libadwaita's colour
+roles by `tools/gen-themes.py`. Vireo is not affiliated with or endorsed by
+T3 Tools.
 
 © 2026 Hyprlab

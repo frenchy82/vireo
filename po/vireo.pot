@@ -1035,7 +1035,9 @@ msgstr ""
 msgid "Account accent color"
 msgstr ""
 
-msgid "The circle, and this account's marks in the sidebar and lists"
+msgid ""
+"The account circle background, and this account's marks in the sidebar and "
+"lists"
 msgstr ""
 
 msgid "Use my Gravatar"
@@ -2209,7 +2211,7 @@ msgid "Double-click to open in a new window"
 msgstr ""
 
 #. Same order as the reader toolbar and the list's
-#. Actions Palette, View Source closing the line.
+#. actions palette, View Source closing the line.
 msgid "Reply to this message"
 msgstr ""
 
@@ -2641,15 +2643,13 @@ msgstr ""
 msgid "Show sender and subject"
 msgstr ""
 
-msgid ""
-"Name who wrote and what about in the notification. Turn this off to keep "
-"both off the lock screen."
-msgstr ""
-
 msgid "Style"
 msgstr ""
 
 msgid "The app itself. Message content has its own setting under Reading."
+msgstr ""
+
+msgid "Theme"
 msgstr ""
 
 msgid "App icon"
@@ -2783,16 +2783,11 @@ msgid "Filters placement"
 msgstr ""
 
 msgid ""
-"In the unified section, as a row like Inboxes whose caret opens the folders; "
-"or above or below the accounts as a heading with its own list."
+"Choose between appearing in a unified section, or a list above or below the "
+"accounts."
 msgstr ""
 
 msgid "Tags placement"
-msgstr ""
-
-msgid ""
-"The same choices for the Tags section: a unified row, or a heading above or "
-"below the accounts."
 msgstr ""
 
 msgid "Icon rail"
@@ -2821,7 +2816,7 @@ msgstr ""
 msgid "Every account's folder list."
 msgstr ""
 
-msgid "The account list under Inboxes."
+msgid "The account list under the unified Inboxes row."
 msgstr ""
 
 msgid "The account list under the unified Starred row."
@@ -2850,13 +2845,12 @@ msgid ""
 "Turning it off gives the sender and subject more room."
 msgstr ""
 
-msgid "Your own mail shows your account circle"
+msgid "Sent mail uses your account circle"
 msgstr ""
 
 msgid ""
 "Messages you sent wear the account's Gravatar, picture or emoji, as its "
-"circle in the sidebar does. Turning it off gives them whatever circle anyone "
-"else's mail would get."
+"circle in the sidebar does."
 msgstr ""
 
 msgid "Preview lines"
@@ -2867,7 +2861,7 @@ msgid ""
 "being downloaded."
 msgstr ""
 
-msgid "Actions Palette in the message list"
+msgid "Actions palette in the message list"
 msgstr ""
 
 msgid ""
@@ -2876,20 +2870,12 @@ msgid ""
 "click menu."
 msgstr ""
 
-msgid "Open the Actions Palette on hover"
+msgid "Open the actions palette on hover"
 msgstr ""
 
 msgid ""
-"The message list's ⋯ palette slides open by itself while the pointer rests "
-"on a row."
-msgstr ""
-
-msgid "Actions Palette as a menu"
-msgstr ""
-
-msgid ""
-"The ⋯ opens the row's menu, the same one a right-click shows, instead of "
-"sliding the palette out."
+"The message list's ⋯ actions palette slides open by itself while the pointer "
+"rests on a row."
 msgstr ""
 
 msgid "Swipe actions"
@@ -2897,15 +2883,15 @@ msgstr ""
 
 msgid ""
 "Drag a message sideways with the mouse, or swipe it with two fingers on a "
-"trackpad, to archive or delete it."
+"trackpad, to archive or delete it. Default is left to delete, right to "
+"archive."
 msgstr ""
 
 msgid "Reverse swipe directions"
 msgstr ""
 
 msgid ""
-"Swipe (mouse-drag or trackpad) a message left to delete it and right to "
-"archive it. Turning this on swaps the two: left archives, right deletes."
+"Turning this on swaps the swipe actions to: left archives, right deletes."
 msgstr ""
 
 msgid "Trackpad swipe sensitivity"
@@ -2917,12 +2903,12 @@ msgid ""
 "you did not mean them to. Mouse drags are unaffected."
 msgstr ""
 
-msgid "Actions Palette timeout"
+msgid "Actions palette timeout"
 msgstr ""
 
 msgid ""
-"Seconds an actions palette stays open after the cursor leaves it — the "
-"list's and the message cards' alike."
+"Seconds the message list's actions palette stays open after the cursor "
+"leaves it."
 msgstr ""
 
 msgid "Conversations"
@@ -3015,10 +3001,24 @@ msgstr ""
 msgid "The system's monospace font unless another is chosen."
 msgstr ""
 
-msgid "Message card actions"
+msgid "Message card actions palette"
 msgstr ""
 
 msgid "How each message's action icons show in the reader, single or threaded."
+msgstr ""
+
+msgid "Message card actions palette timeout"
+msgstr ""
+
+msgid "Seconds a card's actions palette stays open after the cursor leaves it."
+msgstr ""
+
+msgid "Message card actions palette as a menu"
+msgstr ""
+
+msgid ""
+"The ⋯ opens the message's menu, the same one a right-click shows, instead of "
+"sliding the actions palette out."
 msgstr ""
 
 msgid "Single messages as cards"
@@ -3144,7 +3144,7 @@ msgstr ""
 
 msgid ""
 "By default dates follow the system's own arrangement — its field order, "
-"month names and clock. Choose a format here to use it whatever the system is "
+"month names and clock. Choose a format here to override what your system is "
 "set to."
 msgstr ""
 
@@ -3221,7 +3221,7 @@ msgid ""
 "bug report. Email addresses are shortened to their domain."
 msgstr ""
 
-msgid "GNOME Files"
+msgid "GNOME Files Integration"
 msgstr ""
 
 msgid ""
@@ -3255,20 +3255,15 @@ msgstr ""
 msgid "Restart"
 msgstr ""
 
-msgid "Files sent from Files go into"
+msgid "Default Send with Vireo behavior"
+msgstr ""
+
+msgid "Default large attachments behavior"
 msgstr ""
 
 msgid ""
-"What Send with Vireo, Open With Vireo and Email… open with the files. Asking "
-"offers all three each time."
-msgstr ""
-
-msgid "Files over the size limit"
-msgstr ""
-
-msgid ""
-"Uploading needs a cloud storage account (Settings → Cloud Storage); without "
-"one the files are attached."
+"Upload to cloud storage needs a cloud storage account (Settings → Cloud "
+"Storage) otherwise the files are attached by default."
 msgstr ""
 
 msgid "Size limit"
@@ -3319,9 +3314,6 @@ msgid "2 lines"
 msgstr ""
 
 msgid "3 lines"
-msgstr ""
-
-msgid "Shown in the dock, app grid and switcher, and by the tray icon."
 msgstr ""
 
 msgid "When displayed"

@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.31.1-beta.1" date="2026-09-15" type="development">
+      <description>
+        <p>Catch-up with stable 1.31.0. Appearance themes (Settings, Appearance: System, Midnight, Tidal, Rose, Earth, Forest, each light and dark), a Drafts folder assigned under Special Folders now shows its count, Settings rows reworded, Mail Accounts marks aligned, Portuguese translations updated.</p>
+      </description>
+    </release>
     <release version="1.31.0-beta.2" date="2026-09-14" type="development">
       <description>
         <p>Catch-up with stable 1.30.1. Trackpad swipe sensitivity (Settings, Message List), and a swipe that goes far enough now flies the message off the side it was sent while the list closes over it.</p>

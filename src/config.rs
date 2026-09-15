@@ -841,11 +841,16 @@ struct PrivacyFile {
     /// Stored lowercased; a bare domain like "spam.com" matches any sender there.
     #[serde(default)]
     blacklist: Vec<String>,
-    /// Seconds the message-list Actions Palette stays open after the cursor
+    /// Seconds the message-list actions palette stays open after the cursor
     /// leaves it before auto-collapsing. (A prior `palette_delay_ms` setting in
     /// milliseconds is intentionally not migrated — its meaning has changed.)
     #[serde(default = "default_palette_collapse")]
     palette_collapse_secs: u64,
+    /// Seconds a message card's actions palette stays open after the cursor
+    /// leaves it. Separate from the list's: cards are read at a different
+    /// pace from a list being skimmed.
+    #[serde(default = "default_palette_collapse")]
+    card_palette_collapse_secs: u64,
     /// Group messages into conversation threads in the list.
     #[serde(default = "default_threading")]
     threading: bool,
@@ -921,18 +926,18 @@ struct PrivacyFile {
     /// card is hovered (rather than always).
     #[serde(default = "default_card_actions_auto")]
     card_actions_auto: bool,
-    /// Whether the message list rows carry an Actions Palette at all. Off
+    /// Whether the message list rows carry an actions palette at all. Off
     /// removes the ⋯ line entirely, returning its space to the row.
     #[serde(default = "default_list_palette")]
     list_palette: bool,
-    /// Whether the message list's Actions Palette opens on row hover, without
+    /// Whether the message list's actions palette opens on row hover, without
     /// needing the ⋯ click.
     #[serde(default)]
     list_palette_hover: bool,
-    /// Whether the ⋯ on a message row opens the row's menu in place of
-    /// sliding the Actions Palette out.
+    /// Whether the ⋯ on a message card opens the card's menu in place of
+    /// sliding its actions palette out.
     #[serde(default)]
-    list_palette_menu: bool,
+    card_palette_menu: bool,
     /// Whether message rows take a sideways swipe at all (#92, PR #135).
     #[serde(default = "default_swipe_enabled")]
     swipe_enabled: bool,
@@ -1002,6 +1007,11 @@ struct PrivacyFile {
     /// The app chrome's theme: follow the system, or force light/dark.
     #[serde(default)]
     app_theme: AppTheme,
+    /// The appearance theme's id: a bundled palette (see `theme.rs`) painted
+    /// over libadwaita's colours, or "system" for the stock GNOME look.
+    /// Empty — a file written before themes existed — means the same.
+    #[serde(default)]
+    theme: String,
     /// Lines of message text shown under the subject in the list: 0 turns the
     /// preview off entirely, and stops it being fetched.
     #[serde(default = "default_preview_lines")]
@@ -1234,6 +1244,7 @@ impl Default for PrivacyFile {
             push: default_push(),
             blacklist: Vec::new(),
             palette_collapse_secs: default_palette_collapse(),
+            card_palette_collapse_secs: default_palette_collapse(),
             threading: default_threading(),
             threads_expanded: false,
             thread_expansion: default_thread_expansion(),
@@ -1256,7 +1267,7 @@ impl Default for PrivacyFile {
             card_actions_auto: default_card_actions_auto(),
             list_palette: default_list_palette(),
             list_palette_hover: false,
-            list_palette_menu: false,
+            card_palette_menu: false,
             swipe_enabled: default_swipe_enabled(),
             swipe_reversed: false,
             swipe_sensitivity: default_swipe_sensitivity(),
@@ -1274,6 +1285,7 @@ impl Default for PrivacyFile {
             rail_dots: true,
             rail_fold: RailFold::default(),
             app_theme: AppTheme::default(),
+            theme: String::new(),
             preview_lines: default_preview_lines(),
             single_key_shortcuts: false,
             run_in_background: false,
@@ -1376,9 +1388,16 @@ pub fn load_blacklist() -> Vec<String> {
     load_privacy().blacklist
 }
 
-/// Seconds the message-list Actions Palette stays open after the cursor leaves it.
+/// Seconds the message list's actions palette stays open after the cursor
+/// leaves it.
 pub fn load_palette_collapse() -> u64 {
     load_privacy().palette_collapse_secs
+}
+
+/// Seconds a message card's actions palette stays open after the cursor
+/// leaves it.
+pub fn load_card_palette_collapse() -> u64 {
+    load_privacy().card_palette_collapse_secs
 }
 
 /// Whether messages are grouped into conversation threads.
@@ -2195,19 +2214,20 @@ pub fn load_card_actions_auto() -> bool {
     load_privacy().card_actions_auto
 }
 
-/// Whether the message list rows carry an Actions Palette at all.
+/// Whether the message list rows carry an actions palette at all.
 pub fn load_list_palette() -> bool {
     load_privacy().list_palette
 }
 
-/// Whether the list's Actions Palette opens on row hover (no ⋯ click).
+/// Whether the list's actions palette opens on row hover (no ⋯ click).
 pub fn load_list_palette_hover() -> bool {
     load_privacy().list_palette_hover
 }
 
-/// Whether a row's ⋯ opens the row menu instead of the sliding palette.
-pub fn load_list_palette_menu() -> bool {
-    load_privacy().list_palette_menu
+/// Whether a message card's ⋯ opens the card menu instead of sliding its
+/// actions palette out.
+pub fn load_card_palette_menu() -> bool {
+    load_privacy().card_palette_menu
 }
 
 fn default_swipe_enabled() -> bool {
@@ -2372,6 +2392,16 @@ pub fn load_app_theme() -> AppTheme {
     load_privacy().app_theme
 }
 
+/// The appearance theme's id; "system" (the stock look) when unset.
+pub fn load_theme() -> String {
+    let id = load_privacy().theme;
+    if id.is_empty() {
+        crate::theme::SYSTEM_ID.to_string()
+    } else {
+        id
+    }
+}
+
 /// Lines of message text shown under the subject in the list; 0 means previews
 /// are off. Clamped in case the file was edited by hand.
 pub fn load_preview_lines() -> u32 {
@@ -2428,6 +2458,7 @@ pub fn save_privacy(
     push: bool,
     blacklist: &[String],
     palette_collapse_secs: u64,
+    card_palette_collapse_secs: u64,
     threading: bool,
     threads_expanded: bool,
     thread_expansion: bool,
@@ -2450,7 +2481,7 @@ pub fn save_privacy(
     card_actions_auto: bool,
     list_palette: bool,
     list_palette_hover: bool,
-    list_palette_menu: bool,
+    card_palette_menu: bool,
     swipe_enabled: bool,
     swipe_reversed: bool,
     swipe_sensitivity: f64,
@@ -2475,6 +2506,7 @@ pub fn save_privacy(
     rail_dots: bool,
     rail_fold: RailFold,
     app_theme: AppTheme,
+    theme: String,
     show_unified: bool,
     unified_chips: UnifiedChips,
     unified_filtered: bool,
@@ -2507,6 +2539,7 @@ pub fn save_privacy(
         push,
         blacklist: blacklist.to_vec(),
         palette_collapse_secs,
+        card_palette_collapse_secs,
         threading,
         threads_expanded,
         thread_expansion,
@@ -2529,7 +2562,7 @@ pub fn save_privacy(
         card_actions_auto,
         list_palette,
         list_palette_hover,
-        list_palette_menu,
+        card_palette_menu,
         swipe_enabled,
         swipe_reversed,
         swipe_sensitivity,
@@ -2556,6 +2589,7 @@ pub fn save_privacy(
         rail_dots,
         rail_fold,
         app_theme,
+        theme,
         show_unified,
         unified_chip: unified_chips.all_inboxes,
         unified_chips,
@@ -3824,22 +3858,27 @@ mod toolbar_tests {
     #[test]
     fn place_moves_between_and_within_sides() {
         let mut t = ReaderToolbar::default();
-        // Right → left, at the front.
+        // The default left group is full: a move onto it changes nothing.
+        t.place(ToolbarItem::Print, Some(ToolbarSide::Left), 0);
+        assert_eq!(t.left[0], ToolbarItem::Reply);
+        assert_eq!(t.right.last(), Some(&ToolbarItem::Print));
+        // Make room, then right → left, at the front.
+        t.place(ToolbarItem::Star, None, 0);
         t.place(ToolbarItem::Print, Some(ToolbarSide::Left), 0);
         assert_eq!(t.left[0], ToolbarItem::Print);
         assert!(!t.right.contains(&ToolbarItem::Print));
         // Within the left group: Reply (now index 1) to the end.
         t.place(ToolbarItem::Reply, Some(ToolbarSide::Left), 99);
         assert_eq!(t.left.last(), Some(&ToolbarItem::Reply));
-        assert_eq!(t.left.len(), 7);
+        assert_eq!(t.left.len(), TOOLBAR_SIDE_MAX);
         // Hidden: on neither side, listed under hidden().
         t.place(ToolbarItem::Spam, None, 0);
         assert_eq!(t.side(ToolbarItem::Spam), None);
-        assert_eq!(t.hidden(), vec![ToolbarItem::Spam]);
+        assert_eq!(t.hidden(), vec![ToolbarItem::Star, ToolbarItem::Spam]);
         // Back from hidden into the right group's middle.
         t.place(ToolbarItem::Spam, Some(ToolbarSide::Right), 1);
         assert_eq!(t.right[1], ToolbarItem::Spam);
-        assert!(t.hidden().is_empty());
+        assert_eq!(t.hidden(), vec![ToolbarItem::Star]);
     }
 
     #[test]

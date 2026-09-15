@@ -2,9 +2,19 @@
 
 Vireo is a clean, fast, GNOME-native email client built with Rust and libadwaita for Wayland desktops. Privacy-first: no telemetry, remote content blocked by default, and credentials kept in the system keyring.
 
-## What's new in 1.31.0-beta.2
+## What's new in 1.31.1-beta.1
 
-Catch-up with stable 1.30.1: everything below, under the beta app ID.
+Catch-up with stable 1.31.0: everything below, under the beta app ID.
+
+## What's new in 1.31.0
+
+**Appearance themes.** Settings → Appearance gained a **Theme** gallery: **System**, the stock GNOME look and still the default, plus **Midnight**, **Tidal**, **Rose**, **Earth** and **Forest**. Every theme has a light and a dark palette, so the Style setting keeps doing what it did and picks which of the two you see; each card shows both halves, with a ring round the one currently on screen. A theme colours the whole window, the reader and the composer included, and switches at once without a restart. The palettes come from the theme library of [T3 Code](https://github.com/pingdotgg/t3code) (MIT).
+
+**Fixed: a Drafts folder chosen under Special Folders showed no count.** When the Drafts folder was assigned by hand rather than detected from the server, its sidebar chip counted unread mail, which drafts never are, so it stayed hidden however many drafts were waiting. It now counts every draft, like a detected Drafts folder does. Reported from a laposte.net account.
+
+**Settings reads more plainly.** Rows across General, Sidebar, Message List, Date and Time and System were reworded, the subheadings under Theme and App icon are gone, and the switch that turns the ⋯ button into a menu moved from Message List to Reading, under **Message card actions palette**, where the ⋯ it describes lives; the cards also keep their own palette timeout. In Mail Accounts, the provider marks and the GOA / Vireo badges line up in columns, and the OpenPGP Import, Generate and Fetch buttons are a stacked column like the ones in Tags and Filters.
+
+**Portuguese translations updated** for pt_PT and pt_BR (PR #194 by [@somepaulo](https://github.com/somepaulo)).
 
 ## What's new in 1.30.1
 

@@ -365,7 +365,7 @@ pub struct AppModel {
     /// Whether the sidebar is in icon-only (collapsed) mode.
     sidebar_collapsed: bool,
     /// The narrow-window breakpoint is currently applied (window is too narrow
-    /// for the expanded sidebar + a full-width Actions Palette — e.g. tiled to
+    /// for the expanded sidebar + a full-width actions palette — e.g. tiled to
     /// half of a 1920px screen).
     auto_rail: bool,
     /// The rail's current on-screen state — the user's choice OR'd with the
@@ -413,6 +413,9 @@ pub struct AppModel {
     rail_fold: config::RailFold,
     /// The app chrome's theme preference (follow system / light / dark).
     app_theme: config::AppTheme,
+    /// The appearance theme: a bundled palette's id, or "system" for the
+    /// stock GNOME colours (see `theme.rs`).
+    theme: String,
     /// Held so the in-flight collapse/expand width animation isn't dropped.
     sidebar_anim: Option<adw::TimedAnimation>,
     current: Option<Message>,
@@ -425,8 +428,11 @@ pub struct AppModel {
     show_remote_banner: bool,
     /// Addresses/domains whose incoming inbox mail is auto-deleted (lowercased).
     blacklist: Vec<String>,
-    /// Seconds the message-list Actions Palette stays open after the cursor leaves.
+    /// Seconds the message-list actions palette stays open after the cursor leaves.
     palette_collapse_secs: u64,
+    /// Seconds a message card's actions palette stays open — the cards' own,
+    /// separate from the list's above.
+    card_palette_collapse_secs: u64,
     /// Whether to load sender avatars from Gravatar.
     gravatar: bool,
     /// Whether the coloured avatars are drawn at all (#29).
@@ -596,12 +602,13 @@ pub struct AppModel {
     card_actions_hover: bool,
     /// With the ⋯ toggle off: card actions appear automatically on hover.
     card_actions_auto: bool,
-    /// The list's Actions Palette opens on row hover (no ⋯ click).
-    /// Whether the message list rows carry an Actions Palette at all.
+    /// The list's actions palette opens on row hover (no ⋯ click).
+    /// Whether the message list rows carry an actions palette at all.
     list_palette: bool,
     list_palette_hover: bool,
-    /// The row's ⋯ opens the row menu instead of the sliding palette.
-    list_palette_menu: bool,
+    /// A message card's ⋯ opens the card menu instead of sliding its
+    /// actions palette out.
+    card_palette_menu: bool,
     /// Message rows take a sideways swipe to archive / delete (#92).
     swipe_enabled: bool,
     /// The message list's swipe-gesture sides are swapped (#swipe).
@@ -937,7 +944,7 @@ pub enum AppMsg {
     SetCardActionsMode { hover_toggle: bool, hover_auto: bool },
     SetListPalette(bool),
     SetListPaletteHover(bool),
-    SetListPaletteMenu(bool),
+    SetCardPaletteMenu(bool),
     SetSwipeEnabled(bool),
     SetSwipeReversed(bool),
     SetSwipeSensitivity(f64),
@@ -1023,6 +1030,8 @@ pub enum AppMsg {
     SetRailFold(config::RailFold),
     /// Preference: the app chrome's theme (follow system / light / dark).
     SetAppTheme(config::AppTheme),
+    /// Preference: the appearance theme (Settings gallery).
+    SetTheme(String),
     /// The cursor entered the sidebar pane — open the hover peek (rail +
     /// preference permitting).
     SidebarHoverEnter,
@@ -1054,6 +1063,7 @@ pub enum AppMsg {
     /// Render it to a PDF and open that, to see what will come out.
     PrintPreview,
     SetPaletteCollapse(u64),
+    SetCardPaletteCollapse(u64),
     SetMessageTheme(config::MessageTheme),
     SetOverrideFonts(bool),
     SetReaderFont(String),
@@ -1437,9 +1447,12 @@ impl SimpleComponent for AppModel {
                     add_named[Some("mail")] = &gtk::Paned {
                         set_orientation: gtk::Orientation::Horizontal,
                         // Thin handle so the panes sit flush (just a 1px divider),
-                        // no wide-handle gap between them.
+                        // no wide-handle gap between them. A theme paints that
+                        // divider through this class (see theme::css); without
+                        // one it keeps the stock separator.
+                        add_css_class: "mail-split",
                         set_wide_handle: false,
-                        // Launch wide enough for a row's Actions Palette. That is
+                        // Launch wide enough for a row's actions palette. That is
                         // also the list's minimum while the avatars are on,
                         // so `shrink_start_child: false` clamps to the same figure
                         // either way. With the circles off the minimum drops to what
@@ -1976,6 +1989,11 @@ impl SimpleComponent for AppModel {
     ) -> ComponentParts<Self> {
         relm4::set_global_css(include_str!("styles.css"));
         register_icons();
+        // Before install_scheme_css and before the reader exists: both read
+        // the theme's colours back, and both listen for the light/dark flip
+        // that swaps a theme's two palettes — GTK runs those handlers in
+        // connection order, so the palette has to be in place first.
+        crate::theme::install(&config::load_theme());
         install_scheme_css(&root);
 
         let mut sidebar_state = config::load_sidebar_state();
@@ -2404,12 +2422,14 @@ impl SimpleComponent for AppModel {
             rail_dots: config::load_rail_dots(),
             rail_fold: config::load_rail_fold(),
             app_theme: config::load_app_theme(),
+            theme: config::load_theme(),
             current: None,
             allowed_senders: config::load_allowed_senders(),
             auto_remote_content: config::load_auto_remote_content(),
             show_remote_banner: config::load_show_remote_banner(),
             blacklist: config::load_blacklist(),
             palette_collapse_secs: config::load_palette_collapse(),
+            card_palette_collapse_secs: config::load_card_palette_collapse(),
             gravatar: config::load_gravatar(),
             avatars: config::load_avatars(),
             own_mailbox_face: config::load_own_mailbox_face(),
@@ -2504,7 +2524,7 @@ impl SimpleComponent for AppModel {
             card_actions_auto: config::load_card_actions_auto(),
             list_palette: config::load_list_palette(),
             list_palette_hover: config::load_list_palette_hover(),
-            list_palette_menu: config::load_list_palette_menu(),
+            card_palette_menu: config::load_card_palette_menu(),
             swipe_enabled: config::load_swipe_enabled(),
             swipe_reversed: config::load_swipe_reversed(),
             swipe_sensitivity: config::load_swipe_sensitivity(),
@@ -3368,7 +3388,7 @@ impl SimpleComponent for AppModel {
                     gtk::glib::timeout_add_seconds_local_once(3, move || {
                         let _ = list.send(MessageListInput::MoveSelection(1));
                     });
-                    // VIREO_SHOWCASE_PALETTE=N opens row N's Actions Palette
+                    // VIREO_SHOWCASE_PALETTE=N opens row N's actions palette
                     // (so a capture can verify the floating palette's look).
                     if let Some(Ok(idx)) =
                         std::env::var("VIREO_SHOWCASE_PALETTE").ok().map(|v| v.parse())
@@ -3655,6 +3675,15 @@ impl SimpleComponent for AppModel {
                         } else {
                             config::AppTheme::Light
                         }));
+                    });
+                }
+                // VIREO_SHOWCASE_THEME=<id> picks that appearance theme at
+                // 6 s, exactly as the Settings gallery does, so the live
+                // repaint (chrome, reader and composer) can be captured.
+                if let Ok(id) = std::env::var("VIREO_SHOWCASE_THEME") {
+                    let s = sender.clone();
+                    gtk::glib::timeout_add_seconds_local_once(6, move || {
+                        s.input(AppMsg::SetTheme(id.clone()));
                     });
                 }
                 // VIREO_SHOWCASE_ACCOUNT=N opens account N's editor a beat
@@ -4381,6 +4410,20 @@ impl SimpleComponent for AppModel {
                 if self.app_theme != theme {
                     self.app_theme = theme;
                     apply_app_theme(theme);
+                    self.save_settings();
+                }
+            }
+
+            AppMsg::SetTheme(id) => {
+                if self.theme != id {
+                    self.theme = id.clone();
+                    // Repaints the chrome and tells the reader and any open
+                    // composer to re-ground their documents. The colours the
+                    // scheme-dependent CSS reads back are taken a main-loop
+                    // pass later, as they are on a light/dark flip, so the
+                    // lookups answer for the palette that just landed.
+                    crate::theme::set(&id);
+                    gtk::glib::idle_add_local_once(refresh_scheme_css);
                     self.save_settings();
                 }
             }
@@ -5948,7 +5991,13 @@ impl SimpleComponent for AppModel {
                     self.palette_collapse_secs = secs;
                     self.save_settings();
                     self.message_list.emit(MessageListInput::SetPaletteCollapse(secs));
-                    // The message cards' palette shares the same timeout.
+                }
+            }
+
+            AppMsg::SetCardPaletteCollapse(secs) => {
+                if self.card_palette_collapse_secs != secs {
+                    self.card_palette_collapse_secs = secs;
+                    self.save_settings();
                     self.message_view.emit(MessageViewInput::SetPaletteCollapse(secs));
                 }
             }
@@ -5969,11 +6018,11 @@ impl SimpleComponent for AppModel {
                 }
             }
 
-            AppMsg::SetListPaletteMenu(on) => {
-                if self.list_palette_menu != on {
-                    self.list_palette_menu = on;
+            AppMsg::SetCardPaletteMenu(on) => {
+                if self.card_palette_menu != on {
+                    self.card_palette_menu = on;
                     self.save_settings();
-                    self.message_list.emit(MessageListInput::SetPaletteMenu(on));
+                    self.message_view.emit(MessageViewInput::SetCardPaletteMenu(on));
                 }
             }
 
@@ -8243,6 +8292,7 @@ impl AppModel {
             self.push,
             &self.blacklist,
             self.palette_collapse_secs,
+            self.card_palette_collapse_secs,
             self.threading,
             self.threads_expanded,
             self.thread_expansion,
@@ -8265,7 +8315,7 @@ impl AppModel {
             self.card_actions_auto,
             self.list_palette,
             self.list_palette_hover,
-            self.list_palette_menu,
+            self.card_palette_menu,
             self.swipe_enabled,
             self.swipe_reversed,
             self.swipe_sensitivity,
@@ -8290,6 +8340,7 @@ impl AppModel {
             self.rail_dots,
             self.rail_fold,
             self.app_theme,
+            self.theme.clone(),
             self.show_unified_pref,
             self.unified_chips,
             self.unified_filtered,
@@ -12902,6 +12953,7 @@ impl AppModel {
             fetch_interval_secs: self.fetch_interval_secs,
             push: self.push,
             palette_collapse_secs: self.palette_collapse_secs,
+            card_palette_collapse_secs: self.card_palette_collapse_secs,
             threading: self.threading,
             threads_expanded: self.threads_expanded,
             thread_newest_first: self.thread_newest_first,
@@ -12942,7 +12994,7 @@ impl AppModel {
             card_actions_auto: self.card_actions_auto,
             list_palette: self.list_palette,
             list_palette_hover: self.list_palette_hover,
-            list_palette_menu: self.list_palette_menu,
+            card_palette_menu: self.card_palette_menu,
             swipe_enabled: self.swipe_enabled,
             swipe_reversed: self.swipe_reversed,
             swipe_sensitivity: self.swipe_sensitivity,
@@ -12954,6 +13006,7 @@ impl AppModel {
             spellcheck: self.spellcheck,
             spellcheck_langs: self.spellcheck_langs.clone(),
             app_theme: self.app_theme,
+            theme: self.theme.clone(),
             preview_lines: self.preview_lines,
             single_key_shortcuts: self.single_key.get(),
             run_in_background: self.run_in_background.get(),
@@ -13005,7 +13058,7 @@ impl AppModel {
                 }
                 PrefOutput::SetListPalette(on) => AppMsg::SetListPalette(on),
                 PrefOutput::SetListPaletteHover(on) => AppMsg::SetListPaletteHover(on),
-                PrefOutput::SetListPaletteMenu(on) => AppMsg::SetListPaletteMenu(on),
+                PrefOutput::SetCardPaletteMenu(on) => AppMsg::SetCardPaletteMenu(on),
                 PrefOutput::SetSwipeEnabled(on) => AppMsg::SetSwipeEnabled(on),
                 PrefOutput::SetSwipeReversed(on) => AppMsg::SetSwipeReversed(on),
                 PrefOutput::SetSwipeSensitivity(v) => AppMsg::SetSwipeSensitivity(v),
@@ -13048,6 +13101,7 @@ impl AppModel {
                 PrefOutput::SetReaderToolbar(layout) => AppMsg::SetReaderToolbar(layout),
                 PrefOutput::SetRailFold(fold) => AppMsg::SetRailFold(fold),
                 PrefOutput::SetAppTheme(theme) => AppMsg::SetAppTheme(theme),
+                PrefOutput::SetTheme(id) => AppMsg::SetTheme(id),
                 PrefOutput::SetSettingsOpenAccounts(on) => {
                     AppMsg::SetSettingsOpenAccounts(on)
                 }
@@ -13060,6 +13114,7 @@ impl AppModel {
                 PrefOutput::SetTrayMail(on) => AppMsg::SetTrayMail(on),
                 PrefOutput::SetAppIcon(id) => AppMsg::SetAppIcon(id),
                 PrefOutput::SetPaletteCollapse(secs) => AppMsg::SetPaletteCollapse(secs),
+                PrefOutput::SetCardPaletteCollapse(secs) => AppMsg::SetCardPaletteCollapse(secs),
                 PrefOutput::SetMessageTheme(t) => AppMsg::SetMessageTheme(t),
                 PrefOutput::SetOverrideFonts(on) => AppMsg::SetOverrideFonts(on),
                 PrefOutput::SetReaderFont(font) => AppMsg::SetReaderFont(font),
@@ -14778,22 +14833,12 @@ fn demo_mode() -> bool {
     std::env::var_os("VIREO_DEMO").is_some()
 }
 
-/// The [`FolderKind`] behind a Special Folders role key (#82).
-fn role_kind(role: &str) -> Option<FolderKind> {
-    match role {
-        "sent" => Some(FolderKind::Sent),
-        "drafts" => Some(FolderKind::Drafts),
-        "trash" => Some(FolderKind::Trash),
-        "junk" => Some(FolderKind::Junk),
-        "archive" => Some(FolderKind::Archive),
-        _ => None,
-    }
-}
-
 /// Apply an account's manual special-folder assignments (#82) over the
-/// auto-detected kinds: the chosen folder takes the role, whatever held it
-/// demotes to Custom, and the list re-sorts into the fixed role order.
-/// Folder ids are untouched — they are referenced from cached messages.
+/// auto-detected kinds (see [`crate::models::assign_folder_roles`]), then
+/// re-sort into the fixed role order. Folder ids are untouched — they are
+/// referenced from cached messages. The worker already applies the same
+/// assignments to every listing it sends; this keeps the live lists right
+/// between a Settings save and the reconnect's fresh LIST.
 fn apply_folder_roles(
     roles: &std::collections::BTreeMap<String, String>,
     folders: &mut Vec<Folder>,
@@ -14801,28 +14846,7 @@ fn apply_folder_roles(
     if roles.is_empty() {
         return;
     }
-    for (role, path) in roles {
-        let Some(kind) = role_kind(role) else { continue };
-        if !folders.iter().any(|f| &f.path == path) {
-            // The assigned folder vanished server-side: leave detection alone.
-            continue;
-        }
-        // The Inbox is never re-roled (#136): an account whose "Sent" was
-        // pointed at INBOX lost its inbox — and with it its place under All
-        // Inboxes, its new-mail notifications and its filters. The
-        // assignment is ignored; the editor no longer offers the Inbox.
-        if folders.iter().any(|f| &f.path == path && f.kind == FolderKind::Inbox) {
-            continue;
-        }
-        for f in folders.iter_mut() {
-            if f.kind == kind {
-                f.kind = FolderKind::Custom;
-            }
-        }
-        if let Some(f) = folders.iter_mut().find(|f| &f.path == path) {
-            f.kind = kind;
-        }
-    }
+    crate::models::assign_folder_roles(roles, folders);
     folders.sort_by(|a, b| {
         crate::worker::folder_order(a.kind)
             .cmp(&crate::worker::folder_order(b.kind))
@@ -15336,6 +15360,23 @@ fn map_event(account_id: u32, event: WorkerEvent) -> AppMsg {
     }
 }
 
+thread_local! {
+    /// Reloads the scheme-dependent provider with the colours the live theme
+    /// answers with now (see [`install_scheme_css`]).
+    static SCHEME_REFRESH: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Re-read the theme's colours into the scheme-dependent CSS, for a change
+/// that moves them without flipping the colour scheme.
+fn refresh_scheme_css() {
+    SCHEME_REFRESH.with(|slot| {
+        if let Some(refresh) = slot.borrow().as_ref() {
+            refresh();
+        }
+    });
+}
+
 /// Styles that branch on the colour scheme, which static CSS cannot do: a
 /// dedicated provider (above the static stylesheet's priority) carries the
 /// scheme-dependent values and reloads whenever the scheme flips.
@@ -15379,6 +15420,15 @@ fn install_scheme_css(window: &impl IsA<gtk::Widget>) {
     };
     let style = adw::StyleManager::default();
     apply(&provider, style.is_dark());
+    // A theme change moves the same colours without any scheme flip, so the
+    // provider has to be reloadable on demand as well (AppMsg::SetTheme).
+    SCHEME_REFRESH.with(|slot| {
+        let provider = provider.clone();
+        let apply = apply.clone();
+        *slot.borrow_mut() = Some(Box::new(move || {
+            apply(&provider, adw::StyleManager::default().is_dark());
+        }));
+    });
     style.connect_dark_notify(move |sm| {
         // The theme's named colours are re-resolved after this signal, not
         // before it: read them now and the lookup answers for the scheme
