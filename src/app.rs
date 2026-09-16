@@ -875,6 +875,13 @@ pub struct AppModel {
     /// menu and its banner, and kept for the session only — a decision about
     /// one message is not a decision about a sender.
     remote_override: HashMap<(u32, u32), bool>,
+    /// What the inline composer's own history can take back (#200), as it
+    /// last reported: `(undo, redo)`, each `None` when that side is empty.
+    /// While the composer holds keyboard focus the window's Undo and Redo
+    /// are its, not the mail history's — the same split the keys already
+    /// make, so the menu never offers to archive a message while someone is
+    /// typing into a reply.
+    compose_history: (Option<String>, Option<String>),
     /// The burger menu's Undo/Redo section, relabelled as the stacks change.
     undo_menu: gtk::gio::Menu,
     /// Their actions, kept so they can be greyed out when there is nothing
@@ -1174,6 +1181,10 @@ pub enum AppMsg {
     Undo,
     /// Ctrl+Shift+Z / Ctrl+Y: put back what undo took away.
     Redo,
+    /// The inline composer's own history changed (#200): what its Undo and
+    /// Redo would take back now, or `None` for a direction with nothing in
+    /// it. The window's entries follow it while it holds focus.
+    ComposeHistory { id: u32, undo: Option<String>, redo: Option<String> },
     SetFetchInterval(u64),
     SetPush(bool),
     SetNotifications(bool),
@@ -1275,6 +1286,15 @@ pub enum AppMsg {
     SetComposeFormat(crate::config::ComposeFormat),
     /// Showcase only: turn the inline composer's preview on.
     ShowcaseComposePreview,
+    /// Showcase only (VIREO_SHOWCASE_COMPOSE_UNDO): drive the inline
+    /// composer's history through a scripted round of edits and undos.
+    ShowcaseComposeUndo,
+    /// Showcase only: open the window's burger menu, to read its Undo and
+    /// Redo entries in the state they are actually seen in.
+    ShowcaseBurger,
+    /// Showcase only: put the inline composer into this composing format
+    /// first, so the same round runs over a source-mode body.
+    ShowcaseComposeFormat(config::ComposeFormat),
     /// Showcase only: open the inline composer's format chooser, or its
     /// overflow menu.
     ShowcaseComposeMenu { format: bool },
@@ -2599,6 +2619,7 @@ impl SimpleComponent for AppModel {
             list_selection: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            compose_history: (None, None),
             carried_bodies: HashMap::new(),
             remote_override: HashMap::new(),
             carried_threads: HashMap::new(),
@@ -3936,6 +3957,39 @@ impl SimpleComponent for AppModel {
                     let s = sender.clone();
                     gtk::glib::timeout_add_seconds_local_once(6, move || {
                         s.input(AppMsg::ShowcaseComposePreview);
+                    });
+                }
+                // VIREO_SHOWCASE_COMPOSE_UNDO=1 runs the composer's history
+                // (#200) through a scripted round of edits and undos on the
+                // `vireo::compose::undo` log target: the one way to exercise
+                // it without a keyboard, since the keys cannot be injected
+                // on this desktop. Pair with VIREO_SHOWCASE_REPLY.
+                // Set it to markdown, html or plain to walk a source-mode
+                // body (a textarea) instead of the rich document, to
+                // `backspace` to trim text rather than type it, or to
+                // `pause` to leave a long gap between two runs of typing.
+                if let Ok(which) = std::env::var("VIREO_SHOWCASE_COMPOSE_UNDO") {
+                    let format = match which.as_str() {
+                        "markdown" => Some(config::ComposeFormat::Markdown),
+                        "html" => Some(config::ComposeFormat::Html),
+                        "plain" => Some(config::ComposeFormat::Plain),
+                        _ => None,
+                    };
+                    if let Some(format) = format {
+                        let s = sender.clone();
+                        gtk::glib::timeout_add_seconds_local_once(5, move || {
+                            s.input(AppMsg::ShowcaseComposeFormat(format));
+                        });
+                    }
+                    let s = sender.clone();
+                    gtk::glib::timeout_add_seconds_local_once(7, move || {
+                        s.input(AppMsg::ShowcaseComposeUndo);
+                    });
+                    // …and drop the burger menu open over it near the end,
+                    // which is the state the entries are actually read in.
+                    let s = sender.clone();
+                    gtk::glib::timeout_add_seconds_local_once(16, move || {
+                        s.input(AppMsg::ShowcaseBurger);
                     });
                 }
                 // VIREO_SHOWCASE_FILES=/a:/b hands those files in at 4 s,
@@ -6402,6 +6456,15 @@ impl SimpleComponent for AppModel {
 
             AppMsg::Redo => self.undo_redo(true),
 
+            AppMsg::ComposeHistory { id, undo, redo } => {
+                // Only the inline composer's: a composer in a window of its
+                // own answers its keys there and has no menu here to label.
+                if self.reader_compose.as_ref().is_some_and(|r| r.id == id && r.window.is_none()) {
+                    self.compose_history = (undo, redo);
+                    self.refresh_undo_menu();
+                }
+            }
+
 
             AppMsg::SetComposeInline(on) => {
                 if self.compose_inline != on {
@@ -6584,6 +6647,36 @@ impl SimpleComponent for AppModel {
             AppMsg::ShowcaseComposePreview => {
                 if let Some(r) = self.reader_compose.as_ref() {
                     r.controller.emit(ComposeInput::TogglePreview(true));
+                }
+            }
+            AppMsg::ShowcaseComposeUndo => {
+                if let Some(r) = self.reader_compose.as_ref() {
+                    r.controller.emit(ComposeInput::ShowcaseHistory(0));
+                }
+            }
+            AppMsg::ShowcaseBurger => {
+                if let Some(m) = self.sidebar_menu.as_ref() {
+                    // Focus first: a click on a MenuButton focuses it before
+                    // the popover opens, and popup() alone skips that — the
+                    // difference between the two is a bug's hiding place.
+                    m.grab_focus();
+                    m.popup();
+                    let mut chain = Vec::new();
+                    let mut node = gtk::prelude::GtkWindowExt::focus(&self.window);
+                    while let Some(w) = node {
+                        chain.push(format!("{}", w.type_()));
+                        node = w.parent();
+                    }
+                    tracing::info!(
+                        target: "vireo::compose::undo",
+                        "burger: opened, focus now [{}]",
+                        chain.join(" < ")
+                    );
+                }
+            }
+            AppMsg::ShowcaseComposeFormat(format) => {
+                if let Some(r) = self.reader_compose.as_ref() {
+                    r.controller.emit(ComposeInput::SetFormat(format));
                 }
             }
             AppMsg::SetComposeFormat(format) => {
@@ -9522,9 +9615,40 @@ impl AppModel {
         self.refresh_undo_menu();
     }
 
+    /// The inline composer, while it holds keyboard focus: whoever the
+    /// window's Undo and Redo belong to at this moment.
+    /// Who the window's Undo and Redo entries belong to. Not the same
+    /// question as [`AppModel::focused_compose`], and deliberately not
+    /// decided by focus: opening the menu is itself a focus change, and
+    /// whether it lands on the button, inside the popover, or somewhere in
+    /// between is GTK's business and varies with how the menu was opened.
+    /// An entry that reads correctly only until you reach for it is no use.
+    ///
+    /// So: an open inline composer with something in its history owns them.
+    /// Anything it can take back is more recent than anything in the mail
+    /// history — it is being written now — and while it has nothing the
+    /// entries go back to the mail, which is what someone with an untouched
+    /// reply on screen would expect. The keys keep following focus, because
+    /// Ctrl+Z in the body must undo the body.
+    fn menu_compose(&self) -> Option<&ReaderCompose> {
+        self.reader_compose.as_ref().filter(|r| {
+            r.window.is_none()
+                && (self.compose_history.0.is_some() || self.compose_history.1.is_some())
+        })
+    }
+
     /// Ctrl+Z / Ctrl+Shift+Z: take the top of one stack, apply it, and put
     /// its inverse on the other so the move can be made again.
+    ///
+    /// Typing into the inline composer hands both over to it: its history
+    /// covers the body and its attachments, and nobody writing a reply means
+    /// "archive that message again" by Ctrl+Z. The menu entries follow the
+    /// same rule, so what they say is always what the key would do.
     fn undo_redo(&mut self, redo: bool) {
+        if let Some(compose) = self.menu_compose() {
+            compose.controller.emit(ComposeInput::History { redo });
+            return;
+        }
         let entry = if redo { self.redo_stack.pop() } else { self.undo_stack.pop() };
         // Nothing to say when there is nothing to do: the menu entry is
         // already greyed out, and the key should just be inert (#200).
@@ -9752,8 +9876,18 @@ impl AppModel {
     /// (Re)build the burger menu's Undo/Redo section, naming the action each
     /// one would reverse, and grey the entries out when a stack is empty.
     fn refresh_undo_menu(&self) {
-        let label = |verb: &str, entry: Option<&UndoEntry>| match entry {
-            Some(e) => format!("{verb} {}", e.what),
+        // The composer's history is the one on offer whenever it has one.
+        let composing = self.menu_compose().is_some();
+        let (undo_what, redo_what) = if composing {
+            (self.compose_history.0.clone(), self.compose_history.1.clone())
+        } else {
+            (
+                self.undo_stack.last().map(|e| e.what.clone()),
+                self.redo_stack.last().map(|e| e.what.clone()),
+            )
+        };
+        let label = |verb: &str, what: Option<&String>| match what {
+            Some(w) => format!("{verb} {w}"),
             None => verb.to_string(),
         };
         // The shortcut is shown with the "accel" attribute rather than a real
@@ -9768,20 +9902,33 @@ impl AppModel {
         };
         self.undo_menu.remove_all();
         self.undo_menu.append_item(&item(
-            label(&i18n("Undo"), self.undo_stack.last()),
+            label(&i18n("Undo"), undo_what.as_ref()),
             "win.undo",
             "<Control>z",
         ));
         self.undo_menu.append_item(&item(
-            label(&i18n("Redo"), self.redo_stack.last()),
+            label(&i18n("Redo"), redo_what.as_ref()),
             "win.redo",
             "<Control><Shift>z",
         ));
+        if std::env::var_os("VIREO_SHOWCASE_COMPOSE_UNDO").is_some() {
+            let mut chain = Vec::new();
+            let mut node = gtk::prelude::GtkWindowExt::focus(&self.window);
+            while let Some(w) = node {
+                chain.push(format!("{}", w.type_()));
+                node = w.parent();
+            }
+            tracing::info!(
+                target: "vireo::compose::undo",
+                "menu: composing={composing} undo={undo_what:?} redo={redo_what:?} focus=[{}]",
+                chain.join(" < ")
+            );
+        }
         if let Some(a) = &self.undo_action {
-            a.set_enabled(!self.undo_stack.is_empty());
+            a.set_enabled(undo_what.is_some());
         }
         if let Some(a) = &self.redo_action {
-            a.set_enabled(!self.redo_stack.is_empty());
+            a.set_enabled(redo_what.is_some());
         }
     }
 
@@ -11801,6 +11948,9 @@ impl AppModel {
                 ComposeOutput::DeleteDraft { id, origin } => AppMsg::DeleteDraft { id, origin },
                 ComposeOutput::ToggleWindow(id) => AppMsg::ComposeToggleWindow(id),
                 ComposeOutput::Close(id) => AppMsg::ComposeClosed(id),
+                ComposeOutput::History { id, undo, redo } => {
+                    AppMsg::ComposeHistory { id, undo, redo }
+                }
             })
     }
 
@@ -12248,7 +12398,11 @@ impl AppModel {
         // In-flow (not overlay) slot: no click-swallowing to disarm. Settle
         // any running slide, then remember the height the user dragged the
         // panel to before it goes.
-        if let Some(prev) = self.split_close_anim.borrow_mut().take() {
+        // Taken out of the cell before it is skipped: `if let` holds the
+        // temporary `borrow_mut` guard alive for its whole body, and
+        // skipping emits `done`, whose handler reaches for this same cell.
+        let prev_anim = self.split_close_anim.borrow_mut().take();
+        if let Some(prev) = prev_anim {
             prev.skip();
         }
         if self.reader_split_top.is_visible() && self.reader_split_top.child().is_some() {
@@ -12307,7 +12461,11 @@ impl AppModel {
         let Some(wrap) = slot.child() else { return };
         // Settle any running slide first, so the height saved below is the
         // real one and not a mid-animation reading.
-        if let Some(prev) = self.split_close_anim.borrow_mut().take() {
+        // Taken out of the cell before it is skipped: `if let` holds the
+        // temporary `borrow_mut` guard alive for its whole body, and
+        // skipping emits `done`, whose handler reaches for this same cell.
+        let prev_anim = self.split_close_anim.borrow_mut().take();
+        if let Some(prev) = prev_anim {
             prev.skip();
         }
         if slot.is_visible() {
@@ -12509,6 +12667,10 @@ impl AppModel {
         }
         controller.emit(ComposeInput::FocusEditor);
         self.reader_compose = Some(ReaderCompose { id, controller, window: None });
+        // A fresh composer has nothing to take back yet; the last one's
+        // labels must not carry over into its menu.
+        self.compose_history = (None, None);
+        self.refresh_undo_menu();
     }
 
     /// Detach the reader's inline composer from the reader slot. If it was popped
@@ -12518,6 +12680,8 @@ impl AppModel {
         let Some(r) = self.reader_compose.take() else {
             return;
         };
+        self.compose_history = (None, None);
+        self.refresh_undo_menu();
         match r.window {
             Some(window) => {
                 self.composers.push(ComposeHost { id: r.id, controller: r.controller, window });
@@ -16060,7 +16224,7 @@ const SHORTCUT_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("c", i18n_noop("Compose")),
             ("Esc", i18n_noop("Back out of a reply and return to the list")),
-            ("Ctrl+Z", i18n_noop("Undo the last action (also in the main menu)")),
+            ("Ctrl+Z", i18n_noop("Undo the last action, or the last edit while you are writing")),
             ("Ctrl+Shift+Z", i18n_noop("Redo it (Ctrl+Y does the same)")),
             ("Ctrl+P", i18n_noop("Print the message you are reading")),
             ("Ctrl+Shift+P", i18n_noop("Preview it as a PDF first")),

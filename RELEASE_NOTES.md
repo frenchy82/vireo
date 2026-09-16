@@ -2,9 +2,21 @@
 
 Vireo is a clean, fast, GNOME-native email client built with Rust and libadwaita for Wayland desktops. Privacy-first: no telemetry, remote content blocked by default, and credentials kept in the system keyring.
 
-## What's new in 1.32.1-beta.1
+## What's new in 1.32.2-beta.1
 
-Catch-up with stable 1.32.0: everything below, under the beta app ID.
+Catch-up release: the beta channel is level with stable 1.32.1. Everything below applies.
+
+## What's new in 1.32.1
+
+**Undo and redo reach the composer** (extends #200). Ctrl+Z did nothing while a message was being written — the key never reached the body's own history at all. It does now, over both the things that change a message: the typing, formatting, pastes and dropped pictures in the body, and the attachments beside it, in one order. Ctrl+Shift+Z and Ctrl+Y put things back. The address and subject rows keep their own undo, which is the right one for a single line. It works in the inline reply and in a compose window, in all four composing formats, and the body's right-click menu leads with Undo and Redo.
+
+**Typing is undone a step at a time.** A run of typing used to come back all at once however long it was, and Backspace was not something Ctrl+Z could take back on its own — rubbing out two letters after a word undid the word with them. Deleting is now its own step, and a pause of more than five seconds starts a new one, so a paragraph written, thought about and carried on comes back in the pieces it was written in.
+
+**The main menu says what it will undo.** Undo and Redo name what they would take back — "Undo Typing" while a reply is being written, "Undo Archive" while reading — and grey out when there is nothing.
+
+**The inline reply no longer closes the app as it opens.** A panic while the reply panel slid into place could take the whole window with it.
+
+**French translation complete** (PR #204 by [@frenchy82](https://github.com/frenchy82)), covering the composing formats, undo and redo, per-message remote content, the sent-copy rows and the portal link errors.
 
 ## What's new in 1.32.0
 
