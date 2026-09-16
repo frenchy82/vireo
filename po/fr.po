@@ -6,7 +6,7 @@ msgstr ""
 "Project-Id-Version: vireo\n"
 "Report-Msgid-Bugs-To: https://github.com/hyprlab/vireo/issues\n"
 "POT-Creation-Date: \n"
-"PO-Revision-Date: 2026-09-15 17:42+0200\n"
+"PO-Revision-Date: 2026-09-16 13:24+0200\n"
 "Last-Translator: cartes <cartes341@free.fr>\n"
 "Language-Team: French\n"
 "Language: fr\n"
@@ -575,63 +575,57 @@ msgstr "© 2026 Hyprlab"
 msgid "No {v1} folder available for some messages"
 msgstr "Aucun dossier {v1} disponible pour certains messages"
 
-#, fuzzy
 msgid "No filters to apply here yet"
-msgstr "Aucun message auquel répondre pour l'instant."
+msgstr "Aucun filtre à appliquer ici pour l'instant"
 
-#, fuzzy
 msgid "Applying Filters"
-msgstr "Ajouter un filtre"
+msgstr "Application de filtres"
 
-#, fuzzy
 msgid "Run in Background"
-msgstr "Maintenir l'exécution en arrière-plan"
+msgstr "Exécuter en arrière-plan"
 
-#, fuzzy
 msgid "Looked at {n} message so far"
 msgid_plural "Looked at {n} messages so far"
-msgstr[0] "Envoyer de nouveaux messages depuis"
-msgstr[1] "Envoyer de nouveaux messages depuis"
+msgstr[0] "{n} message consulté jusqu'à présent"
+msgstr[1] "{n} messages consultés jusqu'à présent"
 
-#, fuzzy
 msgid "Tagged {n} message"
 msgid_plural "Tagged {n} messages"
-msgstr[0] "{n} message"
-msgstr[1] "{n} messages"
+msgstr[0] "{n} message marqué"
+msgstr[1] "{n} messages marqués"
 
-#, fuzzy
 msgid "Filed {n} message away"
 msgid_plural "Filed {n} messages away"
-msgstr[0] "Rechercher dans le message"
-msgstr[1] "Rechercher dans le message"
+msgstr[0] "Classé {n} message"
+msgstr[1] "Classé {n} messages"
 
-#, fuzzy
 msgid "Folder {done} of {total}"
-msgstr "{cur} sur {total}"
+msgstr "Dossier {done} sur {total}"
 
 msgid "Filters looked at {n} message, and it matched nothing"
 msgid_plural "Filters looked at {n} messages, and none of them matched"
 msgstr[0] ""
+"Les filtres ont examiné {n} message, mais aucun résultat n'a été trouvé."
 msgstr[1] ""
+"Les filtres ont examiné {n} messages, mais aucun résultat n'a été trouvé."
 
 msgid "Filters tagged {tagged} of {n} message"
 msgid_plural "Filters tagged {tagged} of {n} messages"
-msgstr[0] ""
-msgstr[1] ""
+msgstr[0] "Filtres marqués {tagged} sur {n} message"
+msgstr[1] "Filtres marqués {tagged} sur {n} messages"
 
 msgid "Filters filed {filed} of {n} message away"
 msgid_plural "Filters filed {filed} of {n} messages away"
-msgstr[0] ""
-msgstr[1] ""
+msgstr[0] "Filtres classés {classés} sur {n} message"
+msgstr[1] "Filtres classés {classés} sur {n} messages"
 
 msgid "Filters tagged {tagged} and filed {filed} of {n} message"
 msgid_plural "Filters tagged {tagged} and filed {filed} of {n} messages"
-msgstr[0] ""
-msgstr[1] ""
+msgstr[0] "Filtres marqués {tagged} et classés {filed} de {n} message"
+msgstr[1] "Filtres marqués {tagged} et classés {filed} de {n} messages"
 
-#, fuzzy
 msgid "Filters Applied"
-msgstr "Emplacement des filtres"
+msgstr "Filtres appliqués"
 
 msgid "Move around"
 msgstr "Se déplacer"
@@ -1014,27 +1008,28 @@ msgstr "Filtres de recherche"
 msgid "Filters"
 msgstr "Filtres"
 
-#, fuzzy
 msgid ""
 "File incoming mail into folders or tag it automatically, by sender, subject "
 "or recipients. Applied to each account's Inbox as Vireo syncs it, or to the "
 "mail already there with Apply Now; a folder's right-click menu runs them "
 "over that one folder."
 msgstr ""
-"Classez les e-mails entrants dans des dossiers ou attribuez-leur "
-"automatiquement des balises, en fonction de l'expéditeur, de l'objet ou des "
-"destinataires. Cette fonctionnalité s'applique à la boîte de réception de "
-"chaque compte au fur et à mesure que Vireo la synchronise."
+"Classez le courrier entrant dans des dossiers ou marquez-le automatiquement, "
+"par expéditeur, sujet ou destinataire. Appliqué à la boîte de réception de "
+"chaque compte lorsque Vireo la synchronise, ou au courrier déjà présent avec "
+"Appliquer maintenant ; le menu contextuel d'un dossier les exécute sur ce "
+"dossier."
 
 msgid "Add Filter…"
 msgstr "Ajouter un filtre…"
 
 msgid "Run every rule over the mail already in your inboxes"
 msgstr ""
+"Exécutez toutes les règles sur le courrier déjà présent dans vos boîtes de "
+"réception"
 
-#, fuzzy
 msgid "Apply Now"
-msgstr "Appliquer"
+msgstr "Appliquer maintenant"
 
 msgid "Search senders"
 msgstr "Rechercher les expéditeurs"
@@ -1506,9 +1501,8 @@ msgstr ", marqué {tag}"
 msgid "Remove filter"
 msgstr "Supprimer le filtre"
 
-#, fuzzy
 msgid "Applying…"
-msgstr "Téléversement…"
+msgstr "Appliquer…"
 
 msgid "Searching…"
 msgstr "Recherche…"
@@ -1583,9 +1577,8 @@ msgstr "Modifier le filtre"
 msgid "Add Filter"
 msgstr "Ajouter un filtre"
 
-#, fuzzy
 msgid "Name (optional)"
-msgstr "Pseudo (facultatif)"
+msgstr "Nom (facultatif)"
 
 msgid "Remove condition"
 msgstr "Supprimer la condition"
@@ -4051,9 +4044,8 @@ msgstr "Afficher chaque tag"
 msgid "Long-press to expand or collapse"
 msgstr "Appui long pour déplier ou replier"
 
-#, fuzzy
 msgid "Apply Filters"
-msgstr "Filtres"
+msgstr "Appliquer des filtres"
 
 msgid "Edit Filter…"
 msgstr "Modifier le filtre…"
