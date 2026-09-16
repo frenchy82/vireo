@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.32.3-beta.1" date="2026-09-16" type="development">
+      <description>
+        <p>Catch-up with stable 1.32.2: Russian shows its translation where around sixty-six strings had been skipped and left in English, Portuguese is complete in both the European and Brazilian variants, and the About page's links are tidied.</p>
+      </description>
+    </release>
     <release version="1.32.2-beta.1" date="2026-09-16" type="development">
       <description>
         <p>Catch-up with stable 1.32.1: undo and redo reach the composer, typing is undone a step at a time, and the inline reply no longer aborts the app as it opens.</p>
