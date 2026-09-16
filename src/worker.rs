@@ -889,7 +889,8 @@ async fn run_imap(
             if !outbox_flushed {
                 outbox_flushed = true;
                 flush_outbox(
-                    cache.as_ref(), account_id, &account, None, &mut session, &emit, false,
+                    cache.as_ref(), account_id, &account, None, &mut session, &mut use_envelope,
+                    &emit, false,
                 )
                 .await;
             }
@@ -1958,10 +1959,9 @@ async fn run_imap(
                         connectivity: false,
                     });
                 } else if uids.is_empty() {
-                    emit(WorkerEvent::Error {
-                        text: i18n("Undo: the messages are no longer where that move put them."),
-                        connectivity: false,
-                    });
+                    // Not an error the reader needs interrupting for: the
+                    // step is simply spent (#200).
+                    tracing::info!("undo: the messages are no longer where that move put them");
                 } else {
                     // Reload the restored folder so the messages reappear in
                     // the list (the app can't restore them optimistically —
@@ -1981,11 +1981,9 @@ async fn run_imap(
                             message_ids: message_ids.clone(),
                         });
                     }
-                    emit(WorkerEvent::Notice({
-                        let n = uids.len() as u32;
-                        ni18n_f("Move undone — message restored", "Move undone — {n} messages restored", n, &[("n", &n.to_string())])
-                    }));
                 }
+                // Undoing something is not news: the messages reappearing in
+                // the list is the whole report (#200).
                 // Always signal completion — the app spins the refresh
                 // indicator while the undo's server work is in flight.
                 emit(WorkerEvent::BulkComplete);
@@ -2130,6 +2128,12 @@ async fn run_imap(
                                     text: i18n_f("Message sent, but saving to Sent failed: {e}", &[("e", &(e).to_string())]),
                                     connectivity: false,
                                 });
+                            } else {
+                                index_sent_copy(
+                                    account_id, &mut session, &account, &path,
+                                    &mut use_envelope, cache.as_ref(), &emit,
+                                )
+                                .await;
                             }
                         }
                         // If sending an edited draft (from this account), remove the
@@ -2215,6 +2219,7 @@ async fn run_imap(
                     &account,
                     id,
                     &mut session,
+                    &mut use_envelope,
                     &emit,
                     true,
                 )
@@ -3407,12 +3412,61 @@ fn queue_outbox_message(
 /// one that fails again keeps its place with the new reason recorded. `loud`
 /// reports failures to the UI — background sweeps stay quiet, since the user did
 /// not ask for anything and already knows the message is waiting.
+/// Where a sent copy belongs *now*, rather than where it was headed when the
+/// message was queued (#199).
+///
+/// A message can sit in the Outbox for days — Send Later puts it there on
+/// purpose — and the account's choice can move on while it waits. Reading the
+/// stored path back meant a message scheduled last week landed in the folder
+/// that was configured last week. The queued path stays as the fallback for
+/// when the folder list can't be read, so a send never loses its copy over
+/// this.
+fn current_sent_copy_path(
+    account: &AccountConfig,
+    account_id: u32,
+    cache: Option<&Cache>,
+    queued: Option<&str>,
+) -> Option<String> {
+    let folders = cache.map(|c| c.load_folders(account_id)).unwrap_or_default();
+    pick_queued_sent_copy(account, &folders, queued)
+}
+
+/// [`current_sent_copy_path`] once the folder list is in hand.
+fn pick_queued_sent_copy(
+    account: &AccountConfig,
+    folders: &[Folder],
+    queued: Option<&str>,
+) -> Option<String> {
+    // Set since the message was queued (or all along): the server keeps its
+    // own copy and ours would be a duplicate.
+    if account.server_saves_sent {
+        return None;
+    }
+    if folders.is_empty() {
+        return queued.map(str::to_string);
+    }
+    account
+        .sent_copy_path
+        .as_deref()
+        // Renamed or removed since it was chosen: fall through to Sent rather
+        // than appending into a name the server would have to recreate.
+        .filter(|p| folders.iter().any(|f| f.path == *p))
+        .map(str::to_string)
+        .or_else(|| {
+            folders
+                .iter()
+                .find(|f| f.kind == FolderKind::Sent)
+                .map(|f| f.path.clone())
+        })
+}
+
 async fn flush_outbox(
     cache: Option<&Cache>,
     account_id: u32,
     account: &AccountConfig,
     id: Option<u32>,
     session: &mut Option<ImapSession>,
+    use_envelope: &mut bool,
     emit: &impl Fn(WorkerEvent),
     loud: bool,
 ) {
@@ -3452,9 +3506,20 @@ async fn flush_outbox(
                 sent_any = true;
                 sent += 1;
                 cache.delete_outbox(item.id);
-                if let (Some(path), Some(sess)) = (item.sent_path.as_deref(), session.as_mut()) {
+                let dest = current_sent_copy_path(
+                    account,
+                    account_id,
+                    Some(cache),
+                    item.sent_path.as_deref(),
+                );
+                if let (Some(path), Some(sess)) = (dest.as_deref(), session.as_mut()) {
                     if let Err(e) = append_to_sent(sess, path, &item.raw).await {
-                        tracing::warn!("outbox: sent, but saving to Sent failed: {e}");
+                        tracing::warn!("outbox: sent, but saving the copy failed: {e}");
+                    } else {
+                        index_sent_copy(
+                            account_id, session, account, path, use_envelope, Some(cache), emit,
+                        )
+                        .await;
                     }
                 }
             }
@@ -4236,6 +4301,37 @@ async fn append_to_sent(
 ) -> Result<(), async_imap::error::Error> {
     // Mark the saved copy as already read.
     append_msg(session, path, Some("(\\Seen)"), raw).await
+}
+
+/// The copy of a message just sent was APPENDed to `path`: list that folder
+/// again so the copy is in the cache now. A conversation is assembled from
+/// the cache (`related_from_cache`), so until the copy is indexed the reply
+/// cannot join the thread it answers, and the next visit to the Sent folder
+/// was the only thing that indexed it (#199). The folder's listing goes out
+/// too, so a list showing that folder (copies filed into the Inbox) is
+/// current as well.
+async fn index_sent_copy(
+    account_id: u32,
+    session: &mut Option<ImapSession>,
+    account: &AccountConfig,
+    path: &str,
+    use_envelope: &mut bool,
+    cache: Option<&Cache>,
+    emit: &impl Fn(WorkerEvent),
+) {
+    let Some(c) = cache else { return };
+    let Some(folder_id) = c.load_folders(account_id).iter().find(|f| f.path == path).map(|f| f.id)
+    else {
+        return;
+    };
+    match load_messages_retry(account_id, session, account, folder_id, path, use_envelope, cache).await
+    {
+        Ok(messages) => {
+            c.upsert_messages(account_id, path, &messages);
+            emit(WorkerEvent::Messages { folder_id, messages });
+        }
+        Err(e) => tracing::warn!("could not list {path} after saving the sent copy: {e}"),
+    }
 }
 
 /// APPEND a draft to the Drafts folder (flagged `\Draft \Seen`), creating the
@@ -5831,10 +5927,18 @@ fn preview_of(fetch: &Fetch) -> String {
         return String::new();
     }
     let charset = ctype.as_deref().and_then(charset_param);
-    let p = fetch
-        .section(&SectionPath::Part(vec![1], None))
-        .map(|bytes| preview_from_part(bytes, charset.as_deref()))
-        .unwrap_or_default();
+    let encoding = section_encoding(fetch);
+    let bytes = fetch.section(&SectionPath::Part(vec![1], None)).unwrap_or_default();
+    let p = preview_from_part(bytes, charset.as_deref(), encoding.as_deref());
+    // A preheader is built to defeat exactly this read: a marketing mail can
+    // spend thousands of bytes on invisible padding before its first real
+    // sentence, the way an HTML part spends them on <head>. When the slice ran
+    // to its limit and still yielded almost nothing to show, report nothing
+    // rather than a scrap, and let the deeper repair read — bounded, and rare
+    // — go and find the text.
+    if bytes.len() >= PREVIEW_FETCH_BYTES && p.chars().count() < PREVIEW_MIN_CHARS {
+        return String::new();
+    }
     // GTK labels abort on interior NULs, and decoded message text can carry
     // them.
     if p.contains('\0') { p.replace('\0', " ") } else { p }
@@ -5855,6 +5959,15 @@ fn section_charset(fetch: &Fetch) -> Option<String> {
     section_content_type(fetch).as_deref().and_then(charset_param)
 }
 
+/// The transfer encoding section 1 declares, from the same `BODY[1.MIME]`
+/// block the charset comes from. Reading it beats guessing: a part can be
+/// quoted-printable and still be spelled entirely in base64's alphabet.
+fn section_encoding(fetch: &Fetch) -> Option<String> {
+    use async_imap::imap_proto::types::{MessageSection, SectionPath};
+    let mime = fetch.section(&SectionPath::Part(vec![1], Some(MessageSection::Mime)))?;
+    mime_header(&String::from_utf8_lossy(mime), "content-transfer-encoding")
+}
+
 /// How much of a message's first body part to fetch for the list preview. Enough
 /// for a couple of lines of text after decoding, small enough that syncing a
 /// large mailbox doesn't turn into downloading it.
@@ -5862,6 +5975,11 @@ const PREVIEW_FETCH_BYTES: usize = 2048;
 
 /// Longest preview stored per message.
 const PREVIEW_CHARS: usize = 240;
+
+/// Below this many characters, a preview read from a full slice has not found
+/// the message's text yet — it is still in the preheader padding or the
+/// `<head>` — and the repair read is worth the round trip.
+const PREVIEW_MIN_CHARS: usize = 30;
 
 /// The bigger slice for the preview *repair* fetch (the BODY[TEXT] retry for
 /// messages whose summary fetch produced no preview). An HTML-only message can
@@ -5957,10 +6075,14 @@ async fn retry_missing_previews(session: &mut ImapSession, messages: &mut [Messa
         Ok(fetches) => {
             use async_imap::imap_proto::types::{MessageSection, SectionPath};
             for f in &fetches {
+                // For a multipart, `text_in_multipart` reads each part's own
+                // headers and these go unused; for a single-part message,
+                // section 1 is the body and they describe it exactly.
                 let charset = section_charset(f);
+                let encoding = section_encoding(f);
                 let p = f
                     .section(&SectionPath::Full(MessageSection::Text))
-                    .map(|b| preview_from_part(b, charset.as_deref()))
+                    .map(|b| preview_from_part(b, charset.as_deref(), encoding.as_deref()))
                     .unwrap_or_default()
                     .replace('\0', " ");
                 if p.is_empty() {
@@ -5984,7 +6106,7 @@ async fn retry_missing_previews(session: &mut ImapSession, messages: &mut [Messa
 /// would show gibberish in the list, which is worse than showing nothing. The
 /// charset is the one the part's MIME headers declared, when the caller has
 /// them.
-fn preview_from_part(bytes: &[u8], charset: Option<&str>) -> String {
+fn preview_from_part(bytes: &[u8], charset: Option<&str>, encoding: Option<&str>) -> String {
     if bytes.is_empty() {
         return String::new();
     }
@@ -5993,6 +6115,16 @@ fn preview_from_part(bytes: &[u8], charset: Option<&str>) -> String {
     // headers instead of leaving them to be guessed.
     if let Some(inner) = text_in_multipart(bytes, 0) {
         return finish_preview(inner);
+    }
+    // What the part says it is, when it says: the headers ride along with the
+    // preview fetch, and a declaration beats any amount of inspection.
+    let declared = encoding.map(|e| e.trim().to_ascii_lowercase());
+    if let Some(e) = declared.as_deref().filter(|e| {
+        e.starts_with("base64")
+            || e.starts_with("quoted-printable")
+            || matches!(*e, "7bit" | "8bit" | "binary")
+    }) {
+        return finish_preview(decode_mime_body(bytes, e, charset));
     }
     let decoded = if looks_like_base64(bytes) {
         decode_base64_prefix(bytes)
@@ -6279,8 +6411,17 @@ fn decode_mime_body(body: &[u8], encoding: &str, charset: Option<&str>) -> Strin
 
 /// Whether a chunk looks like base64 rather than text: base64's alphabet only,
 /// and long enough that a short plain word can't be mistaken for it.
+///
+/// An `=` is padding, and padding only ever closes a base64 stream — so one
+/// anywhere else says this is not base64 however well the rest fits. That is
+/// what quoted-printable looks like from here: `=E2=80=87=CD=8F` repeated is
+/// nothing but letters, digits and `=`, and reading a marketing preheader's
+/// worth of it as base64 turned a Cloudflare newsletter's preview into a row
+/// of replacement characters. A truncated fetch of real base64 simply has no
+/// padding in it at all.
 fn looks_like_base64(bytes: &[u8]) -> bool {
     let mut significant = 0;
+    let mut padding = 0;
     for &c in bytes {
         if c.is_ascii_whitespace() {
             continue;
@@ -6288,14 +6429,31 @@ fn looks_like_base64(bytes: &[u8]) -> bool {
         if !(c.is_ascii_alphanumeric() || c == b'+' || c == b'/' || c == b'=') {
             return false;
         }
+        if c == b'=' {
+            padding += 1;
+        } else if padding > 0 {
+            // Alphabet after padding: the `=` was not closing anything.
+            return false;
+        }
         significant += 1;
     }
-    significant >= 40
+    significant >= 40 && padding <= 2
 }
 
 /// Decode quoted-printable to the bytes it stands for, leaving anything
 /// malformed as written (a truncated fetch can end mid-escape).
 fn decode_quoted_printable(src: &[u8]) -> Vec<u8> {
+    // The fetch behind a preview is a slice of a part, so it ends wherever the
+    // byte count ran out — routinely in the middle of an escape. Left alone
+    // that stub reaches the reader as literal text ("… =E"), so drop it: a
+    // trailing "=" (which in quoted-printable is a soft line break anyway) and
+    // a trailing "=" plus one hex digit. Anything else is malformed rather
+    // than cut short, and is left as written.
+    let src = match src.len().checked_sub(2).map(|at| &src[at..]) {
+        Some(&[b'=', h]) if h.is_ascii_hexdigit() => &src[..src.len() - 2],
+        _ if src.last() == Some(&b'=') => &src[..src.len() - 1],
+        _ => src,
+    };
     let mut buf = Vec::with_capacity(src.len());
     let mut i = 0;
     while i < src.len() {
@@ -7815,6 +7973,7 @@ async fn run_pop3(
                     &account,
                     id,
                     &mut no_session,
+                    &mut true,
                     &emit,
                     true,
                 )
@@ -9487,11 +9646,10 @@ async fn run_graph(
                 match graph_undo_move(&account, account_id, &mut state, &path, &dest, &message_ids, cache.as_ref())
                     .await
                 {
-                    Ok(0) => emit(WorkerEvent::Error {
-                        text: i18n("Undo: the messages are no longer where that move put them."),
-                        connectivity: false,
-                    }),
-                    Ok(n) => {
+                    Ok(0) => {
+                        tracing::info!("undo: the messages are no longer where that move put them");
+                    }
+                    Ok(_) => {
                         // Reload the restored folder so the messages reappear.
                         if let Some(token) = graph_token(&account, &emit).await {
                             if let Ok(messages) = graph_load_folder(
@@ -9515,10 +9673,6 @@ async fn run_graph(
                                 });
                             }
                         }
-                        emit(WorkerEvent::Notice({
-                            let n = n as u32;
-                            ni18n_f("Move undone — message restored", "Move undone — {n} messages restored", n, &[("n", &n.to_string())])
-                        }));
                     }
                     Err(e) => emit(WorkerEvent::Error {
                         text: i18n_f("Undo failed: {e}", &[("e", &(e).to_string())]),
@@ -9758,6 +9912,24 @@ async fn run_graph(
                         if let (Some(queued), Some(c)) = (message.outbox_origin, cache.as_ref()) {
                             c.delete_outbox(queued);
                             emit_outbox(cache.as_ref(), account_id, &emit);
+                        }
+                        // The server files the copy in Sent Items itself; list
+                        // that folder now so the copy is in the cache and can
+                        // join the conversation it answers (#199).
+                        let sent = cache
+                            .as_ref()
+                            .and_then(|c| c.load_folders(account_id).into_iter().find(|f| f.kind == FolderKind::Sent));
+                        if let (Some(c), Some(sent)) = (cache.as_ref(), sent) {
+                            if let Some(token) = graph_token(&account, &emit).await {
+                                if let Ok(messages) = graph_load_folder(
+                                    &token, account_id, sent.id, &sent.path, cache.as_ref(), &mut state,
+                                )
+                                .await
+                                {
+                                    c.upsert_messages(account_id, &sent.path, &messages);
+                                    emit(WorkerEvent::Messages { folder_id: sent.id, messages });
+                                }
+                            }
                         }
                         emit(WorkerEvent::Sent);
                     }
@@ -10240,6 +10412,8 @@ mod tests {
     fn sample_account() -> AccountConfig {
         AccountConfig {
             folder_roles: Default::default(),
+            sent_copy_path: None,
+            server_saves_sent: false,
             empty_junk_days: 0,
             empty_trash_days: 0,
             pgp_key: None,
@@ -10582,7 +10756,7 @@ mod tests {
             "We have a quick update on how you connect your AI agent to Cloudways.\r\n",
             "--751d69df691580924654d5924db69f0ae9507550b8b16fd8b2d83daf1d3f--\r\n",
         );
-        let preview = preview_from_part(part.as_bytes(), None);
+        let preview = preview_from_part(part.as_bytes(), None, None);
         assert!(preview.starts_with("Hi Camp crystal clear,"), "{preview}");
         assert!(!preview.contains("utm_campaign"), "{preview}");
     }
@@ -10590,18 +10764,18 @@ mod tests {
     #[test]
     fn preview_drops_rendered_links_but_keeps_their_text() {
         assert_eq!(
-            preview_from_part(b"Generate your Access Token ( https://example.com/api?a=1 )Got questions?", None),
+            preview_from_part(b"Generate your Access Token ( https://example.com/api?a=1 )Got questions?", None, None),
             "Generate your Access Token Got questions?"
         );
         // Brackets that are not a link are left exactly as written.
         assert_eq!(
-            preview_from_part(b"Lunch (the usual place) at noon", None),
+            preview_from_part(b"Lunch (the usual place) at noon", None, None),
             "Lunch (the usual place) at noon"
         );
         // A message that is nothing but a link still shows it: better than a
         // blank row.
         assert_eq!(
-            preview_from_part(b"https://example.com/only", None),
+            preview_from_part(b"https://example.com/only", None, None),
             "https://example.com/only"
         );
     }
@@ -10628,11 +10802,11 @@ mod tests {
             "--b2=_cipkIEq1WkCIMIbpGDVyYc52x8YElrqa8uRU7GKJ8--\r\n",
         );
         assert_eq!(
-            preview_from_part(part.as_bytes(), None),
+            preview_from_part(part.as_bytes(), None, None),
             "Hello, I recently installed Vireo after reading about it on the omg!ubuntu website."
         );
         // Nothing of the MIME machinery reaches the list.
-        assert!(!preview_from_part(part.as_bytes(), None).contains("--b2="));
+        assert!(!preview_from_part(part.as_bytes(), None, None).contains("--b2="));
     }
 
     #[test]
@@ -10644,7 +10818,7 @@ mod tests {
             "<div>Only markup here</div>\r\n",
             "--x--\r\n",
         );
-        assert_eq!(preview_from_part(html_only.as_bytes(), None), "Only markup here");
+        assert_eq!(preview_from_part(html_only.as_bytes(), None, None), "Only markup here");
         // Two levels of nesting — mixed(alternative(...)) — are followed.
         let nested = concat!(
             "--outer\r\n",
@@ -10657,17 +10831,17 @@ mod tests {
             "--inner--\r\n",
             "--outer--\r\n",
         );
-        assert_eq!(preview_from_part(nested.as_bytes(), None), "Buried but readable");
+        assert_eq!(preview_from_part(nested.as_bytes(), None, None), "Buried but readable");
     }
 
     #[test]
     fn a_message_that_merely_starts_with_dashes_is_not_a_multipart() {
         // A signature separator, or a line of dashes, must still read as text.
         assert_eq!(
-            preview_from_part(b"-- \r\nRegards,\r\nSteve", None),
+            preview_from_part(b"-- \r\nRegards,\r\nSteve", None, None),
             "-- Regards, Steve"
         );
-        assert_eq!(preview_from_part(b"--\r\nsigned off", None), "-- signed off");
+        assert_eq!(preview_from_part(b"--\r\nsigned off", None, None), "-- signed off");
     }
 
     /// A PGP/MIME message's first part is the "Version: 1" stub, and an
@@ -10675,27 +10849,147 @@ mod tests {
     #[test]
     fn preview_names_an_encrypted_message() {
         let marker = crate::models::ENCRYPTED_PREVIEW;
-        assert_eq!(preview_from_part(b"Version: 1\r\n", None), marker);
-        assert_eq!(preview_from_part(b"version: 1", None), marker);
+        assert_eq!(preview_from_part(b"Version: 1\r\n", None, None), marker);
+        assert_eq!(preview_from_part(b"version: 1", None, None), marker);
         assert_eq!(
-            preview_from_part(b"-----BEGIN PGP MESSAGE-----\r\n\r\nhQEMA3\r\n-----END PGP MESSAGE-----\r\n", None),
+            preview_from_part(b"-----BEGIN PGP MESSAGE-----\r\n\r\nhQEMA3\r\n-----END PGP MESSAGE-----\r\n", None, None),
             marker
         );
         assert!(crate::models::preview_is_encrypted(marker));
         assert_eq!(crate::models::preview_display(marker), "Encrypted message");
         assert_eq!(crate::models::preview_display("Hello"), "Hello");
         assert_eq!(pgp_preview("Version 1 of the plan is attached"), None);
-        assert_eq!(preview_from_part(b"Hello there", None), "Hello there");
+        assert_eq!(preview_from_part(b"Hello there", None, None), "Hello there");
     }
 
     #[test]
     fn preview_reads_plain_text() {
         let text = b"Here are the figures we discussed.\r\n\r\nLet me know if the Q3 line looks wrong.\r\n";
         assert_eq!(
-            preview_from_part(text, None),
+            preview_from_part(text, None, None),
             "Here are the figures we discussed. Let me know if the Q3 line looks wrong."
         );
-        assert_eq!(preview_from_part(b"", None), "");
+        assert_eq!(preview_from_part(b"", None, None), "");
+    }
+
+    #[test]
+    fn a_queued_message_takes_the_sent_copy_folder_it_finds_on_the_way_out() {
+        use crate::models::{Folder, FolderKind};
+        let folder = |id: u32, path: &str, kind: FolderKind| Folder {
+            id,
+            account_id: 1,
+            name: path.to_string(),
+            path: path.to_string(),
+            kind,
+            unread: 0,
+        };
+        let folders = vec![
+            folder(1, "INBOX", FolderKind::Inbox),
+            folder(2, "Sent", FolderKind::Sent),
+        ];
+        let account = |chosen: Option<&str>| AccountConfig {
+            sent_copy_path: chosen.map(str::to_string),
+            ..sample_account()
+        };
+        // The account says Inbox now; the message was queued for Sent. It goes
+        // where the account says today, not where it said last week.
+        assert_eq!(
+            super::pick_queued_sent_copy(&account(Some("INBOX")), &folders, Some("Sent")).as_deref(),
+            Some("INBOX"),
+        );
+        // Turned back off since queuing: back to the Sent folder.
+        assert_eq!(
+            super::pick_queued_sent_copy(&account(None), &folders, Some("INBOX")).as_deref(),
+            Some("Sent"),
+        );
+        // Chosen folder gone from the server: Sent rather than a dead name.
+        assert_eq!(
+            super::pick_queued_sent_copy(&account(Some("Gone")), &folders, Some("Gone")).as_deref(),
+            Some("Sent"),
+        );
+        // No folder list to read (offline, no cache): the queued path stands,
+        // so a send never loses its copy over this.
+        assert_eq!(
+            super::pick_queued_sent_copy(&account(Some("INBOX")), &[], Some("Sent")).as_deref(),
+            Some("Sent"),
+        );
+        // The server files its own: nothing of ours goes anywhere, whatever
+        // was queued and whatever folder was picked.
+        let server_saves = AccountConfig {
+            sent_copy_path: Some("INBOX".into()),
+            server_saves_sent: true,
+            ..sample_account()
+        };
+        assert_eq!(super::pick_queued_sent_copy(&server_saves, &folders, Some("Sent")), None);
+        assert_eq!(super::pick_queued_sent_copy(&server_saves, &[], Some("Sent")), None);
+    }
+
+    #[test]
+    fn a_quoted_printable_preheader_is_not_mistaken_for_base64() {
+        // Cloudflare's newsletter opens its text/plain part with a long run of
+        // invisible padding — U+2007 U+034F over and over — so that the preview
+        // a mail client shows is the sender's chosen line rather than whatever
+        // the message starts with. Quoted-printable, every byte of it spelled
+        // with letters, digits and `=`: base64's alphabet exactly. Guessing
+        // read it as base64 and produced a row of replacement characters.
+        let mut part = b"AI Bot Controls ".to_vec();
+        for _ in 0..40 {
+            part.extend_from_slice(b"=E2=80=87=CD=8F ");
+        }
+        part.extend_from_slice(b"Updates to managing AI crawlers on your account");
+
+        assert!(!super::looks_like_base64(&part), "padding runs are not base64");
+
+        // Told what it is, which is what the part's own MIME headers say.
+        let told = super::preview_from_part(&part, Some("UTF-8"), Some("quoted-printable"));
+        assert!(!told.contains('\u{fffd}'), "no replacement characters: {told}");
+        assert!(told.starts_with("AI Bot Controls"), "{told}");
+        assert!(told.contains("Updates to managing AI crawlers"), "{told}");
+
+        // And the same left to the guess, now that the guess knows better.
+        let guessed = super::preview_from_part(&part, Some("UTF-8"), None);
+        assert_eq!(guessed, told);
+
+        // Real base64 still reads as base64, truncated (no padding) or whole.
+        let whole = b"VGhlIHF1aWNrIGJyb3duIGZveCBqdW1wcyBvdmVyIHRoZSBsYXp5IGRvZywgdHdpY2Uu";
+        assert!(super::looks_like_base64(whole));
+        assert!(super::looks_like_base64(b"VGhlIHF1aWNrIGJyb3duIGZveCBqdW1wcyBvdmVyIHRoZSBsYXp5IGRvZz0="));
+
+        // The slice a preview reads ends on a byte count, routinely mid-escape.
+        // The stub is dropped rather than shown as text.
+        let cut = b"AI Bot Controls =E2=80=87=CD=8F =E";
+        let out = super::preview_from_part(cut, Some("UTF-8"), Some("quoted-printable"));
+        assert!(!out.contains('='), "no half-decoded escape left behind: {out:?}");
+        assert_eq!(out.trim(), "AI Bot Controls");
+        let cut = b"AI Bot Controls =E2=80=87=CD=8F =";
+        let out = super::preview_from_part(cut, Some("UTF-8"), Some("quoted-printable"));
+        assert!(!out.contains('='), "nor a bare one: {out:?}");
+    }
+
+    #[test]
+    fn a_preview_of_nothing_but_preheader_padding_reaches_for_the_real_text() {
+        // What the deeper BODY[TEXT] repair read sees: the whole multipart,
+        // each part carrying its own headers. The text is thousands of bytes
+        // past the padding, which is the point of the padding.
+        let mut plain = b"AI Bot Controls ".to_vec();
+        for _ in 0..250 {
+            plain.extend_from_slice(b"=E2=80=87=CD=8F ");
+        }
+        plain.extend_from_slice(b"Updates to managing AI crawlers on your account.");
+        let mut body = Vec::new();
+        body.extend_from_slice(b"--BOUND\r\n");
+        body.extend_from_slice(b"Content-Type: text/plain; charset=UTF-8\r\n");
+        body.extend_from_slice(b"Content-Transfer-Encoding: quoted-printable\r\n\r\n");
+        body.extend_from_slice(&plain);
+        body.extend_from_slice(b"\r\n--BOUND--\r\n");
+
+        let preview = super::preview_from_part(&body, None, None);
+        assert!(
+            preview.contains("Updates to managing AI crawlers"),
+            "the padding is stepped over, not shown: {preview:?}",
+        );
+        assert!(!preview.contains('\u{fffd}'), "{preview:?}");
+        assert!(!preview.contains('\u{034f}'), "joiners are dropped: {preview:?}");
     }
 
     #[test]
@@ -10703,14 +10997,14 @@ mod tests {
         // The fetch asks for body bytes only, so the encoding has to be inferred.
         // Quoted-printable, including a soft line break mid-sentence:
         let qp = b"Caf=C3=A9 meeting at 3pm =\r\nsharp, bring the numbers";
-        assert_eq!(preview_from_part(qp, None), "Café meeting at 3pm sharp, bring the numbers");
+        assert_eq!(preview_from_part(qp, None, None), "Café meeting at 3pm sharp, bring the numbers");
 
         // Base64 — shown raw this would be gibberish in the list.
         let encoded = crate::oauth::base64_encode(
             b"Base64 bodies are common from newsletters and phones alike.",
         );
         assert_eq!(
-            preview_from_part(encoded.as_bytes(), None),
+            preview_from_part(encoded.as_bytes(), None, None),
             "Base64 bodies are common from newsletters and phones alike."
         );
     }
@@ -10721,31 +11015,37 @@ mod tests {
         // incomplete tail is dropped rather than decoded into noise.
         let full = crate::oauth::base64_encode(&b"The quick brown fox jumps over the lazy dog. ".repeat(4));
         let truncated = &full[..full.len() - 3];
-        let preview = preview_from_part(truncated.as_bytes(), None);
+        let preview = preview_from_part(truncated.as_bytes(), None, None);
         assert!(preview.starts_with("The quick brown fox"), "{preview}");
-        // A quoted-printable escape cut in half stays literal instead of eating
-        // the character after it.
-        assert!(preview_from_part(b"Total: 50=", None).ends_with('='));
+        // An escape cut in half is dropped, not shown: the slice ends on a
+        // byte count, so its last escape is routinely half there. A lone
+        // trailing "=" is a soft line break in quoted-printable and goes the
+        // same way.
+        assert_eq!(preview_from_part(b"Total: 50=", None, None), "Total: 50");
+        assert_eq!(preview_from_part(b"Total: 50=4", None, None), "Total: 50");
+        // Malformed rather than cut short: "=Z" is no escape at all, and
+        // whatever it is, it isn't ours to remove.
+        assert_eq!(preview_from_part(b"Total: 50=Z", None, None), "Total: 50=Z");
     }
 
     #[test]
     fn preview_reads_html_and_skips_quoted_replies() {
         let html = b"<html><body><p>Meeting moved to <b>Tuesday</b>.</p></body></html>";
-        assert_eq!(preview_from_part(html, None), "Meeting moved to Tuesday.");
+        assert_eq!(preview_from_part(html, None, None), "Meeting moved to Tuesday.");
         let reply = b"Sounds good to me.\r\n\r\n> On Monday, Ada wrote:\r\n> the original text\r\n";
-        assert_eq!(preview_from_part(reply, None), "Sounds good to me.");
+        assert_eq!(preview_from_part(reply, None, None), "Sounds good to me.");
     }
 
     #[test]
     fn preview_is_capped() {
         let long = "word ".repeat(200);
-        assert_eq!(preview_from_part(long.as_bytes(), None).chars().count(), PREVIEW_CHARS);
+        assert_eq!(preview_from_part(long.as_bytes(), None, None).chars().count(), PREVIEW_CHARS);
     }
 
     #[test]
     fn short_text_is_not_mistaken_for_base64() {
         // "Meeting" is all base64 characters, but far too short to be a body.
-        assert_eq!(preview_from_part(b"Meeting", None), "Meeting");
+        assert_eq!(preview_from_part(b"Meeting", None, None), "Meeting");
     }
 
     #[test]
@@ -10755,33 +11055,33 @@ mod tests {
         // while the reader showed the message fine.
         let qp = b"Tisztelt =DCgyfel=FCnk! K=E9rj=FCk, =F5rizze meg.";
         assert_eq!(
-            preview_from_part(qp, Some("iso-8859-2")),
+            preview_from_part(qp, Some("iso-8859-2"), None),
             "Tisztelt Ügyfelünk! Kérjük, őrizze meg."
         );
         // The 8-bit bytes as they are, no transfer encoding; label case and
         // quotes as servers send them.
-        assert_eq!(preview_from_part(b"\xD5rizze meg", Some("\"ISO-8859-2\"")), "Őrizze meg");
-        assert_eq!(preview_from_part(b"\xF5rizze", Some("windows-1250")), "őrizze");
+        assert_eq!(preview_from_part(b"\xD5rizze meg", Some("\"ISO-8859-2\""), None), "Őrizze meg");
+        assert_eq!(preview_from_part(b"\xF5rizze", Some("windows-1250"), None), "őrizze");
         // Base64 is decoded to bytes first, then read in the charset.
         let b64 = crate::oauth::base64_encode(b"Caf\xE9 meeting at three, bring the numbers please.");
         assert_eq!(
-            preview_from_part(b64.as_bytes(), Some("iso-8859-1")),
+            preview_from_part(b64.as_bytes(), Some("iso-8859-1"), None),
             "Café meeting at three, bring the numbers please."
         );
         // UTF-8 still reads as UTF-8 whatever it is called.
-        assert_eq!(preview_from_part("Café".as_bytes(), Some("UTF-8")), "Café");
-        assert_eq!(preview_from_part("Café".as_bytes(), Some("utf8")), "Café");
+        assert_eq!(preview_from_part("Café".as_bytes(), Some("UTF-8"), None), "Café");
+        assert_eq!(preview_from_part("Café".as_bytes(), Some("utf8"), None), "Café");
     }
 
     #[test]
     fn preview_parts_of_a_multipart_carry_their_own_charset() {
         let nested = b"--b1\r\nContent-Type: text/plain; charset=\"iso-8859-2\"\r\n\
             Content-Transfer-Encoding: quoted-printable\r\n\r\n=D5rizze meg\r\n--b1--\r\n";
-        assert_eq!(preview_from_part(nested, None), "Őrizze meg");
+        assert_eq!(preview_from_part(nested, None, None), "Őrizze meg");
         // A charset on a folded continuation line still counts.
         let folded = b"--b1\r\nContent-Type: text/html;\r\n\tcharset=iso-8859-2\r\n\r\n\
             <p>\xD5rizze meg</p>\r\n--b1--\r\n";
-        assert_eq!(preview_from_part(folded, None), "Őrizze meg");
+        assert_eq!(preview_from_part(folded, None, None), "Őrizze meg");
     }
 
     #[test]
@@ -10791,21 +11091,21 @@ mod tests {
         let body = b"This is a multi-part message in MIME format.\r\n\r\n--b1\r\n\
             Content-Type: image/png\r\nContent-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n--b1\r\n\
             Content-Type: text/plain\r\n\r\nThe photo from Sunday\r\n--b1--\r\n";
-        assert_eq!(preview_from_part(body, None), "The photo from Sunday");
+        assert_eq!(preview_from_part(body, None, None), "The photo from Sunday");
         // But plain text that merely mentions a dashed line is still text.
-        assert_eq!(preview_from_part(b"Hello\r\n--foo\r\nbar", None), "Hello --foo bar");
+        assert_eq!(preview_from_part(b"Hello\r\n--foo\r\nbar", None, None), "Hello --foo bar");
     }
 
     #[test]
     fn preview_copes_with_bytes_that_are_not_utf8() {
         // Undeclared 8-bit text reads as Windows-1252, the way browsers do.
-        assert_eq!(preview_from_part(b"Caf\xE9 au lait", None), "Café au lait");
+        assert_eq!(preview_from_part(b"Caf\xE9 au lait", None, None), "Café au lait");
         // A slice that ends mid-character drops the fragment, not the row.
         let cut = &"Café".as_bytes()[..4];
-        assert_eq!(preview_from_part(cut, None), "Caf");
-        assert_eq!(preview_from_part(cut, Some("utf-8")), "Caf");
+        assert_eq!(preview_from_part(cut, None, None), "Caf");
+        assert_eq!(preview_from_part(cut, Some("utf-8"), None), "Caf");
         // Declared UTF-8 that isn't: the damage shows as replacement characters.
-        assert_eq!(preview_from_part(b"a\xFFb", Some("utf-8")), "a\u{fffd}b");
+        assert_eq!(preview_from_part(b"a\xFFb", Some("utf-8"), None), "a\u{fffd}b");
     }
 
     #[test]

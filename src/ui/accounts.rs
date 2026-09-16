@@ -161,6 +161,11 @@ pub struct AccountsWindow {
     /// Paths behind the currently-open editor's folder combos (index 0 in the
     /// combo is "Automatic"; entry N here is combo index N + 1).
     folder_paths: Vec<String>,
+    /// Paths behind the "Save a copy of sent mail in" combo (#199). A separate list from
+    /// `folder_paths`: this one offers every folder, the Inbox included,
+    /// because a destination takes nothing away from the folder it names.
+    /// Index 0 in the combo is "Sent folder"; entry N here is index N + 1.
+    sent_copy_paths: Vec<String>,
     /// Index being edited; `None` while adding a new account.
     editing: Option<usize>,
     /// Emoji currently chosen in the editor (`None` → use initials).
@@ -221,6 +226,9 @@ struct AliasDialog {
 pub enum AccountsInput {
     /// The editor's "Use my Gravatar" switch moved (#189).
     SetOwnGravatar(bool),
+    /// The "Server saves its own copy of sent mail" switch: with it on there is
+    /// no copy of Vireo's to file, so the folder row above has nothing to say.
+    SetServerSavesSent(bool),
     /// Showcase only (VIREO_SHOWCASE_EDITOR_DIRTY): type into the open
     /// editor's Label field, the way a capture cannot.
     DebugEditLabel(String),
@@ -393,6 +401,46 @@ pub enum AccountsOutput {
 /// Whether a GOA account's mail runs over the Microsoft Graph API: the
 /// "Microsoft 365" (`ms_graph`) provider has no IMAP — its token is
 /// Graph-scoped — so the imported account uses [`Protocol::Graph`] (issue #36).
+/// Stop a row's subtitle from squeezing out the row's value.
+///
+/// An [`adw::ActionRow`] gives its title block whatever width the text asks
+/// for, and an [`adw::ComboRow`]'s value label takes what is left — which for
+/// a subtitle of any length is an ellipsis where "Disabled" should be. Capping
+/// the label's width in characters bounds what it can ask for, so it wraps to
+/// a second line instead of taking the room from its neighbour. `subtitle-lines`
+/// does not do this: it caps how many lines are drawn, not how wide one is.
+fn wrap_subtitle(row: &impl IsA<gtk::Widget>, chars: i32) {
+    fn walk(w: &gtk::Widget, chars: i32) -> bool {
+        if let Some(label) = w.downcast_ref::<gtk::Label>() {
+            if label.has_css_class("subtitle") {
+                label.set_wrap(true);
+                label.set_max_width_chars(chars);
+                return true;
+            }
+        }
+        let mut child = w.first_child();
+        while let Some(c) = child {
+            if walk(&c, chars) {
+                return true;
+            }
+            child = c.next_sibling();
+        }
+        false
+    }
+    walk(row.as_ref(), chars);
+}
+
+/// The subtitle under "Save a copy of sent mail in" (#199). Says the one thing
+/// the row above it cannot: this only files mail somewhere, so the Inbox is a
+/// fair answer here even though giving it the Sent *role* would cost the
+/// account its inbox. What "Disabled" leaves the copy to is left to the title,
+/// which already says "a copy": the originals are the Sent row's business.
+/// Declared once because the row is rebuilt whenever an editor opens, and the
+/// two copies drifting apart is how a hint goes stale.
+const SENT_COPY_HINT: &str =
+    "Any folder, inbox included. Only applies to mail sent from this Vireo client \
+     going forward. Not recursive.";
+
 fn goa_uses_graph(g: &crate::goa::GoaMailAccount) -> bool {
     g.oauth2 && g.provider_type == "ms_graph"
 }
@@ -1287,17 +1335,43 @@ impl Component for AccountsWindow {
 
                             // Manual special-folder mapping (#82): for servers
                             // whose Sent/Trash/… aren't detected, pin each role
-                            // to one of the account's real folders.
+                            // to one of the account's real folders. "Save
+                            // copies in" (#199) rides with them because it is
+                            // read as a refinement of Sent, but it is a
+                            // different kind of thing: a role says what a
+                            // folder *is*, and relabelling the Inbox costs the
+                            // account its inbox (#136), which is why the Inbox
+                            // is offered in that row and in none of the others.
                             add = &adw::PreferencesGroup {
                                 set_title: &i18n("Special Folders"),
                                 set_description: Some(
-                                    i18n("Where sent, deleted and junk mail goes. Automatically follows the \
-                                          server's own markings; pick a folder when a role isn't \
-                                          detected or lands wrong.").as_str()
+                                    i18n("Which of this account's folders hold each role. Automatically \
+                                          follows the server's own markings; pick a folder when a role \
+                                          isn't detected or lands wrong. Nothing already on the server \
+                                          moves: a role says where mail goes from now on.").as_str()
                                 ),
 
                                 #[name = "folder_sent_row"]
                                 adw::ComboRow { set_title: &i18n("Sent") },
+                                #[name = "folder_sent_copy_row"]
+                                adw::ComboRow {
+                                    set_title: &i18n("Save a copy of sent mail in"),
+                                    set_subtitle: &i18n(SENT_COPY_HINT),
+                                },
+                                // Gmail files a copy of anything sent through
+                                // its SMTP, so Vireo's append makes a second
+                                // one. Off by default: a server that does not
+                                // do it, paired with a Vireo that has stopped
+                                // appending, keeps no sent mail at all.
+                                #[name = "server_saves_row"]
+                                adw::SwitchRow {
+                                    set_title: &i18n("Server saves its own copy of sent mail"),
+                                    set_subtitle: &i18n("For Gmail and others that file sent mail \
+                                                   themselves. Disables above Save a copy."),
+                                    connect_active_notify[sender] => move |row| {
+                                        sender.input(AccountsInput::SetServerSavesSent(row.is_active()));
+                                    },
+                                },
                                 #[name = "folder_drafts_row"]
                                 adw::ComboRow { set_title: &i18n("Drafts") },
                                 #[name = "folder_trash_row"]
@@ -1413,6 +1487,7 @@ impl Component for AccountsWindow {
             alias_dialog: None,
             folders_by_email: std::collections::HashMap::new(),
             folder_paths: Vec::new(),
+            sent_copy_paths: Vec::new(),
             senders,
             sender_addrs: Vec::new(),
             blacklist,
@@ -1453,6 +1528,9 @@ impl Component for AccountsWindow {
         senders_box.set_visible(!model.sender_addrs.is_empty());
         blacklist_box.set_visible(!model.blacklist_addrs.is_empty());
         let widgets = view_output!();
+        // Long enough for the hint, short enough that the combo's own value
+        // is not what gets shortened instead.
+        wrap_subtitle(&widgets.folder_sent_copy_row, 34);
         // Left-justify the editor's wrapping labels (its group descriptions):
         // libadwaita 1.9 renders a group description fill-justified when its
         // text does not naturally fill the label's width, stretching the word
@@ -1892,6 +1970,10 @@ impl Component for AccountsWindow {
                 self.refresh_preview(widgets);
             }
 
+            AccountsInput::SetServerSavesSent(on) => {
+                widgets.folder_sent_copy_row.set_sensitive(!on);
+            }
+
             AccountsInput::SetOwnGravatar(on) => {
                 // Look it up as soon as it is asked for, so the preview can
                 // answer rather than waiting for the account to be saved.
@@ -2115,6 +2197,8 @@ impl Component for AccountsWindow {
                 let mut account = read_account(widgets, self.saved_emoji(), self.saved_avatar());
                 account.aliases = self.alias_edits.clone();
                 account.folder_roles = self.read_folder_roles(widgets);
+                account.sent_copy_path = self.read_sent_copy_path(widgets);
+                account.server_saves_sent = widgets.server_saves_row.is_active();
                 let sig = sig_html.trim();
                 account.signature = if signature_is_empty(sig) {
                     None
@@ -2860,15 +2944,18 @@ impl AccountsWindow {
     /// account, whose folders aren't known yet): "Automatic" plus the account's
     /// live folder list, with any saved assignment selected.
     fn populate_folder_combos(&mut self, widgets: &AccountsWindowWidgets, acc: Option<&AccountConfig>) {
-        // The Inbox is never offered as a role (#136): giving it one took
-        // its own role away, and the account lost its inbox.
-        let choices: Vec<(String, String)> = acc
+        let all: Vec<(String, String)> = acc
             .and_then(|a| self.folders_by_email.get(&a.email))
             .cloned()
-            .unwrap_or_default()
-            .into_iter()
+            .unwrap_or_default();
+        // The Inbox is never offered as a role (#136): giving it one took
+        // its own role away, and the account lost its inbox.
+        let choices: Vec<(String, String)> = all
+            .iter()
             .filter(|(path, _)| !path.eq_ignore_ascii_case("INBOX"))
+            .cloned()
             .collect();
+        self.populate_sent_copy_combo(widgets, acc, &all);
         let mut labels: Vec<&str> = vec!["Automatic"];
         labels.extend(choices.iter().map(|(_, display)| display.as_str()));
         self.folder_paths = choices.iter().map(|(path, _)| path.clone()).collect();
@@ -2888,6 +2975,69 @@ impl AccountsWindow {
                 .unwrap_or(0);
             row.set_selected(selected);
         }
+    }
+
+    /// Fill the "Save a copy of sent mail in" combo (#199): "Disabled" plus
+    /// every one of the account's folders, with the saved choice selected. The
+    /// Inbox is listed here — filing a copy somewhere does not re-label it.
+    fn populate_sent_copy_combo(
+        &mut self,
+        widgets: &AccountsWindowWidgets,
+        acc: Option<&AccountConfig>,
+        all: &[(String, String)],
+    ) {
+        // "Disabled", not "Automatic": the rows around it auto-detect a folder
+        // from the server's markings, and this one detects nothing. It is an
+        // override that is either set or not, and unset means the Sent folder
+        // above keeps taking the copies as it always has.
+        let mut labels: Vec<&str> = vec!["Disabled"];
+        labels.extend(all.iter().map(|(_, display)| display.as_str()));
+        self.sent_copy_paths = all.iter().map(|(path, _)| path.clone()).collect();
+        let row = &widgets.folder_sent_copy_row;
+        row.set_model(Some(&gtk::StringList::new(&labels)));
+        row.set_list_factory(Some(&non_ellipsizing_factory()));
+        let selected = acc
+            .and_then(|a| a.sent_copy_path.as_ref())
+            .and_then(|path| self.sent_copy_paths.iter().position(|p| p == path))
+            .map(|i| i as u32 + 1)
+            .unwrap_or(0);
+        row.set_selected(selected);
+        // Two backends file the copy themselves, or not at all, and ignore
+        // this setting — say so rather than offer a choice that does nothing.
+        let unsupported = match acc.map(|a| a.protocol) {
+            Some(Protocol::Graph) => Some(i18n(
+                "Microsoft 365 files its own copy in Sent Items; this cannot be changed.",
+            )),
+            Some(Protocol::Pop3) => Some(i18n(
+                "POP3 accounts have no server folders to save a copy in.",
+            )),
+            _ => None,
+        };
+        // The switch above may already have taken this row out of play.
+        let server_saves = acc.is_some_and(|a| a.server_saves_sent);
+        widgets.server_saves_row.set_active(server_saves);
+        row.set_sensitive(unsupported.is_none() && !server_saves);
+        row.set_subtitle(&unsupported.unwrap_or_else(|| i18n(SENT_COPY_HINT)));
+    }
+
+    /// The "Save a copy of sent mail in" combo's current choice: a folder path,
+    /// or `None` when disabled, which leaves the copy to the Sent role.
+    fn read_sent_copy_path(&self, widgets: &AccountsWindowWidgets) -> Option<String> {
+        // Nothing is known about this account's folders yet (it has never
+        // connected, or is switched off), so the combo holds only "Sent
+        // folder" — which is not the user clearing the setting. Keep what
+        // was saved rather than silently dropping it on an unrelated edit.
+        if self.sent_copy_paths.is_empty() {
+            return self
+                .editing
+                .and_then(|i| self.accounts.get(i))
+                .and_then(|a| a.sent_copy_path.clone());
+        }
+        let sel = widgets.folder_sent_copy_row.selected();
+        if sel == 0 {
+            return None;
+        }
+        self.sent_copy_paths.get(sel as usize - 1).cloned()
     }
 
     /// The Special Folders combos' current assignments: role → folder path,
@@ -3410,9 +3560,11 @@ impl AccountsWindow {
     fn editor_fingerprint(&self, widgets: &AccountsWindowWidgets) -> String {
         let account = read_account(widgets, self.saved_emoji(), self.saved_avatar());
         format!(
-            "{account:?}|{:?}|{:?}|{}|{}",
+            "{account:?}|{:?}|{:?}|{:?}|{}|{}|{}",
             self.alias_edits,
             self.read_folder_roles(widgets),
+            self.read_sent_copy_path(widgets),
+            widgets.server_saves_row.is_active(),
             widgets.provider_row.selected(),
             self.pending_oauth_refresh.is_some(),
         )
@@ -3573,6 +3725,8 @@ fn read_account(
         },
         // Assigned by SaveWithSig from the Special Folders combos.
         folder_roles: Default::default(),
+        sent_copy_path: None,
+        server_saves_sent: false,
         empty_junk_days: AUTO_EMPTY_DAYS
             .get(widgets.empty_junk_row.selected() as usize)
             .copied()

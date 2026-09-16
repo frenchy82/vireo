@@ -41,6 +41,7 @@ trackers by default — no telemetry, no analytics.
 - **Whole-mailbox sync & search** — no message-count cap; a fast first page loads instantly, the rest indexes in the background with infinite scroll.
 - **Two-way sync** — deletions and moves from your phone or another client sync back automatically (IMAP IDLE + reconciliation).
 - **Conversation threading**, compose/reply/forward with HTML signatures, editable drafts, and full folder management.
+- **Four ways to write a message** — rich text, **Markdown**, hand-written **HTML**, or plain text, switched per message from the composer's format button. See [Writing in Markdown or HTML](#writing-in-markdown-or-html) below.
 - **Outbox** — a send that fails is kept and retried when the connection returns, not lost; queued messages can be edited, sent by hand or discarded.
 - **Send later** — schedule a message for tomorrow morning, Monday, or any date and time; it waits in the Outbox, editable, until then.
 - **Cloud attachments** — upload a large file to your own Nextcloud, ownCloud, OpenCloud or Seafile server, or to OneDrive or Dropbox, and put a share link in the message, with an optional expiry and download password.
@@ -276,6 +277,58 @@ of the generated one.
   `VIREO_DROPBOX_CLIENT_ID` at build time), in which case the field can stay
   empty. Link passwords and expiry dates are a paid Dropbox feature; on a
   Basic plan leave both off, or the share step reports it.
+
+### Writing in Markdown or HTML
+
+A message can be written in any of four formats, chosen in **Settings →
+Composing → Write messages in** for new messages and switched for any single
+message with the format button at the right-hand end of the composer's
+formatting row, which wears the icon of the format it is set to and lists
+the others, the current one in your accent colour:
+
+- **Rich text** — the WYSIWYG editor with its formatting toolbar. The default.
+- **Markdown** — you write Markdown, the recipient gets formatted mail.
+- **HTML** — you write the message's HTML by hand.
+- **Plain text** — no formatting at all, sent as `text/plain` only.
+
+Markdown and HTML are written as *source*: a monospace field, the formatting
+buttons gone from the row above it (they would go nowhere), and a **Preview**
+toggle beside the format chooser that swaps the source for the message as it
+will be sent. Nothing
+is sent as source — Markdown is rendered to HTML when the message goes out,
+and the Markdown you wrote travels as the plain-text alternative, so a
+recipient whose client shows plain text gets something that still reads as
+itself. Hand-written HTML gets a readable plain-text alternative made for it
+the same way.
+
+Switching format converts what is already in the message, so you can start a
+reply in rich text and finish it in Markdown; the quoted original comes
+across as `>` lines.
+
+**The Markdown Vireo understands** is the dialect documented at
+[markdownguide.org](https://www.markdownguide.org/) — all of the basic
+syntax, and all of the extended syntax:
+
+| | |
+| --- | --- |
+| Basic | headings (both styles), bold, italic, blockquotes, ordered and unordered lists, code, horizontal rules, links (inline, reference and autolinks), images, hard line breaks, backslash escapes |
+| Extended | tables with alignment, fenced code blocks with a language, footnotes, heading IDs (`{#id}`), definition lists, `~~strikethrough~~`, task lists, `:emoji:` shortcodes, `==highlighting==`, `~subscript~` and `^superscript^`, and bare URLs and email addresses turned into links |
+
+Two notes on what that means in mail. The HTML Vireo writes carries its
+styling as `style` attributes on the tags themselves, because a `<style>`
+block is the first thing most webmail clients throw away — so tables really
+do arrive with their borders. And anything you send, in Markdown or in HTML,
+passes through a sanitizer on the way out: scripts, event handlers and style
+sheets are removed, while tables, inline styles, images and everything
+Markdown produces are kept. That is not a defence against you; it is a
+defence for you, since a `<script>` in a message is at best stripped by the
+recipient's client and at worst the reason the message lands in their spam
+folder.
+
+A draft saved from a Markdown or HTML message is stored as ordinary mail (a
+formatted part and a plain-text one), so re-opening it puts you in your
+default format. Switching that draft back to Markdown converts it, which for
+a message that started life as Markdown lands very close to what you wrote.
 
 ### OpenPGP (encrypted and signed mail)
 
@@ -562,7 +615,11 @@ for the Inboxes and notification report, [**Peter Weiss**](https://github.com/pe
 for conversation moves, [**taprobane99**](https://github.com/taprobane99)
 for the clock-format report and [**somePaulo**](https://github.com/somepaulo)
 for the language chooser, plain-text composing and monospace requests,
-all in 1.28; and to everyone who files issues and ideas.
+all in 1.28; to [**EmmanuelP**](https://github.com/EmmanuelP) for the
+undo and sent-copy requests, [**yioannides**](https://github.com/yioannides)
+for the recipient-rule report, [**7system7**](https://github.com/7system7)
+for the links report and [**frenchy82**](https://github.com/frenchy82) for the
+French update, all in 1.32; and to everyone who files issues and ideas.
 
 Pull requests are welcome. There's no CLA — by opening one you agree your
 contribution ships under the [AGPL-3.0-or-later](LICENSE), and it may be adapted

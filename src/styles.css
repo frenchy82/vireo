@@ -281,6 +281,14 @@ button.star-active {
 .context-menu-item label {
   font-weight: normal;
 }
+/* The entry a menu is currently set to. `color` is inherited, so one class
+   on the row carries both the label and the symbolic icon beside it, and
+   `@accent_color` is libadwaita's legible-on-a-normal-background accent —
+   the desktop's under the stock look, the palette's under a Vireo theme. */
+.context-menu-selected,
+.context-menu-selected label {
+  color: @accent_color;
+}
 
 /* Popout-window attachment popover rows. */
 .attach-row {
@@ -940,7 +948,20 @@ headerbar.compose-toolbar button.image-button {
 }
 
 .reader-header {
-  padding: 20px 24px 16px 24px;
+  /* The account chip's top sits level with the top of the message list's
+     first highlight pill, so the two panes start on one line instead of the
+     reader beginning 16px lower for no reason. The list's rows are inset 2px
+     from the top of their scroller, which starts 2px below this header's
+     own top: 4px here puts the chip on exactly that line. */
+  padding: 4px 24px 16px 24px;
+}
+
+/* …unless a bar (spoofing warning, blocked remote content, find) sits
+   between it and the toolbar. There is nothing to line up with there, and
+   4px against a filled band reads as cramped rather than aligned, so the
+   header keeps the 20px it always had. */
+.reader-header.under-bar {
+  padding-top: 20px;
 }
 
 .reader-subject {

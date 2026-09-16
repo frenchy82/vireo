@@ -273,6 +273,20 @@ pub struct AccountConfig {
     /// "archive". Empty = fully automatic.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub folder_roles: std::collections::BTreeMap<String, String>,
+    /// Where copies of sent mail are filed (#199): a full folder path, or
+    /// `None` for the Sent folder. This is only a destination, not a role —
+    /// the folder keeps whatever it already is, so the Inbox can be chosen
+    /// without the account losing its inbox the way a "Sent" role assignment
+    /// would (#136). Ignored by Microsoft 365, which files its own copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_copy_path: Option<String>,
+    /// The server files its own copy of outgoing mail, so Vireo must not add
+    /// one. Gmail does this for anything sent through its SMTP, which leaves
+    /// two copies of every message: Google's, and the one Vireo appends.
+    /// Off by default, because a server that does *not* do it and a Vireo
+    /// that has stopped appending means no sent mail is kept at all.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub server_saves_sent: bool,
     /// Auto-empty (#140): mail in the Junk folder older than this many days
     /// is deleted for good at each sync. 0 = never.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -974,9 +988,16 @@ struct PrivacyFile {
     /// menu always offers both, whichever way this is set.
     #[serde(default = "default_paste_plain")]
     paste_plain: bool,
-    /// New messages start as plain text, without formatting (#180).
+    /// New messages start as plain text, without formatting (#180). Kept
+    /// written so a version that predates `compose_format` still opens its
+    /// composer the way this one was left.
     #[serde(default)]
     compose_plain: bool,
+    /// What new messages are written in: rich text, Markdown, HTML
+    /// source, or plain text. Absent on installs that predate the choice,
+    /// where `compose_plain` above still says which of the two it is.
+    #[serde(default)]
+    compose_format: Option<ComposeFormat>,
     /// Whether the composer underlines misspelled words as you type.
     #[serde(default = "default_spellcheck")]
     spellcheck: bool,
@@ -1277,6 +1298,7 @@ impl Default for PrivacyFile {
             single_card_default_applied: false,
             paste_plain: default_paste_plain(),
             compose_plain: false,
+            compose_format: None,
             spellcheck: default_spellcheck(),
             spellcheck_langs: String::new(),
             sidebar_hover_expand: false,
@@ -1805,13 +1827,45 @@ impl FilterCondition {
             FilterField::Body => unreachable!(),
         }
         .to_lowercase();
-        alts.iter().any(|needle| match self.matcher {
-            FilterMatch::Contains => hay.contains(needle.as_str()),
-            FilterMatch::Equals => hay == *needle,
-            FilterMatch::StartsWith => hay.starts_with(needle.as_str()),
-            FilterMatch::EndsWith => hay.ends_with(needle.as_str()),
+        // The recipients are a list. "Contains" reads it whole, names
+        // included; the other matchers hold each recipient up on its own,
+        // so "is x@y" matches mail sent to x@y and someone else, and "ends
+        // with @y" finds any one recipient there, not only the last (#201).
+        let hays = if self.field == FilterField::Recipients && self.matcher != FilterMatch::Contains {
+            mailboxes(&hay)
+        } else {
+            vec![hay]
+        };
+        alts.iter().any(|needle| {
+            hays.iter().any(|hay| match self.matcher {
+                FilterMatch::Contains => hay.contains(needle.as_str()),
+                FilterMatch::Equals => hay == needle,
+                FilterMatch::StartsWith => hay.starts_with(needle.as_str()),
+                FilterMatch::EndsWith => hay.ends_with(needle.as_str()),
+            })
         })
     }
+}
+
+/// The pieces of a comma-separated recipient list a matcher can be held
+/// against: every address on its own, and every display name on its own.
+/// `Ann <ann@shop.example>, bob@shop.example` gives `ann`, `ann@shop.example`
+/// and `bob@shop.example`.
+fn mailboxes(list: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in list.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        match (part.rfind('<'), part.rfind('>')) {
+            (Some(lt), Some(gt)) if lt < gt => {
+                let name = part[..lt].trim().trim_matches('"').trim();
+                if !name.is_empty() {
+                    out.push(name.to_string());
+                }
+                out.push(part[lt + 1..gt].trim().to_string());
+            }
+            _ => out.push(part.to_string()),
+        }
+    }
+    out
 }
 
 impl FilterRule {
@@ -2193,9 +2247,35 @@ pub fn load_plain_style() -> (bool, String) {
     (p.plain_monospace, p.plain_font)
 }
 
-/// Whether new messages start as plain text (#180).
-pub fn load_compose_plain() -> bool {
-    load_privacy().compose_plain
+/// What a message is written in. Rich text is the WYSIWYG editor;
+/// Markdown and HTML are source views that are converted on the way out;
+/// plain text sends no HTML part at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComposeFormat {
+    #[default]
+    Rich,
+    Markdown,
+    Html,
+    Plain,
+}
+
+impl ComposeFormat {
+    /// Whether this format is edited as source rather than as rich text.
+    pub fn is_source(self) -> bool {
+        matches!(self, ComposeFormat::Markdown | ComposeFormat::Html)
+    }
+}
+
+/// What new messages start out as, falling back to the plain-text
+/// switch this setting replaced (#180).
+pub fn load_compose_format() -> ComposeFormat {
+    let p = load_privacy();
+    p.compose_format.unwrap_or(if p.compose_plain {
+        ComposeFormat::Plain
+    } else {
+        ComposeFormat::Rich
+    })
 }
 
 /// Whether desktop notifications (new mail, error alerts) are enabled.
@@ -2507,7 +2587,7 @@ pub fn save_privacy(
     reply_fields: bool,
     compose_default_from: &str,
     paste_plain: bool,
-    compose_plain: bool,
+    compose_format: ComposeFormat,
     spellcheck: bool,
     spellcheck_langs: String,
     preview_lines: u32,
@@ -2588,7 +2668,9 @@ pub fn save_privacy(
         reply_fields,
         compose_default_from: compose_default_from.to_string(),
         paste_plain,
-        compose_plain,
+        // Both are written: the boolean is what an older version reads.
+        compose_plain: compose_format == ComposeFormat::Plain,
+        compose_format: Some(compose_format),
         spellcheck,
         // Every save is after the first load, which applied it.
         single_card_default_applied: true,
@@ -3493,6 +3575,29 @@ mod filter_tests {
     }
 
     #[test]
+    fn filter_recipient_matchers_look_at_each_recipient() {
+        // #201: a rule on the recipients compared the whole To and Cc list
+        // as one string, so "is x@y" never matched mail with a second
+        // recipient, and "ends with @y" only ever saw the last one.
+        let list = "Ann <ann@shop.example>, bob@shop.example, \"Cy, Jr\" <cy@other.example>";
+        let input = headers("", "", "", list);
+        let r = |m, v| rule(FilterField::Recipients, m, v);
+        assert!(r(FilterMatch::Equals, "bob@shop.example").matches(&input));
+        assert!(r(FilterMatch::Equals, "ANN@shop.example").matches(&input));
+        assert!(r(FilterMatch::Equals, "cy@other.example").matches(&input));
+        assert!(!r(FilterMatch::Equals, "shop.example").matches(&input));
+        assert!(r(FilterMatch::EndsWith, "@shop.example").matches(&input));
+        assert!(!r(FilterMatch::EndsWith, "@nowhere.example").matches(&input));
+        assert!(r(FilterMatch::StartsWith, "cy@").matches(&input));
+        assert!(r(FilterMatch::Contains, "other").matches(&input));
+        // A display name counts on its own too.
+        assert!(r(FilterMatch::Equals, "ann").matches(&input));
+        // The single bare address most mail carries.
+        assert!(r(FilterMatch::Equals, "me@shop.example").matches(&headers("", "", "", "me@shop.example")));
+        assert!(!r(FilterMatch::Equals, "me@shop.example").matches(&headers("", "", "", "")));
+    }
+
+    #[test]
     fn filter_body_matches_hits_or_text_on_hand() {
         // #191: the server's search result counts, and so does the text the
         // list carries; the matcher is always "contains".
@@ -3570,6 +3675,8 @@ dest_path = "Lists"
             oauth_refresh: "TOKEN".into(),
             push: None,
             folder_roles: Default::default(),
+            sent_copy_path: None,
+            server_saves_sent: false,
             empty_junk_days: 0,
             empty_trash_days: 0,
             pgp_key: None,

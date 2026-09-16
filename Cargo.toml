@@ -1,6 +1,6 @@
 [package]
 name = "vireo"
-version = "1.31.2-beta.1"
+version = "1.32.1-beta.1"
 edition = "2021"
 description = "A clean, fast GNOME-native email client"
 license = "AGPL-3.0-or-later"
@@ -65,6 +65,7 @@ ammonia = "4.1.4"
 # Tray icon (StatusNotifierItem / AppIndicator) for desktops that have a tray
 ksni = { version = "0.3.6", default-features = false, features = ["tokio", "blocking"] }
 gettext-rs = { version = "0.8.0", features = ["gettext-system"] }
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 
 [build-dependencies]
 # Compiles resources/veem.gresource.xml (the bundled symbolic icons) into a

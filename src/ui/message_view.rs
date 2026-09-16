@@ -352,6 +352,9 @@ pub enum MessageViewInput {
     },
     LoadRemoteOnce,
     AllowSenderAlways,
+    /// A card's remote-content button: show what is blocked, or put the block
+    /// back. The banner does the first half and can be switched off entirely.
+    ToggleRemote { account_id: u32, id: u32 },
     /// The system/app light-dark preference changed; re-render to match.
     ThemeChanged,
     /// What one of the user's own mailboxes shows has changed — a Gravatar
@@ -515,6 +518,10 @@ pub enum MessageViewOutput {
         action: crate::ui::message_list::RowAction,
         message: Box<Message>,
     },
+    /// Remote content shown or blocked for one message, from the banner's
+    /// Load or the card's own toggle. Reported so the choice is remembered
+    /// and a repaint doesn't undo it.
+    SetRemote { account_id: u32, id: u32, show: bool },
     /// A card's "Add sender to Contacts" button — add this message's sender.
     ContactSender(Box<Message>),
     /// A right-click on a card: the app shows the message's full menu (the
@@ -743,6 +750,18 @@ impl Component for MessageView {
 
                 gtk::Box {
                     add_css_class: "reader-header",
+                    // The header's top padding is cut to the 4px that puts the
+                    // account chip level with the message list's first row.
+                    // That only reads as alignment when the header is against
+                    // the toolbar; under a bar it reads as cramped, so give it
+                    // its air back whenever one is showing.
+                    #[watch]
+                    set_class_active: (
+                        "under-bar",
+                        model.trust().is_alarming()
+                            || (model.blocked && model.show_banner)
+                            || model.find_open,
+                    ),
                     set_orientation: gtk::Orientation::Vertical,
                     set_spacing: 12,
 
@@ -925,12 +944,41 @@ impl Component for MessageView {
         // wrong size and then jumping. The page says when its frames have
         // settled; this is only the backstop for a page that never does.
         let ready_sender = sender.clone();
-        model.webview.connect_load_changed(move |_view, event| {
+        // Debug hook: VIREO_SHOWCASE_CLICK_LINK=1 clicks the first web link
+        // in the first message that has one, once, a few seconds after a
+        // conversation is in, and logs what the click landed on. Exercises
+        // the whole link path (frame → policy decision → launcher, #202)
+        // without a pointer.
+        let click_link = std::env::var("VIREO_SHOWCASE_CLICK_LINK").is_ok();
+        let clicked = std::rc::Rc::new(std::cell::Cell::new(false));
+        model.webview.connect_load_changed(move |view, event| {
             if event == webkit6::LoadEvent::Finished {
                 let s = ready_sender.clone();
                 gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(600), move || {
                     s.input(MessageViewInput::Rendered);
                 });
+                if click_link && !clicked.get() {
+                    let view = view.clone();
+                    let clicked = clicked.clone();
+                    gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(4), move || {
+                        view.evaluate_javascript(
+                            CLICK_LINK_PROBE,
+                            None,
+                            None,
+                            None::<&gtk::gio::Cancellable>,
+                            move |r| match r {
+                                Ok(v) => {
+                                    let text = v.to_str().to_string();
+                                    if text.starts_with("clicked") {
+                                        clicked.set(true);
+                                    }
+                                    tracing::info!("showcase: click-link probe: {text}");
+                                }
+                                Err(e) => tracing::warn!("showcase: click-link probe failed: {e}"),
+                            },
+                        );
+                    });
+                }
             }
         });
 
@@ -1112,6 +1160,9 @@ impl Component for MessageView {
                         account_id,
                         id,
                     }),
+                    "remote" => {
+                        open_sender.input(MessageViewInput::ToggleRemote { account_id, id })
+                    }
                     "archive" => open_sender.input(MessageViewInput::CardAction {
                         action: RowAction::Archive,
                         account_id,
@@ -1285,8 +1336,26 @@ impl Component for MessageView {
                 }
             }
             MessageViewInput::LoadRemoteOnce => {
+                // Tell the app as well, so the choice survives the next repaint
+                // and the reader menu stops offering to do what is already done.
+                if let Some(m) = &self.current {
+                    let _ = sender.output(MessageViewOutput::SetRemote {
+                        account_id: m.account_id,
+                        id: m.id,
+                        show: true,
+                    });
+                }
                 self.remote_allowed = true;
                 self.blocked = false;
+                self.render();
+            }
+            MessageViewInput::ToggleRemote { account_id, id } => {
+                let show = !self.remote_allowed;
+                self.remote_allowed = show;
+                self.blocked = !show && self.thread.iter().any(|m| has_remote_resources(&m.body));
+                let _ = sender.output(MessageViewOutput::SetRemote { account_id, id, show });
+                // The app records it and re-shows the message; that render is
+                // free (the fingerprint already matches), so paint now.
                 self.render();
             }
             MessageViewInput::AllowSenderAlways => {
@@ -2222,7 +2291,7 @@ impl MessageView {
                     acts = if !thread.is_empty() {
                         let key = (m.account_id, m.id);
                         format!(
-                            "<span class=\"vireo-acts\">{}{}{}{}{}{}{}{}{}{}{}{}</span>",
+                            "<span class=\"vireo-acts\">{}{}{}{}{}{}{}{}{}{}{}{}{}</span>",
                             // Same order as the reader toolbar and the list's
                             // actions palette, View Source closing the line.
                             card_action_button(key, "reply", "mail-reply-sender-symbolic", &i18n("Reply to this message")),
@@ -2278,6 +2347,29 @@ impl MessageView {
                                         i18n("Show the sender's fonts and colours")
                                     }),
                                     svg = inline_icon_svg("format-text-rich-symbolic"),
+                                )
+                            } else {
+                                String::new()
+                            },
+                            // Remote content, per message. The banner offers
+                            // the same thing, but it can be switched off
+                            // (Settings → Privacy) and then there is nothing to
+                            // click — and it only ever lets content in, where
+                            // this puts the block back too. Offered only on a
+                            // card that actually has something to load.
+                            if has_remote_resources(&m.body) {
+                                format!(
+                                    "<button type=\"button\" class=\"vireo-act{on_cls}\" data-act=\"remote\" \
+                                     data-key=\"{aid}:{id}\" title=\"{title}\">{svg}</button>",
+                                    on_cls = if restrict { "" } else { " on" },
+                                    aid = key.0,
+                                    id = key.1,
+                                    title = gtk::glib::markup_escape_text(&if restrict {
+                                        i18n("Show remote content")
+                                    } else {
+                                        i18n("Block remote content")
+                                    }),
+                                    svg = inline_icon_svg("image-x-generic-symbolic"),
                                 )
                             } else {
                                 String::new()
@@ -2973,7 +3065,7 @@ fn new_webview() -> webkit6::WebView {
         false // show the (edited) menu
     });
 
-    webview.connect_decide_policy(|_view, decision, decision_type| {
+    webview.connect_decide_policy(|view, decision, decision_type| {
         // Links (including ones inside sandboxed message iframes, and `_blank`
         // links that request a new window) open in the external browser.
         let is_nav = decision_type == webkit6::PolicyDecisionType::NavigationAction;
@@ -2991,10 +3083,8 @@ fn new_webview() -> webkit6::WebView {
                             // or any scheme a third-party app has registered to that
                             // app on a single click.
                             if is_launchable_uri(&uri) {
-                                let _ = gtk::gio::AppInfo::launch_default_for_uri(
-                                    &uri,
-                                    None::<&gtk::gio::AppLaunchContext>,
-                                );
+                                let window = view.root().and_downcast::<gtk::Window>();
+                                crate::ui::launch::open_link(&uri, window.as_ref());
                             } else {
                                 tracing::warn!(
                                     "refused to open a link with an unsupported scheme: {}",
@@ -3050,6 +3140,18 @@ fn new_webview() -> webkit6::WebView {
 /// An allowlist, not a blocklist: every scheme a desktop registers is a program
 /// that would be started with a sender-controlled argument, and there is no way
 /// to enumerate the dangerous ones ahead of time.
+/// The VIREO_SHOWCASE_CLICK_LINK probe: find the first web link in any
+/// message frame, say what the top document has at that point (the frame
+/// itself when nothing covers it), and click the link.
+const CLICK_LINK_PROBE: &str = "(function(){var fs=document.querySelectorAll('iframe.vireo-frame');\
+for(var i=0;i<fs.length;i++){var d=fs[i].contentDocument;if(!d)continue;\
+var a=d.querySelector('a[href^=\"http\"]');if(!a)continue;a.scrollIntoView({block:'center'});\
+var fr=fs[i].getBoundingClientRect(),r=a.getBoundingClientRect();\
+var x=fr.left+r.left+r.width/2,y=fr.top+r.top+r.height/2;var el=document.elementFromPoint(x,y);\
+var who=el?el.tagName+(el.className?'.'+el.className:''):'nothing';a.click();\
+return 'clicked '+a.href+' at '+Math.round(x)+','+Math.round(y)+' over '+who;}\
+return 'no web link in any frame';})()";
+
 fn is_launchable_uri(uri: &str) -> bool {
     match uri.split_once(':') {
         Some((scheme, rest)) => {
@@ -5593,6 +5695,41 @@ mod tests {
             1,
             "only the second card: {doc}"
         );
+    }
+
+    #[test]
+    fn a_card_offers_remote_content_both_ways_and_only_where_there_is_any() {
+        let mut with_remote = msg_for_print();
+        with_remote.body = "<p>Hello</p><img src=\"https://example.com/track.gif\">".into();
+        let mut without = msg_for_print();
+        without.id = 2;
+        without.body = "<p>Just words.</p>".into();
+        let doc_for = |restrict: bool| {
+            MessageView::conversation_document(
+                &[with_remote.clone(), without.clone()],
+                &std::collections::HashMap::new(),
+                &Default::default(),
+                &Default::default(),
+                &[],
+                "#3584e4",
+                restrict,
+                false,
+                false,
+                false,
+                &crate::config::ReaderStyle::NONE,
+                &Default::default(),
+            )
+        };
+        // Only the card with something to load carries the button.
+        let blocked = doc_for(true);
+        assert_eq!(blocked.matches("data-act=\"remote\"").count(), 1, "{blocked}");
+        assert!(blocked.contains("Show remote content"), "{blocked}");
+        assert!(!blocked.contains("class=\"vireo-act on\" data-act=\"remote\""), "not lit while blocked");
+        // Showing it, the same button offers to put the block back, and is lit.
+        let shown = doc_for(false);
+        assert_eq!(shown.matches("data-act=\"remote\"").count(), 1, "{shown}");
+        assert!(shown.contains("Block remote content"), "{shown}");
+        assert!(shown.contains("class=\"vireo-act on\" data-act=\"remote\""), "lit while showing: {shown}");
     }
 
     /// Each card carries its own Reply/Reply all/Forward, keyed to that message

@@ -971,6 +971,8 @@ fn blank_account() -> AccountConfig {
         oauth_refresh: String::new(),
         push: None,
         folder_roles: Default::default(),
+        sent_copy_path: None,
+        server_saves_sent: false,
         empty_junk_days: 0,
         empty_trash_days: 0,
         pgp_key: None,
