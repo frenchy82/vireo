@@ -1,9 +1,20 @@
 # Changelog
 
-## 1.32.3-beta.1 — 2026-09-16
+## 1.32.4-beta.1 — 2026-09-16
 
-Catch-up release: the beta channel is brought level with stable 1.32.2. No
-changes of its own — see the 1.32.2 section below for what is in it.
+Catch-up release: the beta channel is brought level with stable 1.32.3. No
+changes of its own — see the 1.32.3 section below for what is in it.
+
+## 1.32.3 — 2026-09-16
+
+The two strings the About page gained in 1.32.2 are translated in
+Portuguese.
+
+- **Portuguese updated** (PR #207 by [@somepaulo](https://github.com/somepaulo)).
+  1.32.2 reworded the one-line description under the version chip and made
+  the issue tracker's row translatable. Both are covered in `po/pt_PT.po`
+  and `po/pt_BR.po`, so each is complete again at 1220 of 1220 with no
+  fuzzy entries.
 
 ## 1.32.2 — 2026-09-16
 
