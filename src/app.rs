@@ -395,12 +395,22 @@ pub struct AppModel {
     /// Split-reply slot (#86): a reply slides down from the pane's top and
     /// the message(s) stay below it, visible and interactive.
     reader_split_top: gtk::Revealer,
+    /// The same slot beneath the reader (#212): the reply slides up from the
+    /// pane's bottom edge when the reading order puts the newest message
+    /// there, so the editor continues the conversation where it ends. Only
+    /// one of the two slots is ever occupied.
+    reader_split_bottom: gtk::Revealer,
     /// The vertical Paned dividing the split reply (start child, the slot
     /// above) from the reader (end child). A Paned allocates by divider
     /// position, so the composer holds the height it was given — a big paste
     /// can't push it down over the messages — and its divider is the grab
     /// handle that resizes the panel. Hidden slot = hidden divider.
     reader_split: gtk::Paned,
+    /// The reader's own Paned, nested as `reader_split`'s end child: the
+    /// reader (start child) over the bottom slot (end child). A second Paned
+    /// rather than swapping children, so the reader is never reparented and
+    /// the bottom slot has a divider of its own to be sized by.
+    reader_split_lower: gtk::Paned,
     /// The running slide (open or close) of the split reply — held so the
     /// opposite motion can skip it to its end instead of fighting it over
     /// the divider.
@@ -755,6 +765,10 @@ pub struct AppModel {
     body_hits: std::collections::HashMap<(u32, u32), std::collections::HashMap<u32, Vec<String>>>,
     /// Lone messages render as inset cards (#57).
     single_message_card: bool,
+    /// Each conversation message lists its own attachments (#213).
+    card_attachments: bool,
+    /// The attachment drawer beneath the reader is shown at all (#213).
+    drawer_enabled: bool,
     /// Whether conversation rows may expand into their members in the list
     /// (the row keeps its chip and chevron either way).
     thread_expansion: bool,
@@ -792,6 +806,8 @@ pub struct AppModel {
     paste_plain: bool,
     /// New messages start as plain text (#180).
     compose_format: crate::config::ComposeFormat,
+    /// Where the split reply opens in the reading pane (#212).
+    reply_position: config::ReplyPosition,
     spellcheck: bool,
     spellcheck_langs: String,
     /// How email content is themed (message content only, not the app UI).
@@ -1047,7 +1063,11 @@ pub enum AppMsg {
     PurgeMessages(Vec<Message>),
     /// The rest of an open message's conversation, found in other folders.
     Related { account_id: u32, message_id: u32, messages: Vec<Message> },
-    RowAction { action: RowAction, message: Box<Message> },
+    /// A row's palette or context-menu action. `conversation` holds the whole
+    /// thread when the row stands for a collapsed conversation rather than for
+    /// `message` alone — a reply started there answers the conversation's
+    /// newest message, not the head it is filed under (#210). Empty otherwise.
+    RowAction { action: RowAction, message: Box<Message>, conversation: Vec<Message> },
     /// A conversation card's own action pill. Reply/Reply all/Forward open the
     /// reader's inline composer (like the toolbar); the rest act like RowAction.
     CardAction { action: RowAction, message: Box<Message> },
@@ -1284,6 +1304,17 @@ pub enum AppMsg {
     SetPlainFont(String),
     /// Settings: new messages start as plain text (#180).
     SetComposeFormat(crate::config::ComposeFormat),
+    /// Settings: where the split reply opens in the reading pane (#212).
+    SetReplyPosition(config::ReplyPosition),
+    /// Settings: each conversation message lists its own attachments (#213).
+    SetCardAttachments(bool),
+    /// Settings: the attachment drawer beneath the reader is shown (#213).
+    SetAttachmentDrawer(bool),
+    /// A card's attachment chip (#213): open the file, or save it.
+    CardAttachment { account_id: u32, id: u32, index: usize, save: bool },
+    /// The drawer's "Show in Message": scroll the reader to the message this
+    /// attachment came with (#213).
+    ShowAttachmentInMessage(Attachment),
     /// Showcase only: turn the inline composer's preview on.
     ShowcaseComposePreview,
     /// Showcase only (VIREO_SHOWCASE_COMPOSE_UNDO): drive the inline
@@ -2345,8 +2376,8 @@ impl SimpleComponent for AppModel {
                     MessageListOutput::Activated { message, thread } => {
                         AppMsg::OpenMessageWindow { message, thread }
                     }
-                    MessageListOutput::Action { action, message } => {
-                        AppMsg::RowAction { action, message }
+                    MessageListOutput::Action { action, message, conversation } => {
+                        AppMsg::RowAction { action, message, conversation }
                     }
                     MessageListOutput::SetTag { message, keyword, add } => {
                         AppMsg::SetTag { message, keyword, add }
@@ -2376,6 +2407,9 @@ impl SimpleComponent for AppModel {
                         AppMsg::CardAction { action, message }
                     }
                     MessageViewOutput::ContactSender(m) => AppMsg::CardContact(m),
+                    MessageViewOutput::AttachmentAction { account_id, id, index, save } => {
+                        AppMsg::CardAttachment { account_id, id, index, save }
+                    }
                     MessageViewOutput::CardMenu { message, x, y } => {
                         AppMsg::CardMenu { message, x, y }
                     }
@@ -2405,6 +2439,9 @@ impl SimpleComponent for AppModel {
             .forward(sender.input_sender(), |out| match out {
                 crate::ui::attachment_drawer::DrawerOutput::ShowLightbox { items, start } => {
                     AppMsg::ShowLightbox { items, start }
+                }
+                crate::ui::attachment_drawer::DrawerOutput::ShowInMessage(att) => {
+                    AppMsg::ShowAttachmentInMessage(att)
                 }
             });
 
@@ -2537,6 +2574,20 @@ impl SimpleComponent for AppModel {
                 r.set_transition_duration(300);
                 r.set_reveal_child(false);
                 r
+            },
+            reader_split_bottom: {
+                let r = gtk::Revealer::new();
+                r.set_transition_type(gtk::RevealerTransitionType::SlideUp);
+                r.set_transition_duration(300);
+                r.set_reveal_child(false);
+                r
+            },
+            reader_split_lower: {
+                let p = gtk::Paned::new(gtk::Orientation::Vertical);
+                // Same invisible separator as the outer split: the bottom
+                // panel's grab pill is its visible affordance too.
+                p.add_css_class("reader-split");
+                p
             },
             split_close_anim: std::rc::Rc::new(std::cell::RefCell::new(None)),
             reader_header: std::cell::OnceCell::new(),
@@ -2771,6 +2822,8 @@ impl SimpleComponent for AppModel {
             filter_moved: Default::default(),
             body_hits: Default::default(),
             single_message_card: config::load_single_message_card(),
+            card_attachments: config::load_card_attachments(),
+            drawer_enabled: config::load_attachment_drawer(),
             thread_expansion: config::load_thread_expansion(),
             confirm_thread_delete: config::load_confirm_thread_delete(),
             selection_from_cards: false,
@@ -2787,6 +2840,7 @@ impl SimpleComponent for AppModel {
             compose_default_from: config::load_compose_default_from(),
             paste_plain: config::load_paste_plain(),
             compose_format: config::load_compose_format(),
+            reply_position: config::load_reply_position(),
             spellcheck: config::load_spellcheck(),
             spellcheck_langs: config::load_spellcheck_langs(),
             message_theme: config::load_message_theme(),
@@ -2927,6 +2981,12 @@ impl SimpleComponent for AppModel {
         model
             .message_view
             .emit(MessageViewInput::SetSingleMessageCard(model.single_message_card));
+        model
+            .message_view
+            .emit(MessageViewInput::SetCardAttachmentsShown(model.card_attachments));
+        model
+            .message_view
+            .emit(MessageViewInput::SetAttachmentDrawer(model.drawer_enabled));
         model.arm_auto_fetch(&sender);
 
         // The app-wide theme choice must be in force before the first frame.
@@ -3087,9 +3147,21 @@ impl SimpleComponent for AppModel {
             // position — dragged by the user, immune to the editor's natural
             // height — instead of whatever the composer asks for.
             pane.set_vexpand(true);
+            // The reader over the bottom slot (#212), the pair beneath the
+            // top slot. Each slot is hidden while no split reply is open in
+            // it, which hides its divider too.
+            let lower = &model.reader_split_lower;
+            lower.set_start_child(Some(&pane));
+            lower.set_end_child(Some(&model.reader_split_bottom));
+            lower.set_resize_start_child(true);
+            lower.set_shrink_start_child(true);
+            lower.set_resize_end_child(false);
+            lower.set_shrink_end_child(false);
+            lower.set_vexpand(true);
+            model.reader_split_bottom.set_visible(false);
             let split = &model.reader_split;
             split.set_start_child(Some(&model.reader_split_top));
-            split.set_end_child(Some(&pane));
+            split.set_end_child(Some(lower));
             // Window resizes go to the reader; the composer keeps its set
             // height and never shrinks below its minimum. The reader may
             // shrink — the divider clamp at open time is what keeps a slice
@@ -3098,7 +3170,6 @@ impl SimpleComponent for AppModel {
             split.set_shrink_start_child(false);
             split.set_resize_end_child(true);
             split.set_shrink_end_child(true);
-            // Hidden while no split reply is open, which hides the divider too.
             model.reader_split_top.set_visible(false);
             let overlay = gtk::Overlay::new();
             overlay.set_child(Some(split));
@@ -5389,6 +5460,11 @@ impl SimpleComponent for AppModel {
                 // inline composer, exactly like the toolbar's buttons — not in
                 // a separate compose window.
                 let m = self.with_cached_body(*message);
+                tracing::debug!(
+                    target: "vireo::reply",
+                    "card {:?}: {}:{} from={}",
+                    action, m.account_id, m.id, m.from_addr,
+                );
                 match action {
                     RowAction::Reply => {
                         self.open_inline_reply(m.account_id, self.reply_pgp(&m, reply_prefill(&m)), Some((m.account_id, m.id)), &sender);
@@ -5410,6 +5486,8 @@ impl SimpleComponent for AppModel {
                     other => sender.input(AppMsg::RowAction {
                         action: other,
                         message: Box::new(m),
+                        // A card is always its own message.
+                        conversation: Vec::new(),
                     }),
                 }
             }
@@ -5425,8 +5503,16 @@ impl SimpleComponent for AppModel {
                 self.show_add_contact_dialog(&message.from_name, &message.from_addr, &sender);
             }
 
-            AppMsg::RowAction { action, message } => {
+            AppMsg::RowAction { action, message, conversation } => {
                 let m = *message;
+                if matches!(action, RowAction::Reply | RowAction::ReplyAll | RowAction::Forward) {
+                    tracing::debug!(
+                        target: "vireo::reply",
+                        "row {:?}: {}:{} from={} conversation={:?}",
+                        action, m.account_id, m.id, m.from_addr,
+                        conversation.iter().map(|c| c.id).collect::<Vec<_>>(),
+                    );
+                }
                 if self.outbox_item(m.account_id, m.id).is_some() {
                     // Nothing else in the palette applies to an unsent message,
                     // and every other action would aim an IMAP command at a UID
@@ -5437,11 +5523,17 @@ impl SimpleComponent for AppModel {
                     return;
                 }
                 match action {
+                    // A row that stands for a whole conversation answers the
+                    // conversation's newest message, exactly as the reader's
+                    // own reply does (#210) — the row is filed under the
+                    // thread's head, which is its oldest message.
                     RowAction::Reply => {
+                        let m = self.newest_to_answer(&conversation, m);
                         let m = self.with_cached_body(m);
                         self.open_compose(m.account_id, self.reply_pgp(&m, reply_prefill(&m)), &sender);
                     }
                     RowAction::ReplyAll => {
+                        let m = self.newest_to_answer(&conversation, m);
                         let m = self.with_cached_body(m);
                         let self_email = self.email_of(m.account_id).unwrap_or_default();
                         self.open_compose(
@@ -5451,6 +5543,7 @@ impl SimpleComponent for AppModel {
                         );
                     }
                     RowAction::Forward => {
+                        let m = self.newest_to_answer(&conversation, m);
                         let m = self.with_cached_body(m);
                         self.open_compose(m.account_id, forward_prefill(&m), &sender);
                     }
@@ -6355,6 +6448,67 @@ impl SimpleComponent for AppModel {
                 }
             }
 
+            AppMsg::SetCardAttachments(on) => {
+                if self.card_attachments != on {
+                    self.card_attachments = on;
+                    self.save_settings();
+                    self.message_view.emit(MessageViewInput::SetCardAttachmentsShown(on));
+                }
+            }
+            AppMsg::SetAttachmentDrawer(on) => {
+                if self.drawer_enabled != on {
+                    self.drawer_enabled = on;
+                    self.save_settings();
+                    self.sync_attachment_drawer();
+                    self.message_view.emit(MessageViewInput::SetAttachmentDrawer(on));
+                }
+            }
+            AppMsg::CardAttachment { account_id, id, index, save } => {
+                let Some(items) = self.attachment_cache.get(&(account_id, id)).cloned() else {
+                    return;
+                };
+                let Some(att) = items.get(index).cloned() else { return };
+                if save {
+                    save_attachment(att, Some(self.window.clone()));
+                } else if crate::ui::attachment_drawer::previewable(&att) {
+                    // The lightbox pages through this message's previewable
+                    // files, starting at the one clicked.
+                    let previewable: Vec<Attachment> = items
+                        .iter()
+                        .filter(|a| crate::ui::attachment_drawer::previewable(a))
+                        .cloned()
+                        .collect();
+                    let start = items
+                        .iter()
+                        .take(index + 1)
+                        .filter(|a| crate::ui::attachment_drawer::previewable(a))
+                        .count()
+                        .saturating_sub(1);
+                    sender.input(AppMsg::ShowLightbox { items: previewable, start });
+                } else {
+                    crate::ui::attachments_gallery::open_bytes(
+                        &att.name,
+                        &att.data,
+                        Some(self.window.upcast_ref::<gtk::Window>()),
+                    );
+                }
+            }
+            AppMsg::ShowAttachmentInMessage(att) => {
+                // The drawer shows identical (name, size) pairs once, so the
+                // first message carrying this one is the one to find.
+                let owner = self
+                    .conversation_members()
+                    .into_iter()
+                    .find(|key| {
+                        self.attachment_cache.get(key).is_some_and(|items| {
+                            items.iter().any(|a| a.name == att.name && a.data.len() == att.data.len())
+                        })
+                    });
+                if let Some((account_id, id)) = owner {
+                    self.message_view
+                        .emit(MessageViewInput::ScrollToAttachments { account_id, id });
+                }
+            }
             AppMsg::SetSingleMessageCard(on) => {
                 if self.single_message_card != on {
                     self.single_message_card = on;
@@ -6682,6 +6836,14 @@ impl SimpleComponent for AppModel {
             AppMsg::SetComposeFormat(format) => {
                 if self.compose_format != format {
                     self.compose_format = format;
+                    self.save_settings();
+                }
+            }
+            AppMsg::SetReplyPosition(position) => {
+                // A split reply already open stays where it is; the next
+                // one opens in the new place.
+                if self.reply_position != position {
+                    self.reply_position = position;
                     self.save_settings();
                 }
             }
@@ -8825,6 +8987,8 @@ impl AppModel {
             self.thread_newest_first,
             self.always_show_recipients,
             self.single_message_card,
+            self.card_attachments,
+            self.drawer_enabled,
             self.confirm_thread_delete,
             self.message_theme,
             self.override_fonts,
@@ -8850,6 +9014,7 @@ impl AppModel {
             &self.compose_default_from,
             self.paste_plain,
             self.compose_format,
+            self.reply_position,
             self.spellcheck,
             self.spellcheck_langs.clone(),
             self.preview_lines,
@@ -10008,26 +10173,59 @@ impl AppModel {
     /// The message a reply, reply-all or forward addresses: the reply
     /// target, except when only the list row is selected over a
     /// conversation. That row stands for the thread's head, its oldest
-    /// message; the toolbar's reply follows the reading pane instead and
-    /// addresses the message shown at the top (#165) — with "newest first"
-    /// on, the newest message from someone else (never the user's own
-    /// reply by accident), or the newest of all when every message is
-    /// theirs; the head otherwise. A highlighted card is addressed as
-    /// itself.
+    /// message, and answering the oldest message of a conversation is never
+    /// what was meant (#210) — so the toolbar's reply addresses the
+    /// conversation's newest message from someone else (never the user's own
+    /// reply by accident), or the newest of all when every message is theirs.
+    /// This holds whichever way the reading pane is ordered: "newest first"
+    /// only decides where that message is drawn (#165). A highlighted card is
+    /// addressed as itself.
     fn compose_target(&self) -> Option<Message> {
         let m = self.reply_target()?;
-        if self.selection_from_cards || !self.thread_star_target(&m) || !self.thread_newest_first {
+        tracing::debug!(
+            target: "vireo::reply",
+            "toolbar target: selected {}:{} from={} cards={} thread={} head={}",
+            m.account_id, m.id, m.from_addr, self.selection_from_cards,
+            self.current_thread.len(), self.thread_star_target(&m),
+        );
+        if self.selection_from_cards || !self.thread_star_target(&m) {
             return Some(m);
         }
-        let own = self.email_of(m.account_id).unwrap_or_default();
+        let picked = self.newest_to_answer(&self.current_thread, m);
+        tracing::debug!(
+            target: "vireo::reply",
+            "toolbar target: answering {}:{} from={}",
+            picked.account_id, picked.id, picked.from_addr,
+        );
+        Some(picked)
+    }
+
+    /// Which message of a conversation an untargeted reply answers: the newest
+    /// message from someone else, so a reply never lands on the user's own last
+    /// word, or the newest of all when every message is theirs. `fallback` is
+    /// returned for anything that is not a conversation.
+    ///
+    /// Shared by every untargeted reply — the reader toolbar, the keyboard
+    /// shortcut, and a row's palette or menu — so all of them answer the same
+    /// message (#210).
+    fn newest_to_answer(&self, thread: &[Message], fallback: Message) -> Message {
+        if thread.len() <= 1 {
+            return fallback;
+        }
+        let mut own = self.own_identities(fallback.account_id);
+        if own.is_empty() {
+            own.extend(self.email_of(fallback.account_id));
+        }
         let newest = |from_others: bool| {
-            self.current_thread
+            thread
                 .iter()
-                .filter(|t| !from_others || !t.from_addr.eq_ignore_ascii_case(&own))
+                .filter(|t| {
+                    !from_others || !own.iter().any(|o| t.from_addr.eq_ignore_ascii_case(o))
+                })
                 .max_by_key(|t| t.timestamp)
                 .cloned()
         };
-        newest(true).or_else(|| newest(false)).or(Some(m))
+        newest(true).or_else(|| newest(false)).unwrap_or(fallback)
     }
 
     /// Launch (or re-present) the welcome wizard: the first run's greeting,
@@ -10083,14 +10281,24 @@ impl AppModel {
         self.push_unread_counts();
     }
 
-    /// Whether a star toggle aimed at `m` should act on the whole open
-    /// conversation: a thread is open and `m` is its head.
+    /// Whether a star toggle (or an untargeted reply) aimed at `m` should act
+    /// on the whole open conversation: a thread is open and `m` is the row it
+    /// was opened from, which stands for every message in it.
+    ///
+    /// That row is the head of the conversation *as the folder lists it*, and
+    /// not necessarily the oldest message once the members from other folders
+    /// have been merged in and the whole re-sorted: a reply of the user's own
+    /// pulled in from Sent can precede it. So the message the reader was
+    /// opened on is what identifies the row, never `current_thread`'s first
+    /// entry (#210). `current` is that message on every path a conversation
+    /// is assembled by, including the one where a lone folder message finds
+    /// its siblings in other folders.
     fn thread_star_target(&self, m: &Message) -> bool {
         self.current_thread.len() > 1
             && self
-                .current_thread
-                .first()
-                .is_some_and(|h| h.id == m.id && h.account_id == m.account_id)
+                .current
+                .as_ref()
+                .is_some_and(|c| c.account_id == m.account_id && c.id == m.id)
     }
 
     /// Whether the reader toolbar's star shows lit: the target message's own
@@ -10802,8 +11010,40 @@ impl AppModel {
     }
 
     fn sync_attachment_drawer(&self) {
-        self.attachment_drawer
-            .emit(AttachmentDrawerInput::SetItems(self.attachments.clone()));
+        // Switched off (#213), the drawer is simply never given anything:
+        // empty hides it, seam and all.
+        let items = if self.drawer_enabled { self.attachments.clone() } else { Vec::new() };
+        self.attachment_drawer.emit(AttachmentDrawerInput::SetItems(items));
+        self.push_card_attachments();
+    }
+
+    /// The messages on screen: the open conversation, or the lone message.
+    fn conversation_members(&self) -> Vec<(u32, u32)> {
+        if self.current_thread.is_empty() {
+            self.current.iter().map(|c| (c.account_id, c.id)).collect()
+        } else {
+            self.current_thread.iter().map(|m| (m.account_id, m.id)).collect()
+        }
+    }
+
+    /// Hand the reader what each message on screen has attached (#213), as
+    /// far as the cache knows: names and sizes only, never the bytes — the
+    /// document lists them, and the app opens or saves them on request.
+    fn push_card_attachments(&self) {
+        use crate::ui::message_view::CardAttachment;
+        let mut map: HashMap<(u32, u32), Vec<CardAttachment>> = HashMap::new();
+        for key in self.conversation_members() {
+            if let Some(items) = self.attachment_cache.get(&key) {
+                let atts: Vec<CardAttachment> = items
+                    .iter()
+                    .map(|a| CardAttachment { name: a.name.clone(), size: a.data.len() as u64 })
+                    .collect();
+                if !atts.is_empty() {
+                    map.insert(key, atts);
+                }
+            }
+        }
+        self.message_view.emit(MessageViewInput::SetCardAttachments(map));
     }
 
     /// Fill the drawer for a whole conversation: ask the disk cache for every
@@ -11514,7 +11754,8 @@ impl AppModel {
             .launch(init)
             .forward(sender.input_sender(), move |out| match out {
                 MessageWindowOutput::Action { action, message } => {
-                    AppMsg::RowAction { action, message }
+                    // The window's actions name the card they came from.
+                    AppMsg::RowAction { action, message, conversation: Vec::new() }
                 }
                 MessageWindowOutput::AddToContacts { name, email } => {
                     AppMsg::AddContactFrom { name, email }
@@ -11929,6 +12170,7 @@ impl AppModel {
             windowed,
             can_toggle,
             compact: false,
+            decorations: true,
             format: self.compose_format,
         };
         (id, init)
@@ -12405,21 +12647,25 @@ impl AppModel {
         if let Some(prev) = prev_anim {
             prev.skip();
         }
-        if self.reader_split_top.is_visible() && self.reader_split_top.child().is_some() {
-            config::save_split_reply_height(self.reader_split.position());
+        if let Some((slot, split, bottom)) = self.live_split() {
+            if slot.is_visible() {
+                config::save_split_reply_height(split_reply_height(&split, bottom));
+            }
         }
         // The reader gets its header back with the pane.
         self.show_reader_header(true);
-        self.reader_split_top.set_reveal_child(false);
-        // The composer sits inside the grab-pill Overlay wrapper: unparent it
-        // from there explicitly, or hosting it elsewhere (pop-out, drain)
-        // would find it still parented.
-        if let Some(wrap) = self.reader_split_top.child().and_downcast::<gtk::Overlay>() {
-            wrap.set_child(None::<&gtk::Widget>);
+        for slot in [&self.reader_split_top, &self.reader_split_bottom] {
+            slot.set_reveal_child(false);
+            // The composer sits inside the grab-pill Overlay wrapper:
+            // unparent it from there explicitly, or hosting it elsewhere
+            // (pop-out, drain) would find it still parented.
+            if let Some(wrap) = slot.child().and_downcast::<gtk::Overlay>() {
+                wrap.set_child(None::<&gtk::Widget>);
+            }
+            slot.set_child(None::<&gtk::Widget>);
+            // Hiding the slot hides the Paned divider with it.
+            slot.set_visible(false);
         }
-        self.reader_split_top.set_child(None::<&gtk::Widget>);
-        // Hiding the slot hides the Paned divider with it.
-        self.reader_split_top.set_visible(false);
         // The split's reply-target outline goes with the composer.
         self.message_view.emit(MessageViewInput::BlurCard);
     }
@@ -12457,7 +12703,7 @@ impl AppModel {
     /// allowed to shrink below the composer's minimum. The teardown at the
     /// end is skipped if a new reply has taken the slot meanwhile.
     fn animate_split_close(&self) {
-        let slot = &self.reader_split_top;
+        let Some((slot, split, bottom)) = self.live_split() else { return };
         let Some(wrap) = slot.child() else { return };
         // Settle any running slide first, so the height saved below is the
         // real one and not a mid-animation reading.
@@ -12469,28 +12715,30 @@ impl AppModel {
             prev.skip();
         }
         if slot.is_visible() {
-            config::save_split_reply_height(self.reader_split.position());
+            config::save_split_reply_height(split_reply_height(&split, bottom));
         }
         // The reply-target outline goes with the composer, as on an
         // instant teardown.
         self.message_view.emit(MessageViewInput::BlurCard);
 
-        let split = self.reader_split.clone();
-        split.set_shrink_start_child(true);
+        set_split_shrink(&split, bottom, true);
         slot.set_reveal_child(false);
         // The reader's header comes back in step with the panel's exit: it
         // slides down while the panel slides up, its icons fading in, so the
         // reader below moves in one motion rather than jumping up as the
-        // panel goes and back down as the header pops in after it.
+        // panel goes and back down as the header pops in after it. (Beneath
+        // the reader the header never left; this is a no-op there.)
         self.show_reader_header(true);
         let from = split.position() as f64;
+        // Out the way it came in: to nothing above the reader, to the
+        // pane's full height beneath it.
+        let to = if bottom { split.height() as f64 } else { 0.0 };
         let target = adw::CallbackAnimationTarget::new({
             let split = split.clone();
             move |v| split.set_position(v as i32)
         });
-        let anim = adw::TimedAnimation::new(&split, from, 0.0, 300, target);
+        let anim = adw::TimedAnimation::new(&split, from, to, 300, target);
         anim.set_easing(adw::Easing::EaseOutCubic);
-        let slot = slot.clone();
         let cell = self.split_close_anim.clone();
         anim.connect_done(move |_| {
             cell.borrow_mut().take();
@@ -12505,7 +12753,7 @@ impl AppModel {
             // composer still in the slot, forbidding shrink first would
             // re-clamp the divider to the composer's minimum for a frame —
             // the bounce at the end of the slide.
-            split.set_shrink_start_child(false);
+            set_split_shrink(&split, bottom, false);
         });
         *self.split_close_anim.borrow_mut() = Some(anim.clone());
         anim.play();
@@ -12540,20 +12788,56 @@ impl AppModel {
     }
 
     /// The split reply's grab handle: the shared grab pill, floated at the
-    /// panel's bottom edge and bounded like the panel's opening height — a
-    /// usable panel, a visible reader.
-    fn build_split_grab_pill(&self) -> gtk::Box {
-        let pill = crate::ui::grab_pill::paned_grab_pill(&self.reader_split, |split, want| {
-            want.clamp(220, (split.height() - 200).max(220))
+    /// panel's edge that meets the reader and bounded like the panel's
+    /// opening height — a usable panel, a visible reader. Above the reader
+    /// that edge is the panel's bottom; beneath it (#212), its top, where the
+    /// divider position is the reader's height rather than the panel's.
+    fn build_split_grab_pill(&self, bottom: bool) -> gtk::Box {
+        let paned = if bottom { &self.reader_split_lower } else { &self.reader_split };
+        let pill = crate::ui::grab_pill::paned_grab_pill(paned, move |split, want| {
+            if bottom {
+                want.clamp(200, (split.height() - 220).max(200))
+            } else {
+                want.clamp(220, (split.height() - 200).max(220))
+            }
         });
-        pill.set_valign(gtk::Align::End);
-        // Bias the centred bar 6px downward inside its hit zone (a top margin
-        // shifts the centring by half its size): more air between the editor
-        // card and the bar, matching the attachment drawer's spacing.
+        pill.set_valign(if bottom { gtk::Align::Start } else { gtk::Align::End });
+        // Bias the centred bar 6px away from the editor inside its hit zone
+        // (a margin shifts the centring by half its size): more air between
+        // the editor card and the bar, matching the attachment drawer's
+        // spacing.
         if let Some(bar) = pill.first_child() {
-            bar.set_margin_top(12);
+            if bottom {
+                bar.set_margin_bottom(12);
+            } else {
+                bar.set_margin_top(12);
+            }
         }
         pill
+    }
+
+    /// The split-reply slot in use, with the Paned that sizes it and whether
+    /// it is the one beneath the reader; `None` while no split reply is open.
+    fn live_split(&self) -> Option<(gtk::Revealer, gtk::Paned, bool)> {
+        if self.reader_split_top.child().is_some() {
+            Some((self.reader_split_top.clone(), self.reader_split.clone(), false))
+        } else if self.reader_split_bottom.child().is_some() {
+            Some((self.reader_split_bottom.clone(), self.reader_split_lower.clone(), true))
+        } else {
+            None
+        }
+    }
+
+    /// Whether the next split reply opens beneath the reader (#212): by the
+    /// setting outright, or following the reading order — beneath when the
+    /// conversation reads downward to its newest message, above when the
+    /// newest is at the top.
+    fn split_reply_at_bottom(&self) -> bool {
+        match self.reply_position {
+            config::ReplyPosition::Top => false,
+            config::ReplyPosition::Bottom => true,
+            config::ReplyPosition::Follow => !self.thread_newest_first,
+        }
     }
 
     fn open_inline_reply(
@@ -12569,6 +12853,10 @@ impl AppModel {
         let (id, mut init) = self.build_compose_init(account_id, prefill, false, true);
         // The split reply is compact: just the editor, fields behind pop-out.
         init.compact = contextual;
+        // Beneath the reader (#212) the reader's header stays, so the
+        // composer's must not carry a second set of window controls.
+        let bottom = contextual && !self.showing_contacts && self.split_reply_at_bottom();
+        init.decorations = !bottom;
         let controller = self.spawn_compose(init, sender);
         let widget = controller.widget();
         widget.set_hexpand(true);
@@ -12592,22 +12880,27 @@ impl AppModel {
             if let Some(prev) = prev_anim {
                 prev.skip();
             }
-            // The reader's own header would show a second set of window
-            // decorations mid-window (the composer header at the pane's top
-            // already carries them) and spend vertical space the split
-            // needs: gone while the split hosts, back when it goes. What
-            // remains of the reader starts at the remote-content banner, or
-            // the subject block when there is none.
-            self.show_reader_header(false);
-            let slot = &self.reader_split_top;
+            // Above the reader, the reader's own header would show a second
+            // set of window decorations mid-window (the composer header at
+            // the pane's top already carries them) and spend vertical space
+            // the split needs: gone while the split hosts, back when it
+            // goes. What remains of the reader starts at the remote-content
+            // banner, or the subject block when there is none. Beneath the
+            // reader the header is nowhere near the panel and stays.
+            self.show_reader_header(bottom);
+            let (slot, split) = if bottom {
+                (&self.reader_split_bottom, self.reader_split_lower.clone())
+            } else {
+                (&self.reader_split_top, self.reader_split.clone())
+            };
             widget.set_vexpand(true);
             let wrap = gtk::Overlay::new();
             wrap.set_child(Some(widget));
-            wrap.add_overlay(&self.build_split_grab_pill());
+            wrap.add_overlay(&self.build_split_grab_pill(bottom));
             slot.set_child(Some(&wrap));
             slot.set_visible(true);
             slot.set_reveal_child(true);
-            let pane_h = self.reader_split.height();
+            let pane_h = split.height();
             let pane_h = if pane_h > 0 { pane_h } else { 900 };
             let saved = config::load_split_reply_height();
             let h =
@@ -12617,15 +12910,21 @@ impl AppModel {
             // the animation, driven from zero to the opening height (the
             // revealer's own transition can't run — it starts unmapped, and
             // adw skips animations on unmapped widgets — so the divider
-            // does all the moving).
+            // does all the moving). Beneath the reader the divider position
+            // is the reader's height, so the same slide runs from the pane's
+            // full height down to what is left once the panel has its share.
             let target = h.clamp(220, (pane_h - 200).max(220));
-            let split = self.reader_split.clone();
-            split.set_shrink_start_child(true);
-            split.set_position(0);
+            let (from, to) = if bottom {
+                (pane_h as f64, (pane_h - target) as f64)
+            } else {
+                (0.0, target as f64)
+            };
+            set_split_shrink(&split, bottom, true);
+            split.set_position(from as i32);
             let anim = adw::TimedAnimation::new(
                 &split,
-                0.0,
-                target as f64,
+                from,
+                to,
                 300,
                 adw::CallbackAnimationTarget::new({
                     let split = split.clone();
@@ -12638,7 +12937,7 @@ impl AppModel {
                 let cell = cell.clone();
                 move |_| {
                     cell.borrow_mut().take();
-                    split.set_shrink_start_child(false);
+                    set_split_shrink(&split, bottom, false);
                 }
             });
             *cell.borrow_mut() = Some(anim.clone());
@@ -12689,7 +12988,7 @@ impl AppModel {
             None => {
                 // Either kind of inline composer slides out the way it
                 // slid in.
-                if self.reader_split_top.child().is_some() {
+                if self.live_split().is_some() {
                     self.animate_split_close();
                 } else {
                     self.animate_cover_close();
@@ -12734,6 +13033,9 @@ impl AppModel {
                 slot.set_can_target(true);
                 let s = slot.clone();
                 gtk::glib::idle_add_local_once(move || s.set_reveal_child(true));
+                // Back inline it covers the reader, header and all, so it
+                // carries the decorations whatever slot it left from.
+                r.controller.emit(ComposeInput::SetDecorations(true));
                 r.controller.emit(ComposeInput::SetWindowed(false));
             }
         }
@@ -12759,7 +13061,7 @@ impl AppModel {
                 None => {
                     // Cancel/send on either inline composer: slide it out,
                     // not blink it.
-                    if self.reader_split_top.child().is_some() {
+                    if self.live_split().is_some() {
                         self.animate_split_close();
                     } else {
                         self.animate_cover_close();
@@ -14102,6 +14404,8 @@ impl AppModel {
             thread_newest_first: self.thread_newest_first,
             always_show_recipients: self.always_show_recipients,
             single_message_card: self.single_message_card,
+            card_attachments: self.card_attachments,
+            attachment_drawer: self.drawer_enabled,
             thread_expansion: self.thread_expansion,
             confirm_thread_delete: self.confirm_thread_delete,
             message_theme: self.message_theme,
@@ -14111,6 +14415,7 @@ impl AppModel {
             plain_monospace: self.plain_monospace,
             plain_font: self.plain_font.clone(),
             compose_format: self.compose_format,
+            reply_position: self.reply_position,
             notifications: self.notifications_enabled,
             notification_content: self.notification_content,
             show_attachments: self.show_attachments,
@@ -14196,6 +14501,8 @@ impl AppModel {
                 PrefOutput::SetThreadNewestFirst(on) => AppMsg::SetThreadNewestFirst(on),
                 PrefOutput::SetAlwaysShowRecipients(on) => AppMsg::SetAlwaysShowRecipients(on),
                 PrefOutput::SetSingleMessageCard(on) => AppMsg::SetSingleMessageCard(on),
+                PrefOutput::SetCardAttachments(on) => AppMsg::SetCardAttachments(on),
+                PrefOutput::SetAttachmentDrawer(on) => AppMsg::SetAttachmentDrawer(on),
                 PrefOutput::SetCardActionsMode { hover_toggle, hover_auto } => {
                     AppMsg::SetCardActionsMode { hover_toggle, hover_auto }
                 }
@@ -14265,6 +14572,7 @@ impl AppModel {
                 PrefOutput::SetPlainMonospace(on) => AppMsg::SetPlainMonospace(on),
                 PrefOutput::SetPlainFont(font) => AppMsg::SetPlainFont(font),
                 PrefOutput::SetComposeFormat(f) => AppMsg::SetComposeFormat(f),
+                PrefOutput::SetReplyPosition(p) => AppMsg::SetReplyPosition(p),
                 PrefOutput::Closed => AppMsg::ClosePreferences,
             });
         accounts.emit(crate::ui::accounts::AccountsInput::SetFolderChoices(
@@ -16283,6 +16591,28 @@ fn focus_matches(window: &adw::ApplicationWindow, include_web_view: bool) -> boo
 }
 
 /// Whether to serve the built-in sample/demo data (for screenshots). Off unless
+/// The split reply's own height on its Paned: the divider position above
+/// the reader, and what the position leaves of the pane beneath it, where
+/// the position is the reader's height (#212).
+fn split_reply_height(split: &gtk::Paned, bottom: bool) -> i32 {
+    if bottom {
+        split.height() - split.position()
+    } else {
+        split.position()
+    }
+}
+
+/// Let (or forbid) the split reply's child of `split` shrink below the
+/// composer's minimum — needed for the slide, which runs the panel through
+/// heights the composer could not otherwise be allocated.
+fn set_split_shrink(split: &gtk::Paned, bottom: bool, shrink: bool) {
+    if bottom {
+        split.set_shrink_end_child(shrink);
+    } else {
+        split.set_shrink_start_child(shrink);
+    }
+}
+
 /// `VIREO_DEMO` is set, so removing all real accounts leaves the app blank.
 /// Stand-in [`AccountConfig`]s mirroring the demo backend's three accounts
 /// (same names, colours and emoji), so the Accounts window has something to
@@ -16825,6 +17155,21 @@ fn sidebar_output_msg(out: SidebarOutput) -> AppMsg {
 }
 
 /// Ask for a folder and write every attachment into it.
+/// Save one attachment via a file chooser (a card chip's save button, #213).
+fn save_attachment(att: Attachment, parent: Option<adw::ApplicationWindow>) {
+    let dialog = gtk::FileDialog::builder()
+        .initial_name(&att.name)
+        .title(&i18n("Save Attachment"))
+        .build();
+    dialog.save(parent.as_ref(), gtk::gio::Cancellable::NONE, move |res| {
+        if let Ok(file) = res {
+            if let Some(path) = file.path() {
+                let _ = std::fs::write(path, &att.data);
+            }
+        }
+    });
+}
+
 fn save_all_attachments(atts: Vec<Attachment>, parent: Option<adw::ApplicationWindow>) {
     let dialog = gtk::FileDialog::new();
     dialog.set_title(&i18n("Save All Attachments"));

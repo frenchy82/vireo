@@ -1351,7 +1351,10 @@ headerbar.compose-toolbar button.image-button {
   min-height: 1px;
 }
 .attachment-drawer-header {
-  padding: 4px 8px;
+  /* 2px tighter to the drawer's top edge than the sides and the bottom
+     (Jason, 2026-09-17): the seam's own 8px strip sits above this, so the
+     stock 4px left the header's row, "Save All…" included, sitting low. */
+  padding: 2px 8px 4px;
 }
 /* Split-reply divider: the separator is a flush strip of the composer's own
    ground (its background-color comes from the runtime theme CSS), so the

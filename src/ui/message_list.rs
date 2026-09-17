@@ -2210,6 +2210,46 @@ fn normalize_subject(subject: &str) -> String {
     s.trim().to_ascii_lowercase()
 }
 
+/// Which shown row stands for a reader key: the message's own row when the
+/// list has one, and otherwise the row of the conversation it belongs to.
+///
+/// With expandable conversations off, a reply never gets a row of its own and
+/// never will — the thread is only ever the one head row here. Without this
+/// fallback the reader's selection would find nothing to select, and the
+/// conversation would appear to deselect itself the moment one of its other
+/// messages was clicked in the reading pane (#211). The head row stands for
+/// the whole thread, so it is what stays lit however the user moves through
+/// the cards.
+///
+/// A conversation reaches across folders, so some of its cards — the user's
+/// own replies, pulled in from Sent — belong to no row in this folder at all
+/// and are not in `msg_thread` either. `viewed` is the row the open
+/// conversation was opened from, and `emitted` is that conversation as it was
+/// handed to the reader: a card from it keeps that row lit.
+fn row_for_reader_key(
+    key: &(u32, u32),
+    shown: &[Message],
+    msg_thread: &std::collections::HashMap<(u32, u32), (u32, String)>,
+    emitted: &[(u32, u32)],
+    viewed: Option<(u32, u32)>,
+) -> Option<usize> {
+    let own_row = shown.iter().position(|m| (m.account_id, m.id) == *key);
+    let thread_row = || {
+        let tkey = msg_thread.get(key)?;
+        shown
+            .iter()
+            .position(|m| msg_thread.get(&(m.account_id, m.id)) == Some(tkey))
+    };
+    let viewed_row = || {
+        if !emitted.contains(key) {
+            return None;
+        }
+        let viewed = viewed?;
+        shown.iter().position(|m| (m.account_id, m.id) == viewed)
+    };
+    own_row.or_else(thread_row).or_else(viewed_row)
+}
+
 /// Group messages into conversations by their reply headers (Message-ID linked
 /// via In-Reply-To / References), scoped per account. Returns each message's
 /// thread key `(account_id, root)`. Messages with no reply relationship get a
@@ -2689,8 +2729,13 @@ pub enum MessageListOutput {
     /// whole conversation when the row heads one (same shape as `Selected`),
     /// so the window shows every card — otherwise just `[message]`.
     Activated { message: Message, thread: Vec<Message> },
-    /// A context-menu action chosen for a specific message.
-    Action { action: RowAction, message: Box<Message> },
+    /// A context-menu or palette action chosen for a specific message.
+    /// `conversation` holds the thread when the row stands for a collapsed
+    /// conversation rather than for `message` alone, so a reply started there
+    /// can answer the conversation instead of the head it is filed under
+    /// (#210). Empty for an ordinary row, and for a head row shown alongside
+    /// its expanded replies — there the row means only itself.
+    Action { action: RowAction, message: Box<Message>, conversation: Vec<Message> },
     /// A tag toggled on a specific message (#71).
     SetTag { message: Box<Message>, keyword: String, add: bool },
     /// A bulk action chosen for every currently-selected message.
@@ -3376,8 +3421,13 @@ impl SimpleComponent for MessageList {
                 let list = self.rows.widget();
                 list.unselect_all();
                 for key in &keys {
-                    if let Some(idx) = self.shown.iter().position(|m| (m.account_id, m.id) == *key)
-                    {
+                    if let Some(idx) = row_for_reader_key(
+                        key,
+                        &self.shown,
+                        &self.msg_thread,
+                        &self.emitted_thread,
+                        self.selected_id,
+                    ) {
                         if let Some(row) = list.row_at_index(idx as i32) {
                             list.select_row(Some(&row));
                         }
@@ -3881,7 +3931,8 @@ impl SimpleComponent for MessageList {
                         return;
                     }
                 }
-                let _ = sender.output(MessageListOutput::Action { action, message });
+                let conversation = self.row_conversation(&message);
+                let _ = sender.output(MessageListOutput::Action { action, message, conversation });
             }
             MessageListInput::SetPaletteCollapse(secs) => self.palette_collapse_secs.set(secs),
             MessageListInput::SetPaletteHover(on) => self.palette_hover.set(on),
@@ -4040,13 +4091,16 @@ impl MessageList {
     ) {
         // Each entry carries the same icon as the reader-toolbar button (or
         // row-palette button) for that action, tying the two together.
+        let conversation = self.row_conversation(msg);
         let item = |action: RowAction, label: &str, icon: &str| -> MenuEntry {
             let s = sender.clone();
             let m = msg.clone();
+            let conversation = conversation.clone();
             MenuEntry::new(label, move || {
                 let _ = s.output(MessageListOutput::Action {
                     action,
                     message: Box::new(m.clone()),
+                    conversation: conversation.clone(),
                 });
             })
             .icon(icon)
@@ -5158,6 +5212,32 @@ impl MessageList {
     /// Every on-screen member of `m`'s conversation (oldest first) — from any
     /// member, head or reply. Empty when threading is off or `m` stands alone,
     /// so callers can treat non-empty as "this is a real thread".
+    /// The conversation a row stands for, or empty when the row means only its
+    /// own message. A row stands for its thread when it is the head of one and
+    /// the thread is not currently opened out in the list — which, with
+    /// expandable conversations off, it never is.
+    fn row_conversation(&self, m: &Message) -> Vec<Message> {
+        let members = self.thread_members(m);
+        let is_head = members
+            .first()
+            .is_some_and(|h| (h.account_id, h.id) == (m.account_id, m.id));
+        if !is_head {
+            return Vec::new();
+        }
+        let expanded = self.thread_expansion
+            && self
+                .msg_thread
+                .get(&(m.account_id, m.id))
+                .is_some_and(|key| {
+                    self.expanded_threads.contains(key) != self.default_expanded
+                });
+        if expanded {
+            Vec::new()
+        } else {
+            members
+        }
+    }
+
     fn thread_members(&self, m: &Message) -> Vec<Message> {
         if !self.threading {
             return Vec::new();
@@ -5305,7 +5385,7 @@ impl MessageList {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_thread_keys, swipe_progress_px, SWIPE_ARM, SWIPE_MAX};
+    use super::{compute_thread_keys, row_for_reader_key, swipe_progress_px, SWIPE_ARM, SWIPE_MAX};
     use crate::models::Message;
 
     fn msg(id: u32, message_id: &str, references: &str) -> Message {
@@ -5476,5 +5556,44 @@ mod tests {
         for (asked, expected) in [(0u32, 0u32), (1, 1), (3, 3), (9, 3)] {
             assert_eq!(asked.min(3), expected, "for {asked}");
         }
+    }
+
+    /// Clicking a reply's card keeps the conversation's row selected even when
+    /// the list never shows that reply a row of its own (#211).
+    #[test]
+    fn a_hidden_reply_selects_its_conversation_row() {
+        use std::collections::HashMap;
+        // The list shows the head of a three-message conversation, and one
+        // unrelated message below it.
+        let shown = [msg(1, "head@them", ""), msg(9, "other@them", "")];
+        let thread = (1u32, "head@them".to_string());
+        let msg_thread: HashMap<(u32, u32), (u32, String)> = [
+            ((1, 1), thread.clone()),
+            ((1, 2), thread.clone()),
+            ((1, 3), thread.clone()),
+        ]
+        .into_iter()
+        .collect();
+
+        // The conversation as the reader was given it, opened from its head
+        // row — including a message of the user's own, pulled in from Sent,
+        // which this folder has no row for and no thread entry either.
+        let emitted = [(1, 1), (1, 2), (1, 3), (1, 77)];
+        let viewed = Some((1, 1));
+        let row = |key: (u32, u32)| {
+            row_for_reader_key(&key, &shown, &msg_thread, &emitted, viewed)
+        };
+
+        // The head has a row of its own.
+        assert_eq!(row((1, 1)), Some(0));
+        // Its replies do not, and land on the head's row rather than nowhere.
+        assert_eq!(row((1, 2)), Some(0));
+        assert_eq!(row((1, 3)), Some(0));
+        // Neither does the copy from Sent, which this folder never lists.
+        assert_eq!(row((1, 77)), Some(0));
+        // A message in no conversation still matches only itself.
+        assert_eq!(row((1, 9)), Some(1));
+        // And one from neither is no row at all.
+        assert_eq!(row((1, 42)), None);
     }
 }

@@ -887,6 +887,14 @@ struct PrivacyFile {
     /// messages (#57); off keeps the full-bleed view.
     #[serde(default = "default_single_message_card")]
     single_message_card: bool,
+    /// Each conversation message lists its own attachments beneath its body
+    /// (#213), so which file came with which message is never in doubt.
+    #[serde(default = "default_card_attachments")]
+    card_attachments: bool,
+    /// The attachment drawer beneath the reader, gathering every attachment
+    /// in the open conversation (#213).
+    #[serde(default = "default_attachment_drawer")]
+    attachment_drawer: bool,
     /// Whether deleting a whole selected conversation asks for confirmation
     /// first.
     #[serde(default = "default_confirm_thread_delete")]
@@ -998,6 +1006,9 @@ struct PrivacyFile {
     /// where `compose_plain` above still says which of the two it is.
     #[serde(default)]
     compose_format: Option<ComposeFormat>,
+    /// Where the split reply opens in the reading pane (#212).
+    #[serde(default)]
+    reply_position: ReplyPosition,
     /// Whether the composer underlines misspelled words as you type.
     #[serde(default = "default_spellcheck")]
     spellcheck: bool,
@@ -1160,6 +1171,14 @@ fn default_thread_expansion() -> bool {
     false
 }
 
+fn default_card_attachments() -> bool {
+    true
+}
+
+fn default_attachment_drawer() -> bool {
+    true
+}
+
 fn default_single_message_card() -> bool {
     // On for new installs (Jason, 2026-08-31): lone messages get the same
     // inset card as conversations. Only a privacy.toml MISSING this key sees
@@ -1272,6 +1291,8 @@ impl Default for PrivacyFile {
             thread_newest_first: false,
             always_show_recipients: false,
             single_message_card: default_single_message_card(),
+            card_attachments: default_card_attachments(),
+            attachment_drawer: default_attachment_drawer(),
             confirm_thread_delete: default_confirm_thread_delete(),
             message_theme: MessageTheme::default(),
             override_fonts: false,
@@ -1299,6 +1320,7 @@ impl Default for PrivacyFile {
             paste_plain: default_paste_plain(),
             compose_plain: false,
             compose_format: None,
+            reply_position: ReplyPosition::default(),
             spellcheck: default_spellcheck(),
             spellcheck_langs: String::new(),
             sidebar_hover_expand: false,
@@ -2221,6 +2243,14 @@ pub fn load_single_message_card() -> bool {
     load_privacy().single_message_card
 }
 
+pub fn load_card_attachments() -> bool {
+    load_privacy().card_attachments
+}
+
+pub fn load_attachment_drawer() -> bool {
+    load_privacy().attachment_drawer
+}
+
 pub fn load_thread_expansion() -> bool {
     load_privacy().thread_expansion
 }
@@ -2265,6 +2295,23 @@ impl ComposeFormat {
     pub fn is_source(self) -> bool {
         matches!(self, ComposeFormat::Markdown | ComposeFormat::Html)
     }
+}
+
+/// Where the split reply opens in the reading pane (#212): above the
+/// messages (the original placement), below them, or wherever the newest
+/// message is — above with "newest message first", below otherwise, so the
+/// editor always continues the conversation in its reading direction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyPosition {
+    #[default]
+    Top,
+    Bottom,
+    Follow,
+}
+
+pub fn load_reply_position() -> ReplyPosition {
+    load_privacy().reply_position
 }
 
 /// What new messages start out as, falling back to the plain-text
@@ -2563,6 +2610,8 @@ pub fn save_privacy(
     thread_newest_first: bool,
     always_show_recipients: bool,
     single_message_card: bool,
+    card_attachments: bool,
+    attachment_drawer: bool,
     confirm_thread_delete: bool,
     message_theme: MessageTheme,
     override_fonts: bool,
@@ -2588,6 +2637,7 @@ pub fn save_privacy(
     compose_default_from: &str,
     paste_plain: bool,
     compose_format: ComposeFormat,
+    reply_position: ReplyPosition,
     spellcheck: bool,
     spellcheck_langs: String,
     preview_lines: u32,
@@ -2644,6 +2694,8 @@ pub fn save_privacy(
         thread_newest_first,
         always_show_recipients,
         single_message_card,
+        card_attachments,
+        attachment_drawer,
         confirm_thread_delete,
         message_theme,
         override_fonts,
@@ -2671,6 +2723,7 @@ pub fn save_privacy(
         // Both are written: the boolean is what an older version reads.
         compose_plain: compose_format == ComposeFormat::Plain,
         compose_format: Some(compose_format),
+        reply_position,
         spellcheck,
         // Every save is after the first load, which applied it.
         single_card_default_applied: true,

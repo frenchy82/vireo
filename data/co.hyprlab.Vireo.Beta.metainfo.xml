@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.33.1-beta.1" date="2026-09-17" type="development">
+      <description>
+        <p>Catch-up with stable 1.33.0: replies answer a conversation's newest message, a conversation's row stays selected while its messages are read, the reply editor can open beneath the reader, each message lists its own attachments, Conversations has its own Settings page, the attachment drawer's count is a button, and French is updated.</p>
+      </description>
+    </release>
     <release version="1.32.4-beta.1" date="2026-09-16" type="development">
       <description>
         <p>Catch-up with stable 1.32.3: the two strings the About page gained in 1.32.2 are translated in European and Brazilian Portuguese, so both are complete again.</p>

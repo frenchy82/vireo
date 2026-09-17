@@ -19,9 +19,11 @@
 //! reader pane is allowed to shrink, resizing the drawer never grows the
 //! window; while the drawer is collapsed a drag snaps back, so only the
 //! expanded drawer resizes. The size slider in the header scales the
-//! thumbnails only; a click on the grab pill collapses the grid to just the
-//! header. The dragged height, collapsed state and view settings are
-//! persisted; thumbnail size is per-session.
+//! thumbnails only; a click on the grab pill — or on the header's
+//! "N attachments" count, which is a button for exactly this — collapses the
+//! grid to just the header, and clicking again brings it back. The dragged
+//! height, collapsed state and view settings are persisted; thumbnail size is
+//! per-session.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -41,7 +43,7 @@ use crate::i18n::i18n;
 
 /// Whether an attachment can be shown in the drawer's lightbox: a decodable
 /// image, or a PDF (whose first page renders on demand).
-fn previewable(att: &Attachment) -> bool {
+pub(crate) fn previewable(att: &Attachment) -> bool {
     (is_image_name(&att.name) && texture_from(&att.data).is_some()) || is_pdf_name(&att.name)
 }
 
@@ -133,6 +135,8 @@ pub enum DrawerOutput {
     /// Show the app's full-window lightbox over these previewable
     /// attachments, starting at `start`.
     ShowLightbox { items: Vec<Attachment>, start: usize },
+    /// Scroll the reader to the message this attachment came with (#213).
+    ShowInMessage(Attachment),
 }
 
 #[derive(Debug)]
@@ -157,6 +161,8 @@ pub enum AttachmentDrawerInput {
     Activate(usize),
     /// Save an attachment to disk (file chooser).
     Download(usize),
+    /// Scroll the reader to the message the attachment belongs to (#213).
+    ShowInMessage(usize),
     /// Save every attachment into a chosen folder ("Save All" header button).
     SaveAll,
     /// Right-click at (x, y) within the cell.
@@ -171,6 +177,10 @@ pub enum AttachmentDrawerInput {
     /// A click landed on the seam itself (the Paned separator, or the
     /// drawer's topmost strip) — toggles like a pill click.
     EdgeClicked,
+    /// The header's "N attachments" button was clicked — toggles the drawer
+    /// like the seam does, from the one part of the header that is always
+    /// visible (collapsed included).
+    CountClicked,
     /// The expand/collapse slide finished. Carries the state it was heading
     /// for and the generation it belongs to (see `toggle_gen`).
     ToggleSettled { collapsed: bool, gen: u64 },
@@ -227,18 +237,63 @@ impl SimpleComponent for AttachmentDrawer {
                     set_orientation: gtk::Orientation::Horizontal,
                     set_spacing: 8,
                     add_css_class: "attachment-drawer-header",
-                    gtk::Image {
-                        set_icon_name: Some("co.hyprlab.Vireo-mail-attachment-symbolic"),
-                        add_css_class: "dim-label",
-                    },
-                    gtk::Label {
+                    // The count is the drawer's other handle: clicking it
+                    // expands or collapses exactly like a click on the seam,
+                    // with the chevron showing which way it goes next.
+                    #[name = "count_btn"]
+                    gtk::Button {
+                        add_css_class: "flat",
+                        // GTK hands a button with a plain label the
+                        // `text-button` padding and one with an icon the
+                        // `image-button` padding; a button with a child of its
+                        // own (this one: clip, count, chevron) gets neither and
+                        // ends up tighter than "Save All…" beside it. Ask for
+                        // the text one by hand so the two pills match.
+                        add_css_class: "text-button",
+                        set_valign: gtk::Align::Center,
+                        // A hair off the header's own inset at each end
+                        // (Jason, 2026-09-17): the count and "Save All…" are
+                        // the row's two pills, so they sit the same distance
+                        // from the edge they face.
+                        set_margin_start: 3,
                         #[watch]
-                        set_label: &format!(
-                            "{} attachment{}",
-                            model.items.len(),
-                            if model.items.len() == 1 { "" } else { "s" },
-                        ),
-                        add_css_class: "heading",
+                        set_tooltip_text: Some(if model.collapsed {
+                            i18n("Show the attachments")
+                        } else {
+                            i18n("Hide the attachments")
+                        }.as_str()),
+                        connect_clicked[sender] => move |_| {
+                            sender.input(AttachmentDrawerInput::CountClicked);
+                        },
+
+                        #[wrap(Some)]
+                        set_child = &gtk::Box {
+                            set_orientation: gtk::Orientation::Horizontal,
+                            set_spacing: 8,
+                            gtk::Image {
+                                set_icon_name: Some("co.hyprlab.Vireo-mail-attachment-symbolic"),
+                                add_css_class: "dim-label",
+                            },
+                            gtk::Label {
+                                #[watch]
+                                set_label: &format!(
+                                    "{} attachment{}",
+                                    model.items.len(),
+                                    if model.items.len() == 1 { "" } else { "s" },
+                                ),
+                                add_css_class: "heading",
+                            },
+                            gtk::Image {
+                                #[watch]
+                                set_icon_name: Some(if model.collapsed {
+                                    "co.hyprlab.Vireo-pan-up-symbolic"
+                                } else {
+                                    "co.hyprlab.Vireo-pan-down-symbolic"
+                                }),
+                                add_css_class: "dim-label",
+                                set_pixel_size: 12,
+                            },
+                        },
                     },
                     gtk::Box { set_hexpand: true },
                     gtk::Image {
@@ -313,6 +368,8 @@ impl SimpleComponent for AttachmentDrawer {
                         set_label: &i18n("Save All…"),
                         // A standing button, not a flat hover-reveal.
                         set_valign: gtk::Align::Center,
+                        // Matching the count's inset at the other end.
+                        set_margin_end: 3,
                         set_tooltip_text: Some(i18n("Save every attachment to a folder").as_str()),
                         connect_clicked[sender] => move |_| {
                             sender.input(AttachmentDrawerInput::SaveAll);
@@ -503,6 +560,16 @@ impl SimpleComponent for AttachmentDrawer {
                 move |want| s2.input(AttachmentDrawerInput::PillDrag { want }),
             );
         }
+        // VIREO_SHOWCASE_DRAWER=N clicks the header's count button N times,
+        // one a second from 6s — the real button press, so the capture proves
+        // the click path and not just the input it sends.
+        if let Some(Ok(n)) = std::env::var("VIREO_SHOWCASE_DRAWER").ok().map(|v| v.parse::<u32>()) {
+            let btn = widgets.count_btn.clone();
+            for i in 0..n {
+                let btn = btn.clone();
+                glib::timeout_add_seconds_local_once(6 + i, move || btn.emit_clicked());
+            }
+        }
         ComponentParts { model, widgets }
     }
 
@@ -579,6 +646,11 @@ impl SimpleComponent for AttachmentDrawer {
                     self.save_attachment(&att);
                 }
             }
+            AttachmentDrawerInput::ShowInMessage(i) => {
+                if let Some(att) = self.item_at(i).cloned() {
+                    let _ = sender.output(DrawerOutput::ShowInMessage(att));
+                }
+            }
             AttachmentDrawerInput::Activate(i) => {
                 // Single clicks do nothing at all (a first click must never
                 // steal the second — a modal lightbox on click one made the
@@ -641,6 +713,12 @@ impl SimpleComponent for AttachmentDrawer {
                 if !self.pill_dragged {
                     self.toggle_collapsed(&sender);
                 }
+            }
+            AttachmentDrawerInput::CountClicked => {
+                // A real button, never part of a drag: it toggles
+                // unconditionally (the seam's `pill_dragged` guard would
+                // otherwise swallow the first click after any resize).
+                self.toggle_collapsed(&sender);
             }
             AttachmentDrawerInput::ToggleSettled { collapsed, gen } => {
                 // A skipped slide's settle arrives late; its work was already
@@ -939,6 +1017,13 @@ impl AttachmentDrawer {
         let download =
             MenuEntry::new(i18n("Download…"), move || s.input(AttachmentDrawerInput::Download(index)))
                 .icon("co.hyprlab.Vireo-folder-download-symbolic");
+        // The drawer gathers the whole conversation's files; this finds the
+        // message a file came with (#213).
+        let s = sender.clone();
+        let show = MenuEntry::new(i18n("Show in Message"), move || {
+            s.input(AttachmentDrawerInput::ShowInMessage(index))
+        })
+        .icon("co.hyprlab.Vireo-mail-unread-symbolic");
 
         // Anchor on the clicked cell itself so the click point (already
         // relative to it) needs no coordinate translation.
@@ -947,7 +1032,7 @@ impl AttachmentDrawer {
             .child_at_index(index as i32)
             .map(|c| c.upcast())
             .unwrap_or_else(|| self.flow.clone().upcast());
-        show_context_menu(&parent, x, y, vec![vec![open, download]]);
+        show_context_menu(&parent, x, y, vec![vec![open, download], vec![show]]);
     }
 
     /// Ask the app to show its full-window lightbox over the message's

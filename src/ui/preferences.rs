@@ -38,6 +38,10 @@ pub struct PrefInit {
     pub always_show_recipients: bool,
     /// Lone messages render as inset cards, like conversation messages.
     pub single_message_card: bool,
+    /// Each conversation message lists its own attachments (#213).
+    pub card_attachments: bool,
+    /// The attachment drawer beneath the reader is shown (#213).
+    pub attachment_drawer: bool,
     /// Conversation rows may expand into their members in the message list.
     pub thread_expansion: bool,
     /// Deleting a whole selected conversation asks for confirmation.
@@ -83,6 +87,8 @@ pub struct PrefInit {
     pub plain_font: String,
     /// New messages start as plain text (#180).
     pub compose_format: crate::config::ComposeFormat,
+    /// Where the split reply opens in the reading pane (#212).
+    pub reply_position: crate::config::ReplyPosition,
     pub app_theme: AppTheme,
     /// The appearance theme's id ("system" for the stock GNOME colours).
     pub theme: String,
@@ -622,6 +628,7 @@ const SIDE_PAGES: &[(&str, &[SidePage])] = &[
             SidePage { id: "appearance", title: i18n_noop("Appearance"), icon: "co.hyprlab.Vireo-preferences-desktop-appearance-symbolic", accounts: false },
             SidePage { id: "sidebar", title: i18n_noop("Sidebar"), icon: "co.hyprlab.Vireo-sidebar-show-symbolic", accounts: false },
             SidePage { id: "list", title: i18n_noop("Message List"), icon: "co.hyprlab.Vireo-view-list-bullet-symbolic", accounts: false },
+            SidePage { id: "conversations", title: i18n_noop("Conversations"), icon: "co.hyprlab.Vireo-chat-bubbles-text-symbolic", accounts: false },
             SidePage { id: "reading", title: i18n_noop("Reading"), icon: "co.hyprlab.Vireo-mail-read-symbolic", accounts: false },
             SidePage { id: "composing", title: i18n_noop("Composing"), icon: "co.hyprlab.Vireo-document-edit-symbolic", accounts: false },
             SidePage { id: "privacy", title: i18n_noop("Privacy"), icon: "co.hyprlab.Vireo-security-high-symbolic", accounts: false },
@@ -740,6 +747,8 @@ pub enum PrefInput {
     ToggleThreadNewestFirst(bool),
     ToggleAlwaysShowRecipients(bool),
     ToggleSingleMessageCard(bool),
+    ToggleCardAttachments(bool),
+    ToggleAttachmentDrawer(bool),
     ToggleThreadExpansion(bool),
     ToggleConfirmThreadDelete(bool),
     ChangeCardActionsMode(u32),
@@ -823,6 +832,7 @@ pub enum PrefInput {
     TogglePlainMonospace(bool),
     ChangePlainFont(String),
     ChangeComposeFormat(u32),
+    ChangeReplyPosition(u32),
     ChangeAppTheme(u32),
     ChangeTheme(String),
     ChangeSettingsOpen(u32),
@@ -871,6 +881,8 @@ pub enum PrefOutput {
     SetThreadNewestFirst(bool),
     SetAlwaysShowRecipients(bool),
     SetSingleMessageCard(bool),
+    SetCardAttachments(bool),
+    SetAttachmentDrawer(bool),
     SetThreadExpansion(bool),
     SetConfirmThreadDelete(bool),
     SetCardActionsMode { hover_toggle: bool, hover_auto: bool },
@@ -935,6 +947,7 @@ pub enum PrefOutput {
     SetPlainMonospace(bool),
     SetPlainFont(String),
     SetComposeFormat(crate::config::ComposeFormat),
+    SetReplyPosition(crate::config::ReplyPosition),
     Closed,
 }
 
@@ -1062,7 +1075,7 @@ impl Component for Preferences {
             set_default_width: 920,
             // The same size every time: the two-pane layout (#141) fits its
             // sidebar at this height, and nothing is remembered from a resize.
-            set_default_height: 772,
+            set_default_height: 810,
             set_title: Some(i18n("Settings").as_str()),
             // Closing hides: the window is kept and shown again next time.
             set_hide_on_close: true,
@@ -1708,7 +1721,7 @@ impl Component for Preferences {
                                 },
                             },
 
-                            add_named[Some("reading")] = &adw::PreferencesPage {
+                            add_named[Some("conversations")] = &adw::PreferencesPage {
                                 add = &adw::PreferencesGroup {
                                     set_title: &i18n("Conversations"),
 
@@ -1759,6 +1772,39 @@ impl Component for Preferences {
                                         },
                                     },
 
+                                    #[name = "reply_position_row"]
+                                    adw::ComboRow {
+                                        set_title: &i18n("Reply editor"),
+                                        set_subtitle: &i18n("Where a reply or forward opens in the reading \
+                                                       pane. Following the reading order puts it above the \
+                                                       messages with newest first, and below them otherwise, \
+                                                       so it continues the conversation where it ends."),
+                                        connect_selected_notify[sender] => move |row| {
+                                            sender.input(PrefInput::ChangeReplyPosition(row.selected()));
+                                        },
+                                    },
+
+                                    #[name = "card_attachments_row"]
+                                    adw::SwitchRow {
+                                        set_title: &i18n("Attachments on each message"),
+                                        set_subtitle: &i18n("List a message's attachments beneath it in a \
+                                                       conversation, so which file came with which message \
+                                                       is clear. Click one to open it."),
+                                        connect_active_notify[sender] => move |row| {
+                                            sender.input(PrefInput::ToggleCardAttachments(row.is_active()));
+                                        },
+                                    },
+
+                                    #[name = "attachment_drawer_row"]
+                                    adw::SwitchRow {
+                                        set_title: &i18n("Attachment drawer"),
+                                        set_subtitle: &i18n("Gather every attachment in the open conversation \
+                                                       in a drawer beneath the messages."),
+                                        connect_active_notify[sender] => move |row| {
+                                            sender.input(PrefInput::ToggleAttachmentDrawer(row.is_active()));
+                                        },
+                                    },
+
                                     #[name = "confirm_thread_delete_row"]
                                     adw::SwitchRow {
                                         set_title: &i18n("Confirm conversation deletion"),
@@ -1770,7 +1816,9 @@ impl Component for Preferences {
                                         },
                                     },
                                 },
+                            },
 
+                            add_named[Some("reading")] = &adw::PreferencesPage {
                                 add = &adw::PreferencesGroup {
                                     set_title: &i18n("Reading"),
 
@@ -2638,6 +2686,8 @@ impl Component for Preferences {
         widgets.thread_newest_first_row.set_active(init.thread_newest_first);
         widgets.always_show_recipients_row.set_active(init.always_show_recipients);
         widgets.single_message_card_row.set_active(init.single_message_card);
+        widgets.card_attachments_row.set_active(init.card_attachments);
+        widgets.attachment_drawer_row.set_active(init.attachment_drawer);
         widgets.thread_expansion_row.set_active(init.thread_expansion);
         widgets.confirm_thread_delete_row.set_active(init.confirm_thread_delete);
         widgets.card_actions_row.set_model(Some(&gtk::StringList::new(&[
@@ -2718,6 +2768,17 @@ impl Component for Preferences {
             crate::config::ComposeFormat::Markdown => 1,
             crate::config::ComposeFormat::Html => 2,
             crate::config::ComposeFormat::Plain => 3,
+        });
+        widgets.reply_position_row.set_model(Some(&gtk::StringList::new(&[
+            &i18n("Above the messages"),
+            &i18n("Below the messages"),
+            &i18n("Follows the reading order"),
+        ])));
+        no_truncate(&widgets.reply_position_row);
+        widgets.reply_position_row.set_selected(match init.reply_position {
+            crate::config::ReplyPosition::Top => 0,
+            crate::config::ReplyPosition::Bottom => 1,
+            crate::config::ReplyPosition::Follow => 2,
         });
         widgets.spellcheck_row.set_active(init.spellcheck);
         // The language dropdown offers exactly what checking can use: the
@@ -3124,6 +3185,12 @@ impl Component for Preferences {
             PrefInput::ToggleSingleMessageCard(on) => {
                 let _ = sender.output(PrefOutput::SetSingleMessageCard(on));
             }
+            PrefInput::ToggleCardAttachments(on) => {
+                let _ = sender.output(PrefOutput::SetCardAttachments(on));
+            }
+            PrefInput::ToggleAttachmentDrawer(on) => {
+                let _ = sender.output(PrefOutput::SetAttachmentDrawer(on));
+            }
             PrefInput::ChangeCardActionsMode(index) => {
                 self.card_actions_hover = index == 0;
                 let (hover_toggle, hover_auto) = match index {
@@ -3501,6 +3568,14 @@ impl Component for Preferences {
                     _ => crate::config::ComposeFormat::Rich,
                 };
                 let _ = sender.output(PrefOutput::SetComposeFormat(format));
+            }
+            PrefInput::ChangeReplyPosition(idx) => {
+                let position = match idx {
+                    1 => crate::config::ReplyPosition::Bottom,
+                    2 => crate::config::ReplyPosition::Follow,
+                    _ => crate::config::ReplyPosition::Top,
+                };
+                let _ = sender.output(PrefOutput::SetReplyPosition(position));
             }
         }
     }
