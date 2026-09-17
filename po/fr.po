@@ -6,7 +6,7 @@ msgstr ""
 "Project-Id-Version: vireo\n"
 "Report-Msgid-Bugs-To: https://github.com/hyprlab/vireo/issues\n"
 "POT-Creation-Date: \n"
-"PO-Revision-Date: 2026-09-16 18:14+0200\n"
+"PO-Revision-Date: 2026-09-17 18:01+0200\n"
 "Last-Translator: cartes <cartes341@free.fr>\n"
 "Language-Team: French\n"
 "Language: fr\n"
@@ -544,9 +544,8 @@ msgid "Remove"
 msgstr "Supprimer"
 
 #. One-sentence description, directly under the version chip.
-#, fuzzy
 msgid "A fast, GNOME-native email client"
-msgstr "Un client e-mail épuré, rapide et natif pour GNOME."
+msgstr "Un client de messagerie rapide et natif pour GNOME"
 
 msgid ""
 "This is a beta build for trying upcoming changes early. Expect bugs and "
@@ -581,7 +580,7 @@ msgid "Website"
 msgstr "Site web"
 
 msgid "Report an issue or feature request"
-msgstr ""
+msgstr "Signaler un problème ou une demande de fonctionnalité"
 
 msgid "Contact — hyprlab@proton.me"
 msgstr "Contact — hyprlab@proton.me"
@@ -736,9 +735,10 @@ msgstr "Rédiger"
 msgid "Back out of a reply and return to the list"
 msgstr "Quitter la réponse et revenir à la liste"
 
-#, fuzzy
 msgid "Undo the last action, or the last edit while you are writing"
-msgstr "Annuler la dernière action (également dans le menu principal)"
+msgstr ""
+"Annuler la dernière action ou la dernière modification pendant que vous "
+"écrivez"
 
 msgid "Redo it (Ctrl+Y does the same)"
 msgstr "La rétablir (Ctrl+Y fait de même)"
@@ -2358,16 +2358,14 @@ msgstr "Impossible de téléverser {name}"
 msgid "Attach Files"
 msgstr "Joindre des fichiers"
 
-#, fuzzy
 msgid "Attach {name}"
-msgstr "Joindre quand même"
+msgstr "Joindre {name}"
 
-#, fuzzy
 msgid "Remove {name}"
-msgstr "{name} supprimé?"
+msgstr "Supprimer {name}"
 
 msgid "Typing"
-msgstr ""
+msgstr "Dactylographie"
 
 msgid "Cannot send with OpenPGP"
 msgstr "Impossible d'envoyer avec OpenPGP"
@@ -2415,11 +2413,10 @@ msgstr "Cette heure est déjà passée"
 msgid "Choose a time later than now."
 msgstr "Choisissez une heure ultérieure à maintenant."
 
-#, fuzzy
 msgid "{n} attachment"
 msgid_plural "{n} attachments"
-msgstr[0] "Aucune pièce jointe"
-msgstr[1] "Aucune pièce jointe"
+msgstr[0] "{n} pièce jointe"
+msgstr[1] "{n} pièces jointes"
 
 msgid "Contacts"
 msgstr "Contacts"
